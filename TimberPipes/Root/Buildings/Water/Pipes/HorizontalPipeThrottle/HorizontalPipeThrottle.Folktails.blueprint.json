@@ -4,15 +4,19 @@
         "LoopingSoundName": "",
         "BuildingCost": [
             {
-                "Id": "Log",
-                "Amount": 1
+                "Id": "TreatedPlank",
+                "Amount": 5
+            },
+            {
+                "Id": "MetalBlock",
+                "Amount": 5
             },
             {
                 "Id": "Gear",
                 "Amount": 1
             }
         ],
-        "ScienceCost": 50,
+        "ScienceCost": 500,
         "PlaceFinished": false,
         "FinishableWithBeaversOnSite": true,
         "DrawRangeBoundsOnIt": false
@@ -26,7 +30,7 @@
         "UndergroundModelDepth": 0
     },
     "TemplateSpec": {
-        "TemplateName": "HorizontalPipeValve.Folktails",
+        "TemplateName": "HorizontalPipeThrottle.Folktails",
         "BackwardCompatibleTemplateNames": [],
         "RequiredFeatureToggle": "",
         "DisablingFeatureToggle": ""
@@ -67,7 +71,7 @@
     },
     "PlaceableBlockObjectSpec": {
         "ToolGroupId": "Pipes",
-        "ToolOrder": 10,
+        "ToolOrder": 95,
         "ToolShape": "Square",
         "Layout": "Single",
         "CustomPivot": {
@@ -82,10 +86,10 @@
         "DevModeTool": false
     },
     "LabeledEntitySpec": {
-        "DisplayNameLocKey": "LV.TPi.HorizontalPipeValveName",
-        "DescriptionLocKey": "LV.TPi.HorizontalPipeValveDesc",
-        "FlavorDescriptionLocKey": "LV.TPi.HorizontalPipeValveFlavor",
-        "Icon": "Buildings/Water/Pipes/HorizontalPipeValve/HorizontalPipeValveIcon"
+        "DisplayNameLocKey": "LV.TPi.HorizontalPipeThrottleName",
+        "DescriptionLocKey": "LV.TPi.HorizontalPipeThrottleDesc",
+        "FlavorDescriptionLocKey": "LV.TPi.HorizontalPipeThrottleFlavor",
+        "Icon": "Buildings/Water/Pipes/HorizontalPipeThrottle/HorizontalPipeThrottleIcon"
     },
     "BuildingPipeSpec": {
         "Ports": [
@@ -112,7 +116,8 @@
     "TransportPipeSpec": {},
     "DirectedPipeSpec": {},
     "ValvePipeSpec": {},
-    "ExtractionPipeSpec": {},
+    "OutflowCounterSpec": {},
+    "FlowLimitPipeSpec": {},
     "ConstructionSiteProgressVisualizerSpec": {
         "ProgressThresholds": [
             0.0
@@ -142,12 +147,7 @@
             "Children": {
                 "#Straight": {
                     "TimbermeshSpec": {
-                        "Model": "Buildings/Water/Pipes/HorizontalPipeValve/Models/HorizontalPipeValve.Folktails.Model"
-                    }
-                },
-                "#Building": {
-                    "TimbermeshSpec": {
-                        "Model": "Buildings/Water/Pipes/HorizontalPipeValve/Models/HorizontalPipeValve.Folktails.Building.Model"
+                        "Model": "Buildings/Water/Pipes/HorizontalPipeThrottle/Models/HorizontalPipeThrottle.Folktails.Model"
                     }
                 }
             }
@@ -159,7 +159,7 @@
                 },
                 "ConstructionStage0": {
                     "TimbermeshSpec": {
-                        "Model": "Buildings/Water/Pipes/HorizontalPipeValve/Models/HorizontalPipeValve.Folktails.Model"
+                        "Model": "Buildings/Water/Pipes/HorizontalPipeThrottle/Models/HorizontalPipeThrottle.Folktails.Model"
                     },
                     "CollidersSpec": {
                         "BoxColliders": [
