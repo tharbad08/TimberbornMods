@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>EBRSupportTest</AssemblyName>
+    <RootNamespace>EBRSupportTest</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="Stub/Timberborn.ModManagerScene.csproj" Private="false" />
+  </ItemGroup>
+</Project>
