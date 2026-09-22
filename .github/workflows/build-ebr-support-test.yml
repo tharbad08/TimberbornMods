@@ -8,9 +8,6 @@ on:
       - 'TestBuild/EBRSupportTest/**'
       - '.github/workflows/build-ebr-support-test.yml'
 
-permissions:
-  contents: write
-
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -48,16 +45,9 @@ jobs:
           cd /tmp/EBRSupportTest
           zip -r EBRSupportTest.zip EBRSupportTest
 
-      - name: Publish test zip
-        run: |
-          mkdir -p TestBuild/artifacts
-          cp /tmp/EBRSupportTest/EBRSupportTest.zip TestBuild/artifacts/EBRSupportTest.zip
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git add TestBuild/artifacts/EBRSupportTest.zip
-          if git diff --cached --quiet; then
-            echo "Artifact unchanged"
-          else
-            git commit -m "test: publish EBR support test build [skip ci]"
-            git push origin HEAD:test/extended-builder-reach-unfinished-support
-          fi
+      - name: Upload test zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: EBRSupportTest
+          path: /tmp/EBRSupportTest/EBRSupportTest.zip
+          if-no-files-found: error
