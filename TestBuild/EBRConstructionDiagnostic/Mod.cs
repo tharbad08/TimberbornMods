@@ -407,13 +407,37 @@ internal static class Diagnostic
     static string FormatCoords(object coords)
         => "(" + GetInt(coords, "x") + "," + GetInt(coords, "y") + "," + GetInt(coords, "z") + ")";
 
-    sealed record ValidatorState(string TypeName, bool IsValid);
+    sealed class ValidatorState
+    {
+        public string TypeName { get; }
+        public bool IsValid { get; }
 
-    sealed record SuspiciousState(
-        object UpperBlockObject,
-        List<object> Supports,
-        List<ValidatorState> Validators,
-        string GroundingRecheck);
+        public ValidatorState(string typeName, bool isValid)
+        {
+            TypeName = typeName;
+            IsValid = isValid;
+        }
+    }
+
+    sealed class SuspiciousState
+    {
+        public object UpperBlockObject { get; }
+        public List<object> Supports { get; }
+        public List<ValidatorState> Validators { get; }
+        public string GroundingRecheck { get; }
+
+        public SuspiciousState(
+            object upperBlockObject,
+            List<object> supports,
+            List<ValidatorState> validators,
+            string groundingRecheck)
+        {
+            UpperBlockObject = upperBlockObject;
+            Supports = supports;
+            Validators = validators;
+            GroundingRecheck = groundingRecheck;
+        }
+    }
 
     sealed class ReferenceEqualityComparer : IEqualityComparer<object>
     {
