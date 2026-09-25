@@ -1,16 +1,10 @@
 ID,Text,Comment
 ModSetting.TWAllWeatherDrill.NormalWeatherScale,Temperate flow rate,
-ModSetting.TWAllWeatherDrill.NormalWeatherScaleDesc,"Scale applied when Temperate is the active weather and no Moddable Weathers modifier is active. Vanilla drill value = 1"
+ModSetting.TWAllWeatherDrill.NormalWeatherScaleDesc,"Scale applied to Temperate, Rain, Surprisingly Refreshing/Refreshing and Monsoon, unless Badtide or Drought is also active. Vanilla drill value = 1"
 ModSetting.TWAllWeatherDrill.BadtideWeatherScale,Badtide flow rate,
 ModSetting.TWAllWeatherDrill.BadtideWeatherScaleDesc,"Scale applied whenever Badtide is active, whether Badtide is the base weather or a Moddable Weathers modifier. Vanilla drill value = 0"
 ModSetting.TWAllWeatherDrill.DroughtWeatherScale,Drought flow rate,
 ModSetting.TWAllWeatherDrill.DroughtWeatherScaleDesc,"Scale applied whenever Drought is active, whether Drought is the base weather or a Moddable Weathers modifier. Vanilla drill value = 0"
-ModSetting.TWAllWeatherDrill.RainWeatherScale,Rain flow rate,
-ModSetting.TWAllWeatherDrill.RainWeatherScaleDesc,"Scale applied whenever Rain is active, whether Rain is the base weather or a Moddable Weathers modifier."
-ModSetting.TWAllWeatherDrill.MonsoonWeatherScale,Monsoon flow rate,
-ModSetting.TWAllWeatherDrill.MonsoonWeatherScaleDesc,"Scale applied whenever Monsoon is active, whether Monsoon is the base weather or a Moddable Weathers modifier."
-ModSetting.TWAllWeatherDrill.RefreshingWeatherScale,Refreshing flow rate,
-ModSetting.TWAllWeatherDrill.RefreshingWeatherScaleDesc,"Scale applied whenever Surprisingly Refreshing / Refreshing is active, whether it is the base weather or a Moddable Weathers modifier."
 ModSetting.TWAllWeatherDrill.OtherWeatherScale,Unrecognized weather flow rate,
 ModSetting.TWAllWeatherDrill.OtherWeatherScaleDesc,"Scale applied when Moddable Weathers reports a base weather or modifier that this version of All Weather Drill does not recognize."
 ModSetting.TWAllWeatherDrill.PowerScale,Drill power requirement,
