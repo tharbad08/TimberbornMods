@@ -3,7 +3,7 @@
   "Version": "1.0.5-local",
   "Id": "TonWolfe.AllWeatherDrill",
   "MinimumGameVersion": "1.0.11.2",
-  "Description": "Makes aquifer drills produce water during all weather conditions. Adds separate flow settings for Temperate, Drought, Badtide, Rain, Monsoon, Refreshing, and unknown Moddable Weathers conditions. Base weather and modifier forms are treated as the same condition. The live Moddable Weathers stage is queried when drill strength is calculated, so loading a save in the middle of an event does not reset flow to temperate.",
+  "Description": "Makes aquifer drills produce water during all weather conditions. Uses separate flow settings for Temperate, Drought, Badtide, and unknown Moddable Weathers conditions. Rain, Refreshing and Monsoon use Temperate scaling; Badtide and Drought take precedence whether they are base weather or modifiers. The live Moddable Weathers stage is queried when drill strength is calculated, so loading a save in the middle of an event does not reset flow to temperate.",
   "RequiredMods": [
     { "Id": "Harmony", "MinimumVersion": "0.6.0.0" },
     { "Id": "eMka.ModSettings" }
