@@ -44,9 +44,6 @@ namespace TonWolfe.AllWeatherDrill
         public ModSetting<float> NormalWeatherScale { get; } = new ModSetting<float>(0.7f, ModSettingDescriptor.CreateLocalized("ModSetting.TWAllWeatherDrill.NormalWeatherScale").SetLocalizedTooltip("ModSetting.TWAllWeatherDrill.NormalWeatherScaleDesc"));
         public ModSetting<float> BadtideWeatherScale { get; } = new ModSetting<float>(0.6f, ModSettingDescriptor.CreateLocalized("ModSetting.TWAllWeatherDrill.BadtideWeatherScale").SetLocalizedTooltip("ModSetting.TWAllWeatherDrill.BadtideWeatherScaleDesc"));
         public ModSetting<float> DroughtWeatherScale { get; } = new ModSetting<float>(0.4f, ModSettingDescriptor.CreateLocalized("ModSetting.TWAllWeatherDrill.DroughtWeatherScale").SetLocalizedTooltip("ModSetting.TWAllWeatherDrill.DroughtWeatherScaleDesc"));
-        public ModSetting<float> RainWeatherScale { get; } = new ModSetting<float>(0.7f, ModSettingDescriptor.CreateLocalized("ModSetting.TWAllWeatherDrill.RainWeatherScale").SetLocalizedTooltip("ModSetting.TWAllWeatherDrill.RainWeatherScaleDesc"));
-        public ModSetting<float> MonsoonWeatherScale { get; } = new ModSetting<float>(0.6f, ModSettingDescriptor.CreateLocalized("ModSetting.TWAllWeatherDrill.MonsoonWeatherScale").SetLocalizedTooltip("ModSetting.TWAllWeatherDrill.MonsoonWeatherScaleDesc"));
-        public ModSetting<float> RefreshingWeatherScale { get; } = new ModSetting<float>(0.6f, ModSettingDescriptor.CreateLocalized("ModSetting.TWAllWeatherDrill.RefreshingWeatherScale").SetLocalizedTooltip("ModSetting.TWAllWeatherDrill.RefreshingWeatherScaleDesc"));
         public ModSetting<float> OtherWeatherScale { get; } = new ModSetting<float>(0.6f, ModSettingDescriptor.CreateLocalized("ModSetting.TWAllWeatherDrill.OtherWeatherScale").SetLocalizedTooltip("ModSetting.TWAllWeatherDrill.OtherWeatherScaleDesc"));
         public ModSetting<float> PowerScale { get; } = new ModSetting<float>(1.5f, ModSettingDescriptor.CreateLocalized("ModSetting.TWAllWeatherDrill.PowerScale").SetLocalizedTooltip("ModSetting.TWAllWeatherDrill.PowerScaleDesc"));
 
@@ -62,7 +59,7 @@ namespace TonWolfe.AllWeatherDrill
         public void Unload() { Instance = null; }
     }
 
-    internal enum DrillWeatherKind { Temperate, Drought, Badtide, Rain, Monsoon, Refreshing, Other }
+    internal enum DrillWeatherKind { Temperate, Drought, Badtide, Other }
 
     internal static class CurrentWeatherResolver
     {
@@ -74,12 +71,31 @@ namespace TonWolfe.AllWeatherDrill
             HashSet<string> mods;
             if (TryReadModdableWeather(observer, out baseId, out mods))
             {
+                // Hazardous concepts win regardless of whether they are the base weather
+                // or a Moddable Weathers modifier.
                 if (Is(baseId, "BadtideWeather", "Badtide") || mods.Contains("Badtide")) return DrillWeatherKind.Badtide;
                 if (Is(baseId, "DroughtWeather", "Drought") || mods.Contains("Drought")) return DrillWeatherKind.Drought;
-                if (Is(baseId, "Monsoon") || mods.Contains("Monsoon")) return DrillWeatherKind.Monsoon;
-                if (Is(baseId, "Rain") || mods.Contains("Rain")) return DrillWeatherKind.Rain;
-                if (Is(baseId, "SurprisinglyRefreshing", "Refreshing") || mods.Contains("Refreshing")) return DrillWeatherKind.Refreshing;
-                if (Is(baseId, "TemperateWeather", "Temperate") && mods.Count == 0) return DrillWeatherKind.Temperate;
+
+                // Rain, Surprisingly Refreshing/Refreshing and Monsoon are all
+                // treated as temperate for drill scaling. Monsoon + Badtide is
+                // already caught by the Badtide rule above.
+                bool knownTemperateBase = Is(baseId,
+                    "TemperateWeather", "Temperate",
+                    "Rain",
+                    "Monsoon",
+                    "SurprisinglyRefreshing", "Refreshing");
+
+                bool onlyTemperateModifiers = true;
+                foreach (string mod in mods)
+                {
+                    if (!Is(mod, "Rain", "Monsoon", "Refreshing"))
+                    {
+                        onlyTemperateModifiers = false;
+                        break;
+                    }
+                }
+
+                if (knownTemperateBase && onlyTemperateModifiers) return DrillWeatherKind.Temperate;
                 return DrillWeatherKind.Other;
             }
 
@@ -220,9 +236,6 @@ namespace TonWolfe.AllWeatherDrill
             {
                 case DrillWeatherKind.Badtide: return s.BadtideWeatherScale.Value;
                 case DrillWeatherKind.Drought: return s.DroughtWeatherScale.Value;
-                case DrillWeatherKind.Monsoon: return s.MonsoonWeatherScale.Value;
-                case DrillWeatherKind.Rain: return s.RainWeatherScale.Value;
-                case DrillWeatherKind.Refreshing: return s.RefreshingWeatherScale.Value;
                 case DrillWeatherKind.Other: return s.OtherWeatherScale.Value;
                 default: return s.NormalWeatherScale.Value;
             }
