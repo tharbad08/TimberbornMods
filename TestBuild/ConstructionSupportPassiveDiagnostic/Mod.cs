@@ -49,7 +49,7 @@ internal static class Diagnostic
         ConstructionSiteAccessibleType = FindType("Timberborn.BuildingsNavigation.ConstructionSiteAccessible, Timberborn.BuildingsNavigation");
 
         var registryType = FindType("Timberborn.EntitySystem.EntityComponentRegistry, Timberborn.EntitySystem");
-        var entityComponentType = FindType("Timberborn.BaseComponentSystem.EntityComponent, Timberborn.BaseComponentSystem");
+        var entityComponentType = FindType("Timberborn.EntitySystem.EntityComponent, Timberborn.EntitySystem");
 
         var register = registryType.GetMethod("Register", AnyInstance, null, new[] { entityComponentType }, null)
             ?? throw new MissingMethodException(registryType.FullName, "Register(EntityComponent)");
@@ -145,7 +145,7 @@ internal static class Diagnostic
             if (!SafeBool(upper, "IsUnfinished"))
                 continue;
 
-            if (!TryGetDirectUnfinishedSupports(site, upper, out var supports))
+            if (!TryGetDirectIncompleteSupports(site, upper, out var supports))
                 continue;
 
             bool isOn = SafeBool(site, "IsOn");
@@ -163,7 +163,16 @@ internal static class Diagnostic
 
             // This is the impossible state we're chasing:
             // direct unfinished support exists, yet site is enabled/buildable or grounded validator says valid.
-            bool anomaly = isOn || ready || readyFinish || groundedValid || !groundedPresent;
+            bool supportClaimsFinishedWhileIncomplete = supports.Any(s =>
+            {
+                if (!SafeBool(s, "IsFinished")) return false;
+                object? ss = GetComponent(s, ConstructionSiteType);
+                if (ss == null) return false;
+                try { return Convert.ToDouble(GetMember(ss, "BuildTimeProgress")) < 0.999; }
+                catch { return false; }
+            });
+
+            bool anomaly = isOn || ready || readyFinish || groundedValid || !groundedPresent || supportClaimsFinishedWhileIncomplete;
 
             int id = GetObjectId(site);
             string signature =
@@ -187,7 +196,7 @@ internal static class Diagnostic
             }
             else if (LoggedNormalSupport.Add(id))
             {
-                Log.Write("[SUPPORTDIAG] Control: unfinished support correctly blocks upper site: "
+                Log.Write("[SUPPORTDIAG] Control: incomplete support correctly blocks upper site: "
                     + DescribeBlockObject(upper)
                     + " | Grounded=" + groundedValid
                     + " IsOn=" + isOn
@@ -214,9 +223,15 @@ internal static class Diagnostic
             + " BuildTimeProgressInHours=" + SafeValue(site, "BuildTimeProgressInHours")
             + " MaterialProgress=" + SafeValue(site, "MaterialProgress"));
 
-        lines.Add("[SUPPORTDIAG] Direct unfinished support(s):");
+        lines.Add("[SUPPORTDIAG] Direct incomplete support(s):");
         foreach (object support in supports)
-            lines.Add("[SUPPORTDIAG]   - " + DescribeBlockObject(support));
+        {
+            object? ss = GetComponent(support, ConstructionSiteType);
+            string extra = ss == null ? "" :
+                " | supportSiteProgress=" + SafeValue(ss, "BuildTimeProgress")
+                + " supportHours=" + SafeValue(ss, "BuildTimeProgressInHours");
+            lines.Add("[SUPPORTDIAG]   - " + DescribeBlockObject(support) + extra);
+        }
 
         lines.Add("[SUPPORTDIAG] Validators:");
         foreach (var v in validators)
@@ -244,7 +259,7 @@ internal static class Diagnostic
         return string.Join(Environment.NewLine, lines);
     }
 
-    static bool TryGetDirectUnfinishedSupports(object site, object upper, out List<object> supports)
+    static bool TryGetDirectIncompleteSupports(object site, object upper, out List<object> supports)
     {
         supports = new List<object>();
         var seen = new HashSet<int>();
@@ -270,7 +285,7 @@ internal static class Diagnostic
 
             foreach (object candidate in Enumerate(objectsAt))
             {
-                if (ReferenceEquals(candidate, upper) || !SafeBool(candidate, "IsUnfinished"))
+                if (ReferenceEquals(candidate, upper))
                     continue;
 
                 object candidateBlocks;
@@ -287,6 +302,22 @@ internal static class Diagnostic
 
                 string stackable = Convert.ToString(GetMember(candidateBlock, "Stackable")) ?? "None";
                 if (stackable == "None")
+                    continue;
+
+                bool unfinished = SafeBool(candidate, "IsUnfinished");
+                object? candidateSite = GetComponent(candidate, ConstructionSiteType);
+                bool progressIncomplete = false;
+                if (candidateSite != null)
+                {
+                    try
+                    {
+                        double p = Convert.ToDouble(GetMember(candidateSite, "BuildTimeProgress"));
+                        progressIncomplete = p < 0.999;
+                    }
+                    catch { }
+                }
+
+                if (!unfinished && !progressIncomplete)
                     continue;
 
                 int id = GetObjectId(candidate);
@@ -363,7 +394,8 @@ internal static class Diagnostic
             : " progress=" + SafeValue(site, "BuildTimeProgress")
               + " hours=" + SafeValue(site, "BuildTimeProgressInHours")
               + " IsOn=" + SafeValue(site, "IsOn")
-              + " ReadyToBuild=" + SafeValue(site, "ReadyToBuild");
+              + " ReadyToBuild=" + SafeValue(site, "ReadyToBuild")
+            + " templateHint=" + SafeValue(bo, "Name");
 
         return "Name=" + SafeValue(bo, "Name")
             + " Coordinates=" + SafeValue(bo, "Coordinates")
