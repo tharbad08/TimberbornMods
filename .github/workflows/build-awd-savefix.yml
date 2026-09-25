@@ -36,13 +36,12 @@ jobs:
           set -eux
           ROOT="$RUNNER_TEMP/AllWeatherDrill"
           VER="$ROOT/version-1.0.11.2"
-          mkdir -p "$VER/Patches" "$VER/Localizations" "$VER/MapEditor/Water/Aquifer"
+          mkdir -p "$VER/Patches" "$VER/Localizations"
 
           cp "BuildAWD/bin/Release/netstandard2.1/all weather drills.dll" "$VER/Patches/all weather drills.dll"
           cp "BuildAWD/AllWeatherDrill.cs" "$VER/Patches/all weather drills.cs"
           cp "BuildAWD/package/manifest.json" "$VER/manifest.json"
           cp "BuildAWD/package/enUS.csv" "$VER/Localizations/enUS.csv"
-          cp "BuildAWD/package/Aquifer.blueprint.json" "$VER/MapEditor/Water/Aquifer/Aquifer.blueprint.json"
 
           printf '%s\n'             '1.0.5-local'             '- Fix save/reload during non-temperate Moddable Weathers events.'             '- Read the live base weather and active weather modifiers.'             '- Add separate Rain, Monsoon, and Refreshing flow settings.'             '- Treat Badtide/Drought/Monsoon/Rain/Refreshing the same whether base weather or modifier.'             > "$VER/Change Log"
 
