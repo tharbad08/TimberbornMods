@@ -29,7 +29,7 @@ jobs:
 
       - name: Build
         run: |
-          dotnet build BuildAWD/AllWeatherDrill.csproj             --configuration Release             -p:PublicRefDir=/tmp/tbrefs/bin/Release/netstandard2.1
+          dotnet build BuildAWD/AllWeatherDrill.csproj --configuration Release -p:PublicRefDir=/tmp/tbrefs/bin/Release/netstandard2.1
 
       - name: Package mod
         run: |
@@ -44,13 +44,7 @@ jobs:
           cp "BuildAWD/package/enUS.csv" "$VER/Localizations/enUS.csv"
           cp "BuildAWD/package/Aquifer.blueprint.json" "$VER/MapEditor/Water/Aquifer/Aquifer.blueprint.json"
 
-          cat > "$VER/Change Log" <<'EOF'
-1.0.5-local
-- Fix save/reload during non-temperate Moddable Weathers events.
-- Read the live base weather and active weather modifiers.
-- Add separate Rain, Monsoon, and Refreshing flow settings.
-- Treat Badtide/Drought/Monsoon/Rain/Refreshing the same whether base weather or modifier.
-EOF
+          printf '%s\n'             '1.0.5-local'             '- Fix save/reload during non-temperate Moddable Weathers events.'             '- Read the live base weather and active weather modifiers.'             '- Add separate Rain, Monsoon, and Refreshing flow settings.'             '- Treat Badtide/Drought/Monsoon/Rain/Refreshing the same whether base weather or modifier.'             > "$VER/Change Log"
 
           cd "$RUNNER_TEMP"
           zip -9 -r AllWeatherDrill_ModWeather_SaveFix.zip AllWeatherDrill
