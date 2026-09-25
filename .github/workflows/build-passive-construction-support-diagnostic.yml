@@ -26,10 +26,10 @@ jobs:
           cat > /tmp/ConstructionSupportPassiveDiagnostic/ConstructionSupportPassiveDiagnostic/version-1.1/manifest.json <<'JSON'
           {
             "Name": "Construction Support Passive Diagnostic",
-            "Version": "0.4.0",
+            "Version": "0.5.0",
             "Id": "ConstructionSupportPassiveDiagnostic",
             "MinimumGameVersion": "1.1.1",
-            "Description": "Passive diagnostic for Levee/Platform support-state bugs. Tracks sites through the entity registry and does not patch construction methods.",
+            "Description": "Passive generic diagnostic for construction progressing without finished support. Samples all active construction sites without patching construction methods.",
             "RequiredMods": [
               { "Id": "Harmony" }
             ]
