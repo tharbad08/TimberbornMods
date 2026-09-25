@@ -34,9 +34,10 @@ internal static class Diagnostic
     static Type MatterBelowValidatorType = null!;
     static Type ConstructionSiteAccessibleType = null!;
 
-    static MethodInfo? ResourcesFindObjectsOfTypeAll;
     static readonly Stopwatch Clock = Stopwatch.StartNew();
     static long lastScanMs;
+    static bool dumpedFinalPatchMap;
+    static readonly HashSet<object> ConstructionSites = new(ReferenceEqualityComparer.Instance);
     static readonly Dictionary<int, string> LastState = new();
     static readonly HashSet<int> LoggedNormalSupport = new();
 
@@ -47,16 +48,16 @@ internal static class Diagnostic
         MatterBelowValidatorType = FindType("Timberborn.BlockSystem.MatterBelowValidator, Timberborn.BlockSystem");
         ConstructionSiteAccessibleType = FindType("Timberborn.BuildingsNavigation.ConstructionSiteAccessible, Timberborn.BuildingsNavigation");
 
-        var resourcesType = FindType("UnityEngine.Resources, UnityEngine.CoreModule");
-        ResourcesFindObjectsOfTypeAll = resourcesType.GetMethod(
-            "FindObjectsOfTypeAll",
-            BindingFlags.Static | BindingFlags.Public,
-            null,
-            new[] { typeof(Type) },
-            null);
+        var registryType = FindType("Timberborn.EntitySystem.EntityComponentRegistry, Timberborn.EntitySystem");
+        var entityComponentType = FindType("Timberborn.BaseComponentSystem.EntityComponent, Timberborn.BaseComponentSystem");
 
-        if (ResourcesFindObjectsOfTypeAll == null)
-            throw new MissingMethodException("UnityEngine.Resources.FindObjectsOfTypeAll(Type)");
+        var register = registryType.GetMethod("Register", AnyInstance, null, new[] { entityComponentType }, null)
+            ?? throw new MissingMethodException(registryType.FullName, "Register(EntityComponent)");
+        var unregister = registryType.GetMethod("Unregister", AnyInstance, null, new[] { entityComponentType }, null)
+            ?? throw new MissingMethodException(registryType.FullName, "Unregister(EntityComponent)");
+
+        HarmonyBridge.PatchPostfix(register, typeof(Diagnostic).GetMethod(nameof(AfterEntityRegistered), AnyStatic)!);
+        HarmonyBridge.PatchPostfix(unregister, typeof(Diagnostic).GetMethod(nameof(AfterEntityUnregistered), AnyStatic)!);
 
         // Deliberately patch an unrelated periodic service, NOT any construction method.
         var soilType = FindType("Timberborn.SoilContaminationSystem.SoilContaminationService, Timberborn.SoilContaminationSystem");
@@ -71,6 +72,38 @@ internal static class Diagnostic
         DumpConstructionPatchOwners();
     }
 
+    public static void AfterEntityRegistered(object __0)
+    {
+        TrackEntity(__0, add: true);
+    }
+
+    public static void AfterEntityUnregistered(object __0)
+    {
+        TrackEntity(__0, add: false);
+    }
+
+    static void TrackEntity(object entityComponent, bool add)
+    {
+        try
+        {
+            object registered = GetMember(entityComponent, "RegisteredComponents");
+            foreach (object component in Enumerate(registered))
+            {
+                if (!ConstructionSiteType.IsInstanceOfType(component))
+                    continue;
+
+                if (add)
+                    ConstructionSites.Add(component);
+                else
+                    ConstructionSites.Remove(component);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write("[SUPPORTDIAG] Registry tracking error: " + ex.GetType().Name + ": " + ex.Message);
+        }
+    }
+
     public static void AfterUnrelatedWorldTick()
     {
         long now = Clock.ElapsedMilliseconds;
@@ -78,6 +111,15 @@ internal static class Diagnostic
             return;
 
         lastScanMs = now;
+
+        if (!dumpedFinalPatchMap)
+        {
+            dumpedFinalPatchMap = true;
+            Log.Write("[SUPPORTDIAG] Final construction Harmony map after mod/world initialization:");
+            foreach (string line in HarmonyOwnersForRelevantMethods())
+                Log.Write("[SUPPORTDIAG]   " + line);
+            Log.Write("[SUPPORTDIAG] Tracked ConstructionSite count at first scan: " + ConstructionSites.Count);
+        }
 
         try
         {
@@ -91,14 +133,10 @@ internal static class Diagnostic
 
     static void Scan()
     {
-        var raw = ResourcesFindObjectsOfTypeAll!.Invoke(null, new object?[] { ConstructionSiteType });
-        if (raw is not IEnumerable sites)
-            return;
+        object[] sites = ConstructionSites.ToArray();
 
-        foreach (object? site in sites)
+        foreach (object site in sites)
         {
-            if (site == null)
-                continue;
 
             object upper;
             try { upper = GetField(site, "_blockObject"); }
@@ -521,6 +559,13 @@ internal static class Diagnostic
             TypeName = typeName;
             IsValid = isValid;
         }
+    }
+
+    sealed class ReferenceEqualityComparer : IEqualityComparer<object>
+    {
+        public static readonly ReferenceEqualityComparer Instance = new();
+        public new bool Equals(object? x, object? y) => ReferenceEquals(x, y);
+        public int GetHashCode(object obj) => RuntimeHelpers.GetHashCode(obj);
     }
 }
 
