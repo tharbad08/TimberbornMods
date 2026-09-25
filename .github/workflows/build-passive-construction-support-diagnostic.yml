@@ -26,10 +26,10 @@ jobs:
           cat > /tmp/ConstructionSupportPassiveDiagnostic/ConstructionSupportPassiveDiagnostic/version-1.1/manifest.json <<'JSON'
           {
             "Name": "Construction Support Passive Diagnostic",
-            "Version": "0.2.0",
+            "Version": "0.3.0",
             "Id": "ConstructionSupportPassiveDiagnostic",
             "MinimumGameVersion": "1.1.1",
-            "Description": "Passive diagnostic for construction progressing on unfinished supports. Does not patch construction methods.",
+            "Description": "Passive diagnostic for construction progressing on unfinished supports. Tracks sites through the entity registry and does not patch construction methods.",
             "RequiredMods": [
               { "Id": "Harmony" }
             ]
