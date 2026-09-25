@@ -1,0 +1,62 @@
+name: Build AWD savefix
+
+on:
+  push:
+    branches:
+      - build/all-weather-drill-mw-savefix
+    paths:
+      - 'BuildAWD/**'
+      - '.github/workflows/build-awd-savefix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Fetch Timberborn reference assemblies
+        run: |
+          git clone --depth 1 https://github.com/kamigari84/Automation_WeatherModifiers_Signals.git /tmp/tbrefs
+          test -d /tmp/tbrefs/bin/Release/netstandard2.1
+
+      - name: Build
+        run: |
+          dotnet build BuildAWD/AllWeatherDrill.csproj             --configuration Release             -p:PublicRefDir=/tmp/tbrefs/bin/Release/netstandard2.1
+
+      - name: Package mod
+        run: |
+          set -eux
+          ROOT="$RUNNER_TEMP/AllWeatherDrill"
+          VER="$ROOT/version-1.0.11.2"
+          mkdir -p "$VER/Patches" "$VER/Localizations" "$VER/MapEditor/Water/Aquifer"
+
+          cp "BuildAWD/bin/Release/netstandard2.1/all weather drills.dll" "$VER/Patches/all weather drills.dll"
+          cp "BuildAWD/AllWeatherDrill.cs" "$VER/Patches/all weather drills.cs"
+          cp "BuildAWD/package/manifest.json" "$VER/manifest.json"
+          cp "BuildAWD/package/enUS.csv" "$VER/Localizations/enUS.csv"
+          cp "BuildAWD/package/Aquifer.blueprint.json" "$VER/MapEditor/Water/Aquifer/Aquifer.blueprint.json"
+
+          cat > "$VER/Change Log" <<'EOF'
+1.0.5-local
+- Fix save/reload during non-temperate Moddable Weathers events.
+- Read the live base weather and active weather modifiers.
+- Add separate Rain, Monsoon, and Refreshing flow settings.
+- Treat Badtide/Drought/Monsoon/Rain/Refreshing the same whether base weather or modifier.
+EOF
+
+          cd "$RUNNER_TEMP"
+          zip -9 -r AllWeatherDrill_ModWeather_SaveFix.zip AllWeatherDrill
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AllWeatherDrill_ModWeather_SaveFix
+          path: ${{ runner.temp }}/AllWeatherDrill_ModWeather_SaveFix.zip
+          if-no-files-found: error
