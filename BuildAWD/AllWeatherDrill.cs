@@ -181,7 +181,7 @@ namespace TonWolfe.AllWeatherDrill
             PrepareWaterSource(____underlyingWaterSource);
 
             if (____mechanicalNode != null && MSettings.Instance != null)
-                ____mechanicalNode.SetInputMultiplier(Clamp(MSettings.Instance.PowerScale.Value));
+                SetInputMultiplierCompat(____mechanicalNode, Clamp(MSettings.Instance.PowerScale.Value));
         }
 
         [HarmonyPrefix]
@@ -229,6 +229,23 @@ namespace TonWolfe.AllWeatherDrill
         }
 
         static float Clamp(float value) { return Math.Min(20f, Math.Max(0f, value)); }
+
+        static void SetInputMultiplierCompat(MechanicalNode node, float value)
+        {
+            try
+            {
+                MethodInfo method = node.GetType().GetMethod("SetInputMultiplier", Flags, null, new Type[] { typeof(float) }, null);
+                if (method != null)
+                {
+                    method.Invoke(node, new object[] { value });
+                    return;
+                }
+
+                FieldInfo field = node.GetType().GetField("_inputMultiplier", Flags);
+                if (field != null) field.SetValue(node, value);
+            }
+            catch { }
+        }
 
         static void PrepareWaterSource(UnderlyingWaterSource underlying)
         {
