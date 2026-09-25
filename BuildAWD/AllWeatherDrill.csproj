@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>all weather drills</AssemblyName>
+    <RootNamespace>TonWolfe.AllWeatherDrill</RootNamespace>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.3.3" />
+    <Reference Include="Bindito.Core"><HintPath>$(PublicRefDir)/Bindito.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Bindito.Unity"><HintPath>$(PublicRefDir)/Bindito.Unity.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="ModSettings.Common"><HintPath>$(PublicRefDir)/ModSettings.Common.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="ModSettings.Core"><HintPath>$(PublicRefDir)/ModSettings.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.Modding"><HintPath>$(PublicRefDir)/Timberborn.Modding.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.GameWaterSourceSystem"><HintPath>$(PublicRefDir)/Timberborn.GameWaterSourceSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.HazardousWeatherSystem"><HintPath>$(PublicRefDir)/Timberborn.HazardousWeatherSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.BlockingSystem"><HintPath>$(PublicRefDir)/Timberborn.BlockingSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.BlockSystem"><HintPath>$(PublicRefDir)/Timberborn.BlockSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.MechanicalSystem"><HintPath>$(PublicRefDir)/Timberborn.MechanicalSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.WorkSystem"><HintPath>$(PublicRefDir)/Timberborn.WorkSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.SingletonSystem"><HintPath>$(PublicRefDir)/Timberborn.SingletonSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.SettingsSystem"><HintPath>$(PublicRefDir)/Timberborn.SettingsSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Timberborn.WaterSourceSystem"><HintPath>$(PublicRefDir)/Timberborn.WaterSourceSystem.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(PublicRefDir)/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>
