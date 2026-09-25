@@ -33,6 +33,7 @@ internal static class Diagnostic
     static Type GroundedConstructionSiteType = null!;
     static Type MatterBelowValidatorType = null!;
     static Type ConstructionSiteAccessibleType = null!;
+    static Type BlockObjectType = null!;
 
     static readonly Stopwatch Clock = Stopwatch.StartNew();
     static long lastScanMs;
@@ -47,6 +48,7 @@ internal static class Diagnostic
         GroundedConstructionSiteType = FindType("Timberborn.ConstructionSites.GroundedConstructionSite, Timberborn.ConstructionSites");
         MatterBelowValidatorType = FindType("Timberborn.BlockSystem.MatterBelowValidator, Timberborn.BlockSystem");
         ConstructionSiteAccessibleType = FindType("Timberborn.BuildingsNavigation.ConstructionSiteAccessible, Timberborn.BuildingsNavigation");
+        BlockObjectType = FindType("Timberborn.BlockSystem.BlockObject, Timberborn.BlockSystem");
 
         var registryType = FindType("Timberborn.EntitySystem.EntityComponentRegistry, Timberborn.EntitySystem");
         var entityComponentType = FindType("Timberborn.EntitySystem.EntityComponent, Timberborn.EntitySystem");
@@ -67,8 +69,19 @@ internal static class Diagnostic
 
         HarmonyBridge.PatchPostfix(tick, typeof(Diagnostic).GetMethod(nameof(AfterUnrelatedWorldTick), AnyStatic)!);
 
-        Log.Write("[SUPPORTDIAG] Passive diagnostic installed.");
-        Log.Write("[SUPPORTDIAG] Construction methods are NOT patched. Sampler hook: " + tick.DeclaringType?.FullName + "." + tick.Name);
+        // Event-driven observers. These do not alter args/results and always allow originals to run.
+        var increase = ConstructionSiteType.GetMethod("IncreaseBuildTime", AnyInstance, null, new[] { typeof(float) }, null)
+            ?? throw new MissingMethodException(ConstructionSiteType.FullName, "IncreaseBuildTime(float)");
+        HarmonyBridge.PatchPrefix(increase, typeof(Diagnostic).GetMethod(nameof(BeforeIncreaseBuildTime), AnyStatic)!);
+
+        var markFinished = BlockObjectType.GetMethod("MarkAsFinished", AnyInstance, null, Type.EmptyTypes, null)
+            ?? throw new MissingMethodException(BlockObjectType.FullName, "MarkAsFinished()");
+        HarmonyBridge.PatchPrefix(markFinished, typeof(Diagnostic).GetMethod(nameof(BeforeMarkAsFinished), AnyStatic)!);
+
+        Log.Write("[SUPPORTDIAG] Diagnostic installed.");
+        Log.Write("[SUPPORTDIAG] Observer hooks only; no args/results/flow are modified.");
+        Log.Write("[SUPPORTDIAG] Sampler hook: " + tick.DeclaringType?.FullName + "." + tick.Name);
+        Log.Write("[SUPPORTDIAG] Event hooks: ConstructionSite.IncreaseBuildTime + BlockObject.MarkAsFinished");
         DumpConstructionPatchOwners();
     }
 
@@ -102,6 +115,62 @@ internal static class Diagnostic
         {
             Log.Write("[SUPPORTDIAG] Registry tracking error: " + ex.GetType().Name + ": " + ex.Message);
         }
+    }
+
+    public static void BeforeIncreaseBuildTime(object __instance, float __0)
+    {
+        try
+        {
+            ObserveConstructionProgress(__instance, "IncreaseBuildTime(" + __0 + ")");
+        }
+        catch (Exception ex)
+        {
+            Log.Write("[SUPPORTDIAG] IncreaseBuildTime observer error: " + ex);
+        }
+    }
+
+    public static void BeforeMarkAsFinished(object __instance)
+    {
+        try
+        {
+            object? site = GetComponent(__instance, ConstructionSiteType);
+            if (site == null)
+                return;
+
+            ObserveConstructionProgress(site, "BlockObject.MarkAsFinished");
+        }
+        catch (Exception ex)
+        {
+            Log.Write("[SUPPORTDIAG] MarkAsFinished observer error: " + ex);
+        }
+    }
+
+    static void ObserveConstructionProgress(object site, string eventName)
+    {
+        object upper;
+        try { upper = GetField(site, "_blockObject"); }
+        catch { return; }
+
+        GroundingCheck check;
+        try { check = RecheckGroundingDetailed(upper); }
+        catch (Exception ex)
+        {
+            Log.Write("[SUPPORTDIAG] EVENT " + eventName + " grounding recheck failed for "
+                + DescribeBlockObject(upper) + ": " + ex);
+            return;
+        }
+
+        if (!check.HasSolidFoundation || check.AllGrounded)
+            return;
+
+        var validators = GetValidators(site);
+        TryGetDirectIncompleteSupports(site, upper, out var supports);
+
+        Log.Write("[SUPPORTDIAG] ===== INVALID CONSTRUCTION EVENT =====");
+        Log.Write("[SUPPORTDIAG] Event=" + eventName);
+        Log.Write(BuildReport(site, upper, supports, validators, check.Details, true));
+        Log.Write("[SUPPORTDIAG] Call stack:" + Environment.NewLine + Environment.StackTrace);
+        Log.Write("[SUPPORTDIAG] ===== END INVALID CONSTRUCTION EVENT =====");
     }
 
     public static void AfterUnrelatedWorldTick()
@@ -662,6 +731,25 @@ internal static class HarmonyBridge
 
     static readonly Type HarmonyType = Type.GetType("HarmonyLib.Harmony, 0Harmony", throwOnError: true)!;
     static readonly Type HarmonyMethodType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", throwOnError: true)!;
+
+    public static void PatchPrefix(MethodBase original, MethodInfo patchMethodInfo)
+    {
+        object harmony = Activator.CreateInstance(HarmonyType, "ConstructionSupportPassiveDiagnostic")!;
+        object hm = Activator.CreateInstance(HarmonyMethodType, patchMethodInfo)!;
+
+        MethodInfo patch = HarmonyType.GetMethods(BindingFlags.Instance | BindingFlags.Public)
+            .Where(m => m.Name == "Patch")
+            .First(m =>
+            {
+                ParameterInfo[] p = m.GetParameters();
+                return p.Length >= 3 && typeof(MethodBase).IsAssignableFrom(p[0].ParameterType);
+            });
+
+        object?[] args = new object?[patch.GetParameters().Length];
+        args[0] = original;
+        args[1] = hm;
+        patch.Invoke(harmony, args);
+    }
 
     public static void PatchPostfix(MethodBase original, MethodInfo patchMethodInfo)
     {
