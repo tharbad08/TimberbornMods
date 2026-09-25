@@ -7,6 +7,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using Timberborn.BlockingSystem;
+using Timberborn.BlockObjectModelSystem;
 using Timberborn.GameWaterSourceSystem;
 using Timberborn.HazardousWeatherSystem;
 using Timberborn.MechanicalSystem;
@@ -267,26 +268,18 @@ namespace TonWolfe.AllWeatherDrill
         static void PrepareWaterSource(UnderlyingWaterSource underlying)
         {
             if (underlying == null) return;
+
+            // DisableDroughtInfluence() also hides the underlying aquifer model.
+            // All Weather Drill intentionally disables drought influence but must
+            // immediately restore the aquifer's visible model.
             underlying.DisableDroughtInfluence();
 
-            try
+            if (underlying.WaterSource != null)
             {
-                object waterSource = underlying.WaterSource;
-                if (waterSource == null) return;
-
-                Type modelType = Type.GetType("Timberborn.BlockObjectModelSystem.BlockObjectModel, Timberborn.BlockObjectModelSystem", false);
-                if (modelType == null) return;
-
-                MethodInfo getComponent = waterSource.GetType().GetMethod("GetComponent", Flags, null, new Type[] { typeof(Type) }, null);
-                if (getComponent == null) return;
-
-                object model = getComponent.Invoke(waterSource, new object[] { modelType });
-                if (model == null) return;
-
-                MethodInfo unhide = model.GetType().GetMethod("UnhideFullModelPermanently", Flags, null, Type.EmptyTypes, null);
-                if (unhide != null) unhide.Invoke(model, null);
+                BlockObjectModel model = underlying.WaterSource.GetComponent<BlockObjectModel>();
+                if (model != null)
+                    model.UnhideFullModelPermanently();
             }
-            catch { }
         }
     }
 }
