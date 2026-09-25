@@ -14,7 +14,6 @@ using Timberborn.Modding;
 using Timberborn.ModManagerScene;
 using Timberborn.SettingsSystem;
 using Timberborn.WaterSourceSystem;
-using Timberborn.Buildings;
 using Timberborn.SingletonSystem;
 using Timberborn.WorkSystem;
 
@@ -218,13 +217,18 @@ namespace TonWolfe.AllWeatherDrill
         public static bool GetStrength(
             ref float __result,
             MechanicalNode ____mechanicalNode,
-            PausableBuilding ____pausableBuilding,
             HazardousWeatherObserver ____hazardousWeatherObserver)
         {
-            float factor = 0f;
-            if (!____pausableBuilding.Paused && MSettings.Instance != null)
-                factor = ScaleFor(CurrentWeatherResolver.Resolve(____hazardousWeatherObserver));
+            // Current Timberborn no longer stores a PausableBuilding on the drill.
+            // MechanicalNode.ActiveAndPowered is the game's own gate for whether
+            // the drill may produce anything (covers paused/unpowered/inactive).
+            if (____mechanicalNode == null || !____mechanicalNode.ActiveAndPowered || MSettings.Instance == null)
+            {
+                __result = 0f;
+                return false;
+            }
 
+            float factor = ScaleFor(CurrentWeatherResolver.Resolve(____hazardousWeatherObserver));
             __result = ____mechanicalNode.PowerEfficiency * Clamp(factor);
             return false;
         }
