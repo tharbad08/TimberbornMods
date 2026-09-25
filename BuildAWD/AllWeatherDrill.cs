@@ -11,6 +11,10 @@ using Timberborn.GameWaterSourceSystem;
 using Timberborn.HazardousWeatherSystem;
 using Timberborn.MechanicalSystem;
 using Timberborn.Modding;
+using Timberborn.ModManagerScene;
+using Timberborn.SettingsSystem;
+using Timberborn.WaterSourceSystem;
+using Timberborn.AutomationBuildings;
 using Timberborn.SingletonSystem;
 using Timberborn.WorkSystem;
 
@@ -29,7 +33,7 @@ namespace TonWolfe.AllWeatherDrill
     [Context("MapEditor")]
     public class ModMenuConfig : Configurator
     {
-        public override void Configure() { Bind<MSettings>().AsSingleton(); }
+        protected override void Configure() { Bind<MSettings>().AsSingleton(); }
     }
 
     public class MSettings : ModSettingsOwner, IUnloadableSingleton
