@@ -14,7 +14,7 @@ using Timberborn.Modding;
 using Timberborn.ModManagerScene;
 using Timberborn.SettingsSystem;
 using Timberborn.WaterSourceSystem;
-using Timberborn.AutomationBuildings;
+using Timberborn.Buildings;
 using Timberborn.SingletonSystem;
 using Timberborn.WorkSystem;
 
