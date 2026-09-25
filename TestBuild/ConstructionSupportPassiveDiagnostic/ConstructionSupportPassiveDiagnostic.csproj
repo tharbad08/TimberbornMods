@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>ConstructionSupportPassiveDiagnostic</AssemblyName>
+    <RootNamespace>ConstructionSupportPassiveDiagnostic</RootNamespace>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="Stub/**/*.cs" />
+    <ProjectReference Include="Stub/Timberborn.ModManagerScene.csproj" Private="false" />
+  </ItemGroup>
+</Project>
