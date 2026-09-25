@@ -26,10 +26,10 @@ jobs:
           cat > /tmp/ConstructionSupportPassiveDiagnostic/ConstructionSupportPassiveDiagnostic/version-1.1/manifest.json <<'JSON'
           {
             "Name": "Construction Support Passive Diagnostic",
-            "Version": "0.5.0",
+            "Version": "0.6.0",
             "Id": "ConstructionSupportPassiveDiagnostic",
             "MinimumGameVersion": "1.1.1",
-            "Description": "Passive generic diagnostic for construction progressing without finished support. Samples all active construction sites without patching construction methods.",
+            "Description": "Passive generic diagnostic for invalid construction support state. Dumps validator collection before independent grounding checks and does not patch construction methods.",
             "RequiredMods": [
               { "Id": "Harmony" }
             ]
