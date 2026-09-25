@@ -155,8 +155,9 @@ internal static class Diagnostic
                 continue;
 
             var validators = GetValidators(site);
-            bool groundedPresent = validators.Any(v => v.TypeName == GroundedConstructionSiteType.FullName);
-            bool groundedValid = validators.Any(v => v.TypeName == GroundedConstructionSiteType.FullName && v.IsValid);
+            string groundedTypeName = GroundedConstructionSiteType.FullName ?? "Timberborn.ConstructionSites.GroundedConstructionSite";
+            bool groundedPresent = validators.Any(v => v.TypeName.StartsWith(groundedTypeName, StringComparison.Ordinal));
+            bool groundedValid = validators.Any(v => v.TypeName.StartsWith(groundedTypeName, StringComparison.Ordinal) && v.IsValid);
 
             GroundingCheck check;
             try { check = RecheckGroundingDetailed(upper); }
@@ -219,10 +220,10 @@ internal static class Diagnostic
         }
 
         object mv = GetField(grounded, "_matterBelowValidator");
-        MethodInfo normal = MatterBelowValidatorType.GetMethod("Validate", AnyInstance)
-            ?? throw new MissingMethodException(MatterBelowValidatorType.FullName, "Validate");
-        MethodInfo ignore = MatterBelowValidatorType.GetMethod("ValidateIgnoringUnfinishedStackable", AnyInstance)
-            ?? throw new MissingMethodException(MatterBelowValidatorType.FullName, "ValidateIgnoringUnfinishedStackable");
+        MethodInfo normal = MatterBelowValidatorType.GetMethods(AnyInstance)
+            .Single(m => m.Name == "Validate" && m.GetParameters().Length == 1);
+        MethodInfo ignore = MatterBelowValidatorType.GetMethods(AnyInstance)
+            .Single(m => m.Name == "ValidateIgnoringUnfinishedStackable" && m.GetParameters().Length == 1);
 
         int baseZ = GetInt(GetMember(upper, "CoordinatesAtBaseZ"), "z");
         object positioned = GetMember(upper, "PositionedBlocks");
@@ -277,7 +278,21 @@ internal static class Diagnostic
             + " BuildTimeProgressInHours=" + SafeValue(site, "BuildTimeProgressInHours")
             + " MaterialProgress=" + SafeValue(site, "MaterialProgress"));
 
+        lines.Add("[SUPPORTDIAG] Validators:");
+        foreach (var v in validators)
+            lines.Add("[SUPPORTDIAG]   - " + v.TypeName + " IsValid=" + v.IsValid);
+
+        string groundedTypeName = GroundedConstructionSiteType.FullName ?? "Timberborn.ConstructionSites.GroundedConstructionSite";
+        if (validators.All(v => !v.TypeName.StartsWith(groundedTypeName, StringComparison.Ordinal)))
+            lines.Add("[SUPPORTDIAG]   !!! GroundedConstructionSite validator MISSING");
+
+        object? groundedComponent = GetComponent(upper, GroundedConstructionSiteType);
+        lines.Add("[SUPPORTDIAG] Grounded component present=" + (groundedComponent != null)
+            + (groundedComponent == null ? "" : " IsValid=" + SafeValue(groundedComponent, "IsValid")));
+
         lines.Add("[SUPPORTDIAG] Direct incomplete support(s):");
+        if (supports.Count == 0)
+            lines.Add("[SUPPORTDIAG]   - none detected by support enumerator");
         foreach (object support in supports)
         {
             object? ss = GetComponent(support, ConstructionSiteType);
@@ -286,13 +301,6 @@ internal static class Diagnostic
                 + " supportHours=" + SafeValue(ss, "BuildTimeProgressInHours");
             lines.Add("[SUPPORTDIAG]   - " + DescribeBlockObject(support) + extra);
         }
-
-        lines.Add("[SUPPORTDIAG] Validators:");
-        foreach (var v in validators)
-            lines.Add("[SUPPORTDIAG]   - " + v.TypeName + " IsValid=" + v.IsValid);
-
-        if (validators.All(v => v.TypeName != GroundedConstructionSiteType.FullName))
-            lines.Add("[SUPPORTDIAG]   !!! GroundedConstructionSite validator MISSING");
 
         lines.Add("[SUPPORTDIAG] Independent grounding re-check: " + groundingRecheck);
         lines.Add("[SUPPORTDIAG] Independent support says blocked=" + independentInvalid);
@@ -388,13 +396,32 @@ internal static class Diagnostic
         var result = new List<ValidatorState>();
         object validators;
         try { validators = GetField(site, "_constructionSiteValidators"); }
-        catch { return result; }
+        catch (Exception ex)
+        {
+            result.Add(new ValidatorState("<validator-list-error:" + ex.GetType().Name + ">", false));
+            return result;
+        }
 
         foreach (object v in Enumerate(validators))
         {
+            bool isValid;
+            string detail = "";
+            try
+            {
+                isValid = Convert.ToBoolean(GetMember(v, "IsValid"));
+                MethodInfo? validate = v.GetType().GetMethod("Validate", AnyInstance, null, Type.EmptyTypes, null);
+                if (validate != null)
+                    detail = " ValidateOwner=" + (validate.DeclaringType?.FullName ?? "?");
+            }
+            catch (Exception ex)
+            {
+                isValid = false;
+                detail = " <read-error:" + ex.GetType().Name + ">";
+            }
+
             result.Add(new ValidatorState(
-                v.GetType().FullName ?? v.GetType().Name,
-                SafeBool(v, "IsValid")));
+                (v.GetType().FullName ?? v.GetType().Name) + detail,
+                isValid));
         }
 
         return result;
