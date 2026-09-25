@@ -59,11 +59,11 @@ internal static class Diagnostic
         HarmonyBridge.PatchPostfix(register, typeof(Diagnostic).GetMethod(nameof(AfterEntityRegistered), AnyStatic)!);
         HarmonyBridge.PatchPostfix(unregister, typeof(Diagnostic).GetMethod(nameof(AfterEntityUnregistered), AnyStatic)!);
 
-        // Deliberately patch an unrelated periodic service, NOT any construction method.
-        var soilType = FindType("Timberborn.SoilContaminationSystem.SoilContaminationService, Timberborn.SoilContaminationSystem");
-        var tick = soilType.GetMethod("Tick", AnyInstance, null, Type.EmptyTypes, null)
-            ?? soilType.GetMethods(AnyInstance).FirstOrDefault(m => m.Name.EndsWith(".Tick") && m.GetParameters().Length == 0)
-            ?? throw new MissingMethodException(soilType.FullName, "Tick");
+        // Deliberately patch the global simulation tick, NOT any construction method.
+        // This gives us frequent sampling without touching construction behavior.
+        var tickServiceType = FindType("Timberborn.TickSystem.TickableSingletonService, Timberborn.TickSystem");
+        var tick = tickServiceType.GetMethod("TickAll", AnyInstance, null, Type.EmptyTypes, null)
+            ?? throw new MissingMethodException(tickServiceType.FullName, "TickAll");
 
         HarmonyBridge.PatchPostfix(tick, typeof(Diagnostic).GetMethod(nameof(AfterUnrelatedWorldTick), AnyStatic)!);
 
@@ -107,7 +107,7 @@ internal static class Diagnostic
     public static void AfterUnrelatedWorldTick()
     {
         long now = Clock.ElapsedMilliseconds;
-        if (now - lastScanMs < 1500)
+        if (now - lastScanMs < 100)
             return;
 
         lastScanMs = now;
@@ -137,7 +137,6 @@ internal static class Diagnostic
 
         foreach (object site in sites)
         {
-
             object upper;
             try { upper = GetField(site, "_blockObject"); }
             catch { continue; }
@@ -145,34 +144,35 @@ internal static class Diagnostic
             if (!SafeBool(upper, "IsUnfinished"))
                 continue;
 
-            if (!TryGetDirectIncompleteSupports(site, upper, out var supports))
-                continue;
-
             bool isOn = SafeBool(site, "IsOn");
             bool ready = SafeBool(site, "ReadyToBuild");
             bool readyFinish = SafeBool(site, "IsReadyToFinish");
-            string buildProgress = SafeValue(site, "BuildTimeProgress");
-            string buildHours = SafeValue(site, "BuildTimeProgressInHours");
+
+            // Actual construction can only happen while IsOn is true. Keep the hot-path
+            // cheap and only do the expensive independent grounding check for sites that
+            // vanilla currently considers enabled/buildable.
+            if (!isOn && !ready && !readyFinish)
+                continue;
 
             var validators = GetValidators(site);
             bool groundedPresent = validators.Any(v => v.TypeName == GroundedConstructionSiteType.FullName);
             bool groundedValid = validators.Any(v => v.TypeName == GroundedConstructionSiteType.FullName && v.IsValid);
 
-            string groundingRecheck = RecheckGrounding(upper);
-            bool independentInvalid = groundingRecheck.Contains("ignoreUnfinished=False");
-
-            // This is the impossible state we're chasing:
-            // direct unfinished support exists, yet site is enabled/buildable or grounded validator says valid.
-            bool supportClaimsFinishedWhileIncomplete = supports.Any(s =>
+            GroundingCheck check;
+            try { check = RecheckGroundingDetailed(upper); }
+            catch (Exception ex)
             {
-                if (!SafeBool(s, "IsFinished")) return false;
-                object? ss = GetComponent(s, ConstructionSiteType);
-                if (ss == null) return false;
-                try { return Convert.ToDouble(GetMember(ss, "BuildTimeProgress")) < 0.999; }
-                catch { return false; }
-            });
+                Log.Write("[SUPPORTDIAG] Recheck error for " + DescribeBlockObject(upper) + ": " + ex);
+                continue;
+            }
 
-            bool anomaly = isOn || ready || readyFinish || groundedValid || !groundedPresent || supportClaimsFinishedWhileIncomplete;
+            // Buildings with no solid-matter foundation requirement are irrelevant.
+            if (!check.HasSolidFoundation)
+                continue;
+
+            bool anomaly = !check.AllGrounded || !groundedPresent || (groundedPresent && groundedValid != check.AllGrounded);
+            if (!anomaly)
+                continue;
 
             int id = GetObjectId(site);
             string signature =
@@ -181,28 +181,82 @@ internal static class Diagnostic
                 "|readyFinish=" + readyFinish +
                 "|groundedPresent=" + groundedPresent +
                 "|groundedValid=" + groundedValid +
-                "|build=" + buildProgress +
-                "|hours=" + buildHours +
-                "|recheck=" + groundingRecheck;
+                "|allGrounded=" + check.AllGrounded +
+                "|details=" + check.Details;
 
             if (LastState.TryGetValue(id, out string? previous) && previous == signature)
                 continue;
 
             LastState[id] = signature;
 
-            if (anomaly)
-            {
-                Log.Write(BuildReport(site, upper, supports, validators, groundingRecheck, independentInvalid));
-            }
-            else if (LoggedNormalSupport.Add(id))
-            {
-                Log.Write("[SUPPORTDIAG] Control: incomplete support correctly blocks upper site: "
-                    + DescribeBlockObject(upper)
-                    + " | Grounded=" + groundedValid
-                    + " IsOn=" + isOn
-                    + " ReadyToBuild=" + ready);
-            }
+            TryGetDirectIncompleteSupports(site, upper, out var supports);
+            Log.Write(BuildReport(site, upper, supports, validators, check.Details, !check.AllGrounded));
         }
+    }
+
+    static GroundingCheck RecheckGroundingDetailed(object upper)
+    {
+        object? grounded = GetComponent(upper, GroundedConstructionSiteType);
+        if (grounded == null)
+        {
+            // We can still determine whether the template has a solid foundation requirement.
+            int baseZ0 = GetInt(GetMember(upper, "CoordinatesAtBaseZ"), "z");
+            object positioned0 = GetMember(upper, "PositionedBlocks");
+            bool hasSolid0 = false;
+            foreach (object block in Enumerate(InvokeNoArgs(positioned0, "GetOccupiedBlocks")))
+            {
+                object coords = GetMember(block, "Coordinates");
+                if (GetInt(coords, "z") != baseZ0)
+                    continue;
+                string matter = Convert.ToString(GetMember(block, "MatterBelow")) ?? "";
+                if (matter == "Ground" || matter == "GroundOrStackable" || matter == "Stackable")
+                {
+                    hasSolid0 = true;
+                    break;
+                }
+            }
+            return new GroundingCheck(hasSolid0, false, "GroundedConstructionSite component missing");
+        }
+
+        object mv = GetField(grounded, "_matterBelowValidator");
+        MethodInfo normal = MatterBelowValidatorType.GetMethod("Validate", AnyInstance)
+            ?? throw new MissingMethodException(MatterBelowValidatorType.FullName, "Validate");
+        MethodInfo ignore = MatterBelowValidatorType.GetMethod("ValidateIgnoringUnfinishedStackable", AnyInstance)
+            ?? throw new MissingMethodException(MatterBelowValidatorType.FullName, "ValidateIgnoringUnfinishedStackable");
+
+        int baseZ = GetInt(GetMember(upper, "CoordinatesAtBaseZ"), "z");
+        object positioned = GetMember(upper, "PositionedBlocks");
+
+        var pieces = new List<string>();
+        bool all = true;
+        int i = 0;
+
+        foreach (object block in Enumerate(InvokeNoArgs(positioned, "GetOccupiedBlocks")))
+        {
+            object coords = GetMember(block, "Coordinates");
+            if (GetInt(coords, "z") != baseZ)
+                continue;
+
+            string matterBelow = Convert.ToString(GetMember(block, "MatterBelow")) ?? "";
+            if (matterBelow != "Ground" && matterBelow != "GroundOrStackable" && matterBelow != "Stackable")
+                continue;
+
+            object?[] a1 = { block };
+            object?[] a2 = { block };
+            bool n = Convert.ToBoolean(normal.Invoke(mv, a1));
+            bool ig = Convert.ToBoolean(ignore.Invoke(mv, a2));
+            all &= ig;
+            pieces.Add("#" + (++i)
+                + " matter=" + matterBelow
+                + " normal=" + n
+                + " ignoreUnfinished=" + ig
+                + " at " + FormatCoords(coords));
+        }
+
+        return new GroundingCheck(
+            pieces.Count > 0,
+            pieces.Count == 0 || all,
+            pieces.Count == 0 ? "no solid-matter foundation blocks found" : string.Join("; ", pieces));
     }
 
     static string BuildReport(
@@ -344,46 +398,6 @@ internal static class Diagnostic
         }
 
         return result;
-    }
-
-    static string RecheckGrounding(object upper)
-    {
-        object? grounded = GetComponent(upper, GroundedConstructionSiteType);
-        if (grounded == null)
-            return "GroundedConstructionSite component missing";
-
-        object mv = GetField(grounded, "_matterBelowValidator");
-        MethodInfo normal = MatterBelowValidatorType.GetMethod("Validate", AnyInstance)
-            ?? throw new MissingMethodException(MatterBelowValidatorType.FullName, "Validate");
-        MethodInfo ignore = MatterBelowValidatorType.GetMethod("ValidateIgnoringUnfinishedStackable", AnyInstance)
-            ?? throw new MissingMethodException(MatterBelowValidatorType.FullName, "ValidateIgnoringUnfinishedStackable");
-
-        int baseZ = GetInt(GetMember(upper, "CoordinatesAtBaseZ"), "z");
-        object positioned = GetMember(upper, "PositionedBlocks");
-
-        var pieces = new List<string>();
-        int i = 0;
-        foreach (object block in Enumerate(InvokeNoArgs(positioned, "GetOccupiedBlocks")))
-        {
-            object coords = GetMember(block, "Coordinates");
-            if (GetInt(coords, "z") != baseZ)
-                continue;
-
-            string matterBelow = Convert.ToString(GetMember(block, "MatterBelow")) ?? "";
-            if (matterBelow != "Ground" && matterBelow != "GroundOrStackable" && matterBelow != "Stackable")
-                continue;
-
-            object?[] a1 = { block };
-            object?[] a2 = { block };
-            bool n = Convert.ToBoolean(normal.Invoke(mv, a1));
-            bool ig = Convert.ToBoolean(ignore.Invoke(mv, a2));
-            pieces.Add("#" + (++i)
-                + " normal=" + n
-                + " ignoreUnfinished=" + ig
-                + " at " + FormatCoords(coords));
-        }
-
-        return pieces.Count == 0 ? "no solid-matter foundation blocks found" : string.Join("; ", pieces);
     }
 
     static string DescribeBlockObject(object bo)
@@ -580,6 +594,20 @@ internal static class Diagnostic
 
     static string FormatCoords(object coords)
         => "(" + GetInt(coords, "x") + "," + GetInt(coords, "y") + "," + GetInt(coords, "z") + ")";
+
+    sealed class GroundingCheck
+    {
+        public bool HasSolidFoundation { get; }
+        public bool AllGrounded { get; }
+        public string Details { get; }
+
+        public GroundingCheck(bool hasSolidFoundation, bool allGrounded, string details)
+        {
+            HasSolidFoundation = hasSolidFoundation;
+            AllGrounded = allGrounded;
+            Details = details;
+        }
+    }
 
     sealed class ValidatorState
     {
