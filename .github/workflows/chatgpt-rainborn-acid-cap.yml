@@ -8,6 +8,13 @@ on:
       - '.chatgpt-build/rainborn-acid-cap/**'
       - '.github/workflows/chatgpt-rainborn-acid-cap.yml'
 
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '.chatgpt-build/rainborn-acid-cap/**'
+      - '.github/workflows/chatgpt-rainborn-acid-cap.yml'
+
 jobs:
   build:
     runs-on: ubuntu-latest
