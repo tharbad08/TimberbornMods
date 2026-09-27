@@ -12,6 +12,7 @@ using Timberborn.SettingsSystem;
 
 namespace Shay.RainbornAcidChanceCap
 {
+    // Built against Timberborn 1.1 API surface.
     public sealed class ModStarter : IModStarter
     {
         private const string HarmonyId = "Shay.RainbornAcidChanceCap";
