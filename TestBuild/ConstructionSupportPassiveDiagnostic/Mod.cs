@@ -13,14 +13,8 @@ public sealed class ModStarter : IModStarter
 {
     public void StartMod(IModEnvironment modEnvironment)
     {
-        try
-        {
-            Diagnostic.Install();
-        }
-        catch (Exception ex)
-        {
-            Log.Write("[SUPPORTDIAG] Failed to install: " + ex);
-        }
+        try { Diagnostic.Install(); }
+        catch (Exception ex) { Log.Write("[LEVEE-CMP] Failed to install: " + ex); }
     }
 }
 
@@ -29,18 +23,22 @@ internal static class Diagnostic
     const BindingFlags AnyInstance = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
     const BindingFlags AnyStatic = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
+    const string VanillaLevee = "Levee.Folktails";
+    const string SquareLevee = "DD_SquareW1x1.Folktails";
+
     static Type ConstructionSiteType = null!;
     static Type GroundedConstructionSiteType = null!;
     static Type MatterBelowValidatorType = null!;
     static Type ConstructionSiteAccessibleType = null!;
-    static Type BlockObjectType = null!;
 
     static readonly Stopwatch Clock = Stopwatch.StartNew();
-    static long lastScanMs;
+    static long lastPollMs;
     static bool dumpedFinalPatchMap;
+
     static readonly HashSet<object> ConstructionSites = new(ReferenceEqualityComparer.Instance);
-    static readonly Dictionary<int, string> LastState = new();
-    static readonly HashSet<int> LoggedNormalSupport = new();
+    static readonly Dictionary<int, string> LastPollSignature = new();
+    static readonly Dictionary<int, int> LastProgressBucket = new();
+    static readonly HashSet<int> LoggedBuildStacks = new();
 
     public static void Install()
     {
@@ -48,7 +46,6 @@ internal static class Diagnostic
         GroundedConstructionSiteType = FindType("Timberborn.ConstructionSites.GroundedConstructionSite, Timberborn.ConstructionSites");
         MatterBelowValidatorType = FindType("Timberborn.BlockSystem.MatterBelowValidator, Timberborn.BlockSystem");
         ConstructionSiteAccessibleType = FindType("Timberborn.BuildingsNavigation.ConstructionSiteAccessible, Timberborn.BuildingsNavigation");
-        BlockObjectType = FindType("Timberborn.BlockSystem.BlockObject, Timberborn.BlockSystem");
 
         var registryType = FindType("Timberborn.EntitySystem.EntityComponentRegistry, Timberborn.EntitySystem");
         var entityComponentType = FindType("Timberborn.EntitySystem.EntityComponent, Timberborn.EntitySystem");
@@ -61,39 +58,24 @@ internal static class Diagnostic
         HarmonyBridge.PatchPostfix(register, typeof(Diagnostic).GetMethod(nameof(AfterEntityRegistered), AnyStatic)!);
         HarmonyBridge.PatchPostfix(unregister, typeof(Diagnostic).GetMethod(nameof(AfterEntityUnregistered), AnyStatic)!);
 
-        // Deliberately patch the global simulation tick, NOT any construction method.
-        // This gives us frequent sampling without touching construction behavior.
         var tickServiceType = FindType("Timberborn.TickSystem.TickableSingletonService, Timberborn.TickSystem");
         var tick = tickServiceType.GetMethod("TickAll", AnyInstance, null, Type.EmptyTypes, null)
             ?? throw new MissingMethodException(tickServiceType.FullName, "TickAll");
+        HarmonyBridge.PatchPostfix(tick, typeof(Diagnostic).GetMethod(nameof(AfterWorldTick), AnyStatic)!);
 
-        HarmonyBridge.PatchPostfix(tick, typeof(Diagnostic).GetMethod(nameof(AfterUnrelatedWorldTick), AnyStatic)!);
-
-        // Event-driven observers. These do not alter args/results and always allow originals to run.
         var increase = ConstructionSiteType.GetMethod("IncreaseBuildTime", AnyInstance, null, new[] { typeof(float) }, null)
             ?? throw new MissingMethodException(ConstructionSiteType.FullName, "IncreaseBuildTime(float)");
         HarmonyBridge.PatchPrefix(increase, typeof(Diagnostic).GetMethod(nameof(BeforeIncreaseBuildTime), AnyStatic)!);
 
-        var markFinished = BlockObjectType.GetMethod("MarkAsFinished", AnyInstance, null, Type.EmptyTypes, null)
-            ?? throw new MissingMethodException(BlockObjectType.FullName, "MarkAsFinished()");
-        HarmonyBridge.PatchPrefix(markFinished, typeof(Diagnostic).GetMethod(nameof(BeforeMarkAsFinished), AnyStatic)!);
-
-        Log.Write("[SUPPORTDIAG] Diagnostic installed.");
-        Log.Write("[SUPPORTDIAG] Observer hooks only; no args/results/flow are modified.");
-        Log.Write("[SUPPORTDIAG] Sampler hook: " + tick.DeclaringType?.FullName + "." + tick.Name);
-        Log.Write("[SUPPORTDIAG] Event hooks: ConstructionSite.IncreaseBuildTime + BlockObject.MarkAsFinished");
-        DumpConstructionPatchOwners();
+        Log.Write("[LEVEE-CMP] v0.8 installed.");
+        Log.Write("[LEVEE-CMP] Comparing runtime templates: " + VanillaLevee + " vs " + SquareLevee);
+        Log.Write("[LEVEE-CMP] Only construction observer hook: ConstructionSite.IncreaseBuildTime.");
+        Log.Write("[LEVEE-CMP] BlockObject.MarkAsFinished is NOT patched.");
+        DumpConstructionPatchOwners("startup");
     }
 
-    public static void AfterEntityRegistered(object __0)
-    {
-        TrackEntity(__0, add: true);
-    }
-
-    public static void AfterEntityUnregistered(object __0)
-    {
-        TrackEntity(__0, add: false);
-    }
+    public static void AfterEntityRegistered(object __0) => TrackEntity(__0, true);
+    public static void AfterEntityUnregistered(object __0) => TrackEntity(__0, false);
 
     static void TrackEntity(object entityComponent, bool add)
     {
@@ -105,15 +87,52 @@ internal static class Diagnostic
                 if (!ConstructionSiteType.IsInstanceOfType(component))
                     continue;
 
-                if (add)
-                    ConstructionSites.Add(component);
-                else
-                    ConstructionSites.Remove(component);
+                if (add) ConstructionSites.Add(component);
+                else ConstructionSites.Remove(component);
             }
         }
         catch (Exception ex)
         {
-            Log.Write("[SUPPORTDIAG] Registry tracking error: " + ex.GetType().Name + ": " + ex.Message);
+            Log.Write("[LEVEE-CMP] Registry tracking error: " + ex.GetType().Name + ": " + ex.Message);
+        }
+    }
+
+    public static void AfterWorldTick()
+    {
+        long now = Clock.ElapsedMilliseconds;
+        if (now - lastPollMs < 1000)
+            return;
+        lastPollMs = now;
+
+        if (!dumpedFinalPatchMap)
+        {
+            dumpedFinalPatchMap = true;
+            DumpConstructionPatchOwners("after world/mod initialization");
+            Log.Write("[LEVEE-CMP] Tracked ConstructionSite count=" + ConstructionSites.Count);
+        }
+
+        foreach (object site in ConstructionSites.ToArray())
+        {
+            object upper;
+            try { upper = GetField(site, "_blockObject"); }
+            catch { continue; }
+
+            string? kind = TargetKind(upper);
+            if (kind == null)
+                continue;
+
+            int id = GetObjectId(site);
+            string sig = SafeValue(site, "IsOn") + "|" +
+                         SafeValue(site, "ReadyToBuild") + "|" +
+                         SafeValue(site, "BuildTimeProgress") + "|" +
+                         SafeValue(upper, "IsFinished") + "|" +
+                         SafeValue(upper, "IsUnfinished");
+
+            if (LastPollSignature.TryGetValue(id, out string? previous) && previous == sig)
+                continue;
+
+            LastPollSignature[id] = sig;
+            DumpTarget(site, upper, kind, "STATE-CHANGE", includeStack: false);
         }
     }
 
@@ -121,343 +140,191 @@ internal static class Diagnostic
     {
         try
         {
-            ObserveConstructionProgress(__instance, "IncreaseBuildTime(" + __0 + ")");
-        }
-        catch (Exception ex)
-        {
-            Log.Write("[SUPPORTDIAG] IncreaseBuildTime observer error: " + ex);
-        }
-    }
-
-    public static void BeforeMarkAsFinished(object __instance)
-    {
-        try
-        {
-            object? site = GetComponent(__instance, ConstructionSiteType);
-            if (site == null)
+            object upper = GetField(__instance, "_blockObject");
+            string? kind = TargetKind(upper);
+            if (kind == null)
                 return;
 
-            ObserveConstructionProgress(site, "BlockObject.MarkAsFinished");
-        }
-        catch (Exception ex)
-        {
-            Log.Write("[SUPPORTDIAG] MarkAsFinished observer error: " + ex);
-        }
-    }
+            int id = GetObjectId(__instance);
+            double p = SafeDouble(__instance, "BuildTimeProgress");
+            int bucket = p >= 0.95 ? 95 : p >= 0.75 ? 75 : p >= 0.50 ? 50 : p >= 0.25 ? 25 : 0;
 
-    static void ObserveConstructionProgress(object site, string eventName)
-    {
-        object upper;
-        try { upper = GetField(site, "_blockObject"); }
-        catch { return; }
-
-        GroundingCheck check;
-        try { check = RecheckGroundingDetailed(upper); }
-        catch (Exception ex)
-        {
-            Log.Write("[SUPPORTDIAG] EVENT " + eventName + " grounding recheck failed for "
-                + DescribeBlockObject(upper) + ": " + ex);
-            return;
-        }
-
-        if (!check.HasSolidFoundation || check.AllGrounded)
-            return;
-
-        var validators = GetValidators(site);
-        TryGetDirectIncompleteSupports(site, upper, out var supports);
-
-        Log.Write("[SUPPORTDIAG] ===== INVALID CONSTRUCTION EVENT =====");
-        Log.Write("[SUPPORTDIAG] Event=" + eventName);
-        Log.Write(BuildReport(site, upper, supports, validators, check.Details, true));
-        Log.Write("[SUPPORTDIAG] Call stack:" + Environment.NewLine + Environment.StackTrace);
-        Log.Write("[SUPPORTDIAG] ===== END INVALID CONSTRUCTION EVENT =====");
-    }
-
-    public static void AfterUnrelatedWorldTick()
-    {
-        long now = Clock.ElapsedMilliseconds;
-        if (now - lastScanMs < 100)
-            return;
-
-        lastScanMs = now;
-
-        if (!dumpedFinalPatchMap)
-        {
-            dumpedFinalPatchMap = true;
-            Log.Write("[SUPPORTDIAG] Final construction Harmony map after mod/world initialization:");
-            foreach (string line in HarmonyOwnersForRelevantMethods())
-                Log.Write("[SUPPORTDIAG]   " + line);
-            Log.Write("[SUPPORTDIAG] Tracked ConstructionSite count at first scan: " + ConstructionSites.Count);
-        }
-
-        try
-        {
-            Scan();
-        }
-        catch (Exception ex)
-        {
-            Log.Write("[SUPPORTDIAG] Scan error: " + ex);
-        }
-    }
-
-    static void Scan()
-    {
-        object[] sites = ConstructionSites.ToArray();
-
-        foreach (object site in sites)
-        {
-            object upper;
-            try { upper = GetField(site, "_blockObject"); }
-            catch { continue; }
-
-            if (!SafeBool(upper, "IsUnfinished"))
-                continue;
-
-            bool isOn = SafeBool(site, "IsOn");
-            bool ready = SafeBool(site, "ReadyToBuild");
-            bool readyFinish = SafeBool(site, "IsReadyToFinish");
-
-            // Actual construction can only happen while IsOn is true. Keep the hot-path
-            // cheap and only do the expensive independent grounding check for sites that
-            // vanilla currently considers enabled/buildable.
-            if (!isOn && !ready && !readyFinish)
-                continue;
-
-            var validators = GetValidators(site);
-            string groundedTypeName = GroundedConstructionSiteType.FullName ?? "Timberborn.ConstructionSites.GroundedConstructionSite";
-            bool groundedPresent = validators.Any(v => v.TypeName.StartsWith(groundedTypeName, StringComparison.Ordinal));
-            bool groundedValid = validators.Any(v => v.TypeName.StartsWith(groundedTypeName, StringComparison.Ordinal) && v.IsValid);
-
-            GroundingCheck check;
-            try { check = RecheckGroundingDetailed(upper); }
-            catch (Exception ex)
+            if (!LastProgressBucket.TryGetValue(id, out int oldBucket) || oldBucket != bucket)
             {
-                Log.Write("[SUPPORTDIAG] Recheck error for " + DescribeBlockObject(upper) + ": " + ex);
-                continue;
+                LastProgressBucket[id] = bucket;
+                DumpTarget(__instance, upper, kind,
+                    "IncreaseBuildTime delta=" + __0 + " progressBucket=" + bucket,
+                    includeStack: LoggedBuildStacks.Add(id));
             }
-
-            // Buildings with no solid-matter foundation requirement are irrelevant.
-            if (!check.HasSolidFoundation)
-                continue;
-
-            bool anomaly = !check.AllGrounded || !groundedPresent || (groundedPresent && groundedValid != check.AllGrounded);
-            if (!anomaly)
-                continue;
-
-            int id = GetObjectId(site);
-            string signature =
-                "isOn=" + isOn +
-                "|ready=" + ready +
-                "|readyFinish=" + readyFinish +
-                "|groundedPresent=" + groundedPresent +
-                "|groundedValid=" + groundedValid +
-                "|allGrounded=" + check.AllGrounded +
-                "|details=" + check.Details;
-
-            if (LastState.TryGetValue(id, out string? previous) && previous == signature)
-                continue;
-
-            LastState[id] = signature;
-
-            TryGetDirectIncompleteSupports(site, upper, out var supports);
-            Log.Write(BuildReport(site, upper, supports, validators, check.Details, !check.AllGrounded));
+        }
+        catch (Exception ex)
+        {
+            Log.Write("[LEVEE-CMP] IncreaseBuildTime observer error: " + ex);
         }
     }
 
-    static GroundingCheck RecheckGroundingDetailed(object upper)
+    static string? TargetKind(object blockObject)
     {
-        object? grounded = GetComponent(upper, GroundedConstructionSiteType);
-        if (grounded == null)
-        {
-            // We can still determine whether the template has a solid foundation requirement.
-            int baseZ0 = GetInt(GetMember(upper, "CoordinatesAtBaseZ"), "z");
-            object positioned0 = GetMember(upper, "PositionedBlocks");
-            bool hasSolid0 = false;
-            foreach (object block in Enumerate(InvokeNoArgs(positioned0, "GetOccupiedBlocks")))
-            {
-                object coords = GetMember(block, "Coordinates");
-                if (GetInt(coords, "z") != baseZ0)
-                    continue;
-                string matter = Convert.ToString(GetMember(block, "MatterBelow")) ?? "";
-                if (matter == "Ground" || matter == "GroundOrStackable" || matter == "Stackable")
-                {
-                    hasSolid0 = true;
-                    break;
-                }
-            }
-            return new GroundingCheck(hasSolid0, false, "GroundedConstructionSite component missing");
-        }
-
-        object mv = GetField(grounded, "_matterBelowValidator");
-        MethodInfo normal = MatterBelowValidatorType.GetMethods(AnyInstance)
-            .Single(m => m.Name == "Validate" && m.GetParameters().Length == 1);
-        MethodInfo ignore = MatterBelowValidatorType.GetMethods(AnyInstance)
-            .Single(m => m.Name == "ValidateIgnoringUnfinishedStackable" && m.GetParameters().Length == 1);
-
-        int baseZ = GetInt(GetMember(upper, "CoordinatesAtBaseZ"), "z");
-        object positioned = GetMember(upper, "PositionedBlocks");
-
-        var pieces = new List<string>();
-        bool all = true;
-        int i = 0;
-
-        foreach (object block in Enumerate(InvokeNoArgs(positioned, "GetOccupiedBlocks")))
-        {
-            object coords = GetMember(block, "Coordinates");
-            if (GetInt(coords, "z") != baseZ)
-                continue;
-
-            string matterBelow = Convert.ToString(GetMember(block, "MatterBelow")) ?? "";
-            if (matterBelow != "Ground" && matterBelow != "GroundOrStackable" && matterBelow != "Stackable")
-                continue;
-
-            object?[] a1 = { block };
-            object?[] a2 = { block };
-            bool n = Convert.ToBoolean(normal.Invoke(mv, a1));
-            bool ig = Convert.ToBoolean(ignore.Invoke(mv, a2));
-            all &= ig;
-            pieces.Add("#" + (++i)
-                + " matter=" + matterBelow
-                + " normal=" + n
-                + " ignoreUnfinished=" + ig
-                + " at " + FormatCoords(coords));
-        }
-
-        return new GroundingCheck(
-            pieces.Count > 0,
-            pieces.Count == 0 || all,
-            pieces.Count == 0 ? "no solid-matter foundation blocks found" : string.Join("; ", pieces));
+        string name = Convert.ToString(GetMember(blockObject, "Name")) ?? "";
+        if (name.StartsWith(VanillaLevee, StringComparison.Ordinal))
+            return "BUGGED-LANDSCAPING-LEVEE";
+        if (name.StartsWith(SquareLevee, StringComparison.Ordinal))
+            return "GOOD-SQUARE-LEVEE";
+        return null;
     }
 
-    static string BuildReport(
-        object site,
-        object upper,
-        List<object> supports,
-        List<ValidatorState> validators,
-        string groundingRecheck,
-        bool independentInvalid)
+    static void DumpTarget(object site, object upper, string kind, string reason, bool includeStack)
     {
         var lines = new List<string>();
-        lines.Add("[SUPPORTDIAG] ===== SUPPORT ANOMALY =====");
-        lines.Add("[SUPPORTDIAG] Upper: " + DescribeBlockObject(upper));
-        lines.Add("[SUPPORTDIAG] Site: IsOn=" + SafeValue(site, "IsOn")
+        lines.Add("[LEVEE-CMP] ===== " + kind + " =====");
+        lines.Add("[LEVEE-CMP] Reason=" + reason);
+        lines.Add("[LEVEE-CMP] Object=" + DescribeBlockObject(upper));
+        lines.Add("[LEVEE-CMP] Site: IsOn=" + SafeValue(site, "IsOn")
             + " ReadyToBuild=" + SafeValue(site, "ReadyToBuild")
             + " IsReadyToFinish=" + SafeValue(site, "IsReadyToFinish")
             + " BuildTimeProgress=" + SafeValue(site, "BuildTimeProgress")
             + " BuildTimeProgressInHours=" + SafeValue(site, "BuildTimeProgressInHours")
             + " MaterialProgress=" + SafeValue(site, "MaterialProgress"));
 
-        lines.Add("[SUPPORTDIAG] Validators:");
+        lines.Add("[LEVEE-CMP] Components (" + ComponentNames(upper).Count + "):");
+        foreach (string component in ComponentNames(upper))
+            lines.Add("[LEVEE-CMP]   COMPONENT " + component);
+
+        var validators = GetValidators(site);
+        lines.Add("[LEVEE-CMP] Validators (" + validators.Count + "):");
         foreach (var v in validators)
-            lines.Add("[SUPPORTDIAG]   - " + v.TypeName + " IsValid=" + v.IsValid);
+            lines.Add("[LEVEE-CMP]   VALIDATOR " + v.TypeName + " IsValid=" + v.IsValid);
 
-        string groundedTypeName = GroundedConstructionSiteType.FullName ?? "Timberborn.ConstructionSites.GroundedConstructionSite";
-        if (validators.All(v => !v.TypeName.StartsWith(groundedTypeName, StringComparison.Ordinal)))
-            lines.Add("[SUPPORTDIAG]   !!! GroundedConstructionSite validator MISSING");
-
-        object? groundedComponent = GetComponent(upper, GroundedConstructionSiteType);
-        lines.Add("[SUPPORTDIAG] Grounded component present=" + (groundedComponent != null)
-            + (groundedComponent == null ? "" : " IsValid=" + SafeValue(groundedComponent, "IsValid")));
-
-        lines.Add("[SUPPORTDIAG] Direct incomplete support(s):");
-        if (supports.Count == 0)
-            lines.Add("[SUPPORTDIAG]   - none detected by support enumerator");
-        foreach (object support in supports)
-        {
-            object? ss = GetComponent(support, ConstructionSiteType);
-            string extra = ss == null ? "" :
-                " | supportSiteProgress=" + SafeValue(ss, "BuildTimeProgress")
-                + " supportHours=" + SafeValue(ss, "BuildTimeProgressInHours");
-            lines.Add("[SUPPORTDIAG]   - " + DescribeBlockObject(support) + extra);
-        }
-
-        lines.Add("[SUPPORTDIAG] Independent grounding re-check: " + groundingRecheck);
-        lines.Add("[SUPPORTDIAG] Independent support says blocked=" + independentInvalid);
+        object? grounded = GetComponent(upper, GroundedConstructionSiteType);
+        lines.Add("[LEVEE-CMP] GroundedConstructionSite present=" + (grounded != null)
+            + (grounded == null ? "" : " IsValid=" + SafeValue(grounded, "IsValid")));
 
         object? accessible = GetComponent(upper, ConstructionSiteAccessibleType);
         if (accessible != null)
         {
-            lines.Add("[SUPPORTDIAG] Reach: MinZ=" + SafeValue(accessible, "MinZ")
-                + " MaxZ=" + SafeValue(accessible, "MaxZ")
-                + " upperBase=" + SafeValue(upper, "CoordinatesAtBaseZ"));
+            lines.Add("[LEVEE-CMP] Reach MinZ=" + SafeValue(accessible, "MinZ")
+                + " MaxZ=" + SafeValue(accessible, "MaxZ"));
         }
 
-        lines.Add("[SUPPORTDIAG] Construction Harmony owners:");
-        foreach (string s in HarmonyOwnersForRelevantMethods())
-            lines.Add("[SUPPORTDIAG]   " + s);
+        try
+        {
+            DumpBlocksAndSupports(lines, upper, grounded);
+        }
+        catch (Exception ex)
+        {
+            lines.Add("[LEVEE-CMP] BLOCK/SUPPORT DUMP ERROR: " + ex);
+        }
 
-        lines.Add("[SUPPORTDIAG] ===== END SUPPORT ANOMALY =====");
-        return string.Join(Environment.NewLine, lines);
+        if (includeStack)
+            lines.Add("[LEVEE-CMP] First-build call stack:" + Environment.NewLine + Environment.StackTrace);
+
+        lines.Add("[LEVEE-CMP] ===== END " + kind + " =====");
+        Log.Write(string.Join(Environment.NewLine, lines));
     }
 
-    static bool TryGetDirectIncompleteSupports(object site, object upper, out List<object> supports)
+    static void DumpBlocksAndSupports(List<string> lines, object upper, object? grounded)
     {
-        supports = new List<object>();
-        var seen = new HashSet<int>();
-
-        int baseZ = GetInt(GetMember(upper, "CoordinatesAtBaseZ"), "z");
         object positioned = GetMember(upper, "PositionedBlocks");
         object blockService = GetField(upper, "_blockService");
+        int baseZ = GetInt(GetMember(upper, "CoordinatesAtBaseZ"), "z");
 
+        object? matterValidator = grounded == null ? null : GetField(grounded, "_matterBelowValidator");
+        MethodInfo? validate = matterValidator == null ? null : MatterBelowValidatorType.GetMethods(AnyInstance)
+            .Single(m => m.Name == "Validate" && m.GetParameters().Length == 1);
+        MethodInfo? validateIgnore = matterValidator == null ? null : MatterBelowValidatorType.GetMethods(AnyInstance)
+            .Single(m => m.Name == "ValidateIgnoringUnfinishedStackable" && m.GetParameters().Length == 1);
+
+        object? stackableService = matterValidator == null ? null : GetField(matterValidator, "_stackableBlockService");
+        MethodInfo? finishedStackable = stackableService?.GetType().GetMethods(AnyInstance)
+            .Single(m => m.Name == "IsFinishedStackableBlockAt" && m.GetParameters().Length == 1);
+
+        int n = 0;
         foreach (object block in Enumerate(InvokeNoArgs(positioned, "GetOccupiedBlocks")))
         {
+            n++;
             object coords = GetMember(block, "Coordinates");
-            if (GetInt(coords, "z") != baseZ)
+            bool atBase = GetInt(coords, "z") == baseZ;
+
+            lines.Add("[LEVEE-CMP] BLOCK #" + n
+                + " coords=" + FormatCoords(coords)
+                + " atBase=" + atBase
+                + " MatterBelow=" + SafeValue(block, "MatterBelow")
+                + " Stackable=" + SafeValue(block, "Stackable")
+                + " Occupations=" + SafeValue(block, "Occupations")
+                + " Underground=" + SafeValue(block, "Underground")
+                + " IsFoundationBlock=" + SafeValue(block, "IsFoundationBlock"));
+
+            if (!atBase)
                 continue;
 
-            string matterBelow = Convert.ToString(GetMember(block, "MatterBelow")) ?? "";
-            if (matterBelow != "Ground" && matterBelow != "GroundOrStackable" && matterBelow != "Stackable")
-                continue;
+            if (matterValidator != null && validate != null && validateIgnore != null)
+            {
+                object?[] a1 = { block };
+                object?[] a2 = { block };
+                bool normal = Convert.ToBoolean(validate.Invoke(matterValidator, a1));
+                bool ignore = Convert.ToBoolean(validateIgnore.Invoke(matterValidator, a2));
+                lines.Add("[LEVEE-CMP]   MatterBelowValidator normal=" + normal
+                    + " ignoreUnfinishedStackable=" + ignore);
+            }
 
             object below = CreateBelow(coords);
-            object objectsAt;
-            try { objectsAt = InvokeOneArg(blockService, "GetObjectsAt", below); }
-            catch { continue; }
 
-            foreach (object candidate in Enumerate(objectsAt))
+            if (stackableService != null && finishedStackable != null)
             {
-                if (ReferenceEquals(candidate, upper))
-                    continue;
+                bool fs = Convert.ToBoolean(finishedStackable.Invoke(stackableService, new[] { below }));
+                lines.Add("[LEVEE-CMP]   IsFinishedStackableBlockAt(" + FormatCoords(below) + ")=" + fs);
+            }
 
-                object candidateBlocks;
-                object candidateBlock;
+            object objectsAt = InvokeOneArg(blockService, "GetObjectsAt", below);
+            var belowObjects = Enumerate(objectsAt).Cast<object>().ToList();
+            lines.Add("[LEVEE-CMP]   Below " + FormatCoords(below) + " objects=" + belowObjects.Count);
+
+            foreach (object candidate in belowObjects)
+            {
+                string blockDetail;
                 try
                 {
-                    candidateBlocks = GetMember(candidate, "PositionedBlocks");
-                    candidateBlock = InvokeOneArg(candidateBlocks, "GetBlock", below);
+                    object cpos = GetMember(candidate, "PositionedBlocks");
+                    object cblock = InvokeOneArg(cpos, "GetBlock", below);
+                    blockDetail = " block.Stackable=" + SafeValue(cblock, "Stackable")
+                        + " block.MatterBelow=" + SafeValue(cblock, "MatterBelow")
+                        + " block.Occupations=" + SafeValue(cblock, "Occupations")
+                        + " block.Underground=" + SafeValue(cblock, "Underground");
                 }
-                catch
+                catch (Exception ex)
                 {
-                    continue;
+                    blockDetail = " block=<error:" + ex.GetType().Name + ">";
                 }
 
-                string stackable = Convert.ToString(GetMember(candidateBlock, "Stackable")) ?? "None";
-                if (stackable == "None")
-                    continue;
+                object? supportSite = GetComponent(candidate, ConstructionSiteType);
+                string supportProgress = supportSite == null ? "" :
+                    " supportProgress=" + SafeValue(supportSite, "BuildTimeProgress")
+                    + " supportIsOn=" + SafeValue(supportSite, "IsOn");
 
-                bool unfinished = SafeBool(candidate, "IsUnfinished");
-                object? candidateSite = GetComponent(candidate, ConstructionSiteType);
-                bool progressIncomplete = false;
-                if (candidateSite != null)
-                {
-                    try
-                    {
-                        double p = Convert.ToDouble(GetMember(candidateSite, "BuildTimeProgress"));
-                        progressIncomplete = p < 0.999;
-                    }
-                    catch { }
-                }
-
-                if (!unfinished && !progressIncomplete)
-                    continue;
-
-                int id = GetObjectId(candidate);
-                if (seen.Add(id))
-                    supports.Add(candidate);
+                lines.Add("[LEVEE-CMP]     SUPPORT name=" + SafeValue(candidate, "Name")
+                    + " coords=" + SafeValue(candidate, "Coordinates")
+                    + " finished=" + SafeValue(candidate, "IsFinished")
+                    + " unfinished=" + SafeValue(candidate, "IsUnfinished")
+                    + supportProgress
+                    + blockDetail);
             }
         }
+    }
 
-        return supports.Count > 0;
+    static List<string> ComponentNames(object blockObject)
+    {
+        try
+        {
+            object all = GetMember(blockObject, "AllComponents");
+            return Enumerate(all).Cast<object>()
+                .Select(x => x.GetType().FullName ?? x.GetType().Name)
+                .OrderBy(x => x, StringComparer.Ordinal)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            return new List<string> { "<component-list-error:" + ex.GetType().Name + ">" };
+        }
     }
 
     static List<ValidatorState> GetValidators(object site)
@@ -474,52 +341,34 @@ internal static class Diagnostic
         foreach (object v in Enumerate(validators))
         {
             bool isValid;
-            string detail = "";
-            try
-            {
-                isValid = Convert.ToBoolean(GetMember(v, "IsValid"));
-                MethodInfo? validate = v.GetType().GetMethod("Validate", AnyInstance, null, Type.EmptyTypes, null);
-                if (validate != null)
-                    detail = " ValidateOwner=" + (validate.DeclaringType?.FullName ?? "?");
-            }
-            catch (Exception ex)
-            {
-                isValid = false;
-                detail = " <read-error:" + ex.GetType().Name + ">";
-            }
+            try { isValid = Convert.ToBoolean(GetMember(v, "IsValid")); }
+            catch { isValid = false; }
 
-            result.Add(new ValidatorState(
-                (v.GetType().FullName ?? v.GetType().Name) + detail,
-                isValid));
+            result.Add(new ValidatorState(v.GetType().FullName ?? v.GetType().Name, isValid));
         }
-
         return result;
     }
 
     static string DescribeBlockObject(object bo)
     {
-        object? site = GetComponent(bo, ConstructionSiteType);
-        string siteInfo = site == null
-            ? " no ConstructionSite"
-            : " progress=" + SafeValue(site, "BuildTimeProgress")
-              + " hours=" + SafeValue(site, "BuildTimeProgressInHours")
-              + " IsOn=" + SafeValue(site, "IsOn")
-              + " ReadyToBuild=" + SafeValue(site, "ReadyToBuild")
-            + " templateHint=" + SafeValue(bo, "Name");
-
         return "Name=" + SafeValue(bo, "Name")
             + " Coordinates=" + SafeValue(bo, "Coordinates")
             + " Base=" + SafeValue(bo, "CoordinatesAtBaseZ")
-            + " unfinished=" + SafeValue(bo, "IsUnfinished")
-            + " finished=" + SafeValue(bo, "IsFinished")
-            + siteInfo;
+            + " IsFinished=" + SafeValue(bo, "IsFinished")
+            + " IsUnfinished=" + SafeValue(bo, "IsUnfinished")
+            + " IsPreview=" + SafeValue(bo, "IsPreview")
+            + " Solid=" + SafeValue(bo, "Solid")
+            + " GroundOnly=" + SafeValue(bo, "GroundOnly")
+            + " AboveGround=" + SafeValue(bo, "AboveGround")
+            + " AddedToService=" + SafeValue(bo, "AddedToService")
+            + " Overridable=" + SafeValue(bo, "Overridable");
     }
 
-    static void DumpConstructionPatchOwners()
+    static void DumpConstructionPatchOwners(string phase)
     {
-        Log.Write("[SUPPORTDIAG] Construction Harmony map at startup:");
+        Log.Write("[LEVEE-CMP] Harmony map " + phase + ":");
         foreach (string line in HarmonyOwnersForRelevantMethods())
-            Log.Write("[SUPPORTDIAG]   " + line);
+            Log.Write("[LEVEE-CMP]   " + line);
     }
 
     static IEnumerable<string> HarmonyOwnersForRelevantMethods()
@@ -528,41 +377,27 @@ internal static class Diagnostic
         {
             ("ConstructionSite.ReadyToBuild", ConstructionSiteType.GetProperty("ReadyToBuild", AnyInstance)?.GetGetMethod(true)),
             ("ConstructionSite.IsOn", ConstructionSiteType.GetProperty("IsOn", AnyInstance)?.GetGetMethod(true)),
-            ("ConstructionSite.IsReadyToFinish", ConstructionSiteType.GetProperty("IsReadyToFinish", AnyInstance)?.GetGetMethod(true)),
             ("ConstructionSite.IncreaseBuildTime", ConstructionSiteType.GetMethod("IncreaseBuildTime", AnyInstance, null, new[] { typeof(float) }, null)),
-            ("ConstructionSite.FinishNow", ConstructionSiteType.GetMethod("FinishNow", AnyInstance)),
-            ("ConstructionSite.FinishIfRequirementsMet", ConstructionSiteType.GetMethod("FinishIfRequirementsMet", AnyInstance)),
             ("GroundedConstructionSite.Validate", GroundedConstructionSiteType.GetMethod("Validate", AnyInstance)),
-            ("MatterBelowValidator.ValidateIgnoringUnfinishedStackable", MatterBelowValidatorType.GetMethod("ValidateIgnoringUnfinishedStackable", AnyInstance)),
+            ("MatterBelowValidator.ValidateIgnoringUnfinishedStackable", MatterBelowValidatorType.GetMethods(AnyInstance).FirstOrDefault(m => m.Name == "ValidateIgnoringUnfinishedStackable" && m.GetParameters().Length == 1)),
             ("ConstructionSiteAccessible.MinZ", ConstructionSiteAccessibleType.GetProperty("MinZ", AnyInstance)?.GetGetMethod(true)),
             ("ConstructionSiteAccessible.MaxZ", ConstructionSiteAccessibleType.GetProperty("MaxZ", AnyInstance)?.GetGetMethod(true)),
         };
 
         foreach (var t in targets)
-        {
-            if (t.Method == null)
-            {
-                yield return t.Name + ": method not found";
-                continue;
-            }
-
-            yield return t.Name + ": " + HarmonyBridge.DescribePatchInfo(t.Method);
-        }
+            yield return t.Name + ": " + (t.Method == null ? "method not found" : HarmonyBridge.DescribePatchInfo(t.Method));
     }
 
-    static Type FindType(string qualifiedName)
-        => Type.GetType(qualifiedName, throwOnError: true)!;
+    static Type FindType(string qualifiedName) => Type.GetType(qualifiedName, throwOnError: true)!;
 
     static int GetObjectId(object obj)
     {
         try
         {
             MethodInfo? m = obj.GetType().GetMethod("GetInstanceID", AnyInstance, null, Type.EmptyTypes, null);
-            if (m != null)
-                return Convert.ToInt32(m.Invoke(obj, null));
+            if (m != null) return Convert.ToInt32(m.Invoke(obj, null));
         }
         catch { }
-
         return RuntimeHelpers.GetHashCode(obj);
     }
 
@@ -570,41 +405,29 @@ internal static class Diagnostic
     {
         MethodInfo? m = instance.GetType().GetMethods(AnyInstance)
             .FirstOrDefault(x => x.Name == "GetComponent" && x.IsGenericMethodDefinition && x.GetParameters().Length == 0);
-
-        if (m == null)
-            return null;
-
+        if (m == null) return null;
         try { return m.MakeGenericMethod(componentType).Invoke(instance, null); }
         catch { return null; }
     }
 
     static string SafeValue(object instance, string name)
     {
-        try
-        {
-            object? v = GetMember(instance, name);
-            return v?.ToString() ?? "null";
-        }
-        catch (Exception ex)
-        {
-            return "<error:" + ex.GetType().Name + ">";
-        }
+        try { return GetMember(instance, name)?.ToString() ?? "null"; }
+        catch (Exception ex) { return "<error:" + ex.GetType().Name + ">"; }
     }
 
-    static bool SafeBool(object instance, string name)
+    static double SafeDouble(object instance, string name)
     {
-        try { return Convert.ToBoolean(GetMember(instance, name)); }
-        catch { return false; }
+        try { return Convert.ToDouble(GetMember(instance, name)); }
+        catch { return 0.0; }
     }
 
-    static int GetInt(object instance, string name)
-        => Convert.ToInt32(GetMember(instance, name));
+    static int GetInt(object instance, string name) => Convert.ToInt32(GetMember(instance, name));
 
     static object GetField(object instance, string name)
     {
         FieldInfo? f = FindField(instance.GetType(), name);
-        if (f == null)
-            throw new MissingFieldException(instance.GetType().FullName, name);
+        if (f == null) throw new MissingFieldException(instance.GetType().FullName, name);
         return f.GetValue(instance)!;
     }
 
@@ -613,8 +436,7 @@ internal static class Diagnostic
         while (type != null)
         {
             FieldInfo? f = type.GetField(name, AnyInstance);
-            if (f != null)
-                return f;
+            if (f != null) return f;
             type = type.BaseType;
         }
         return null;
@@ -626,16 +448,11 @@ internal static class Diagnostic
         while (type != null)
         {
             PropertyInfo? p = type.GetProperty(name, AnyInstance);
-            if (p != null)
-                return p.GetValue(instance)!;
-
+            if (p != null) return p.GetValue(instance)!;
             FieldInfo? f = type.GetField(name, AnyInstance);
-            if (f != null)
-                return f.GetValue(instance)!;
-
+            if (f != null) return f.GetValue(instance)!;
             type = type.BaseType;
         }
-
         throw new MissingMemberException(instance.GetType().FullName, name);
     }
 
@@ -643,8 +460,7 @@ internal static class Diagnostic
     {
         MethodInfo? m = instance.GetType().GetMethods(AnyInstance)
             .FirstOrDefault(x => x.Name == name && x.GetParameters().Length == 0);
-        if (m == null)
-            throw new MissingMethodException(instance.GetType().FullName, name);
+        if (m == null) throw new MissingMethodException(instance.GetType().FullName, name);
         return m.Invoke(instance, null)!;
     }
 
@@ -653,68 +469,41 @@ internal static class Diagnostic
         MethodInfo? m = instance.GetType().GetMethods(AnyInstance)
             .FirstOrDefault(x =>
             {
-                if (x.Name != name)
-                    return false;
+                if (x.Name != name) return false;
                 ParameterInfo[] p = x.GetParameters();
-                if (p.Length != 1)
-                    return false;
-
+                if (p.Length != 1) return false;
                 Type pt = p[0].ParameterType;
-                if (pt.IsByRef)
-                    pt = pt.GetElementType()!;
-
+                if (pt.IsByRef) pt = pt.GetElementType()!;
                 return pt.IsInstanceOfType(argument);
             });
 
-        if (m == null)
-            throw new MissingMethodException(instance.GetType().FullName, name);
-
+        if (m == null) throw new MissingMethodException(instance.GetType().FullName, name);
         return m.Invoke(instance, new[] { argument })!;
     }
 
     static IEnumerable Enumerate(object value)
     {
-        if (value is IEnumerable e)
-            return e;
+        if (value is IEnumerable e) return e;
         throw new InvalidOperationException(value.GetType().FullName + " is not enumerable");
     }
 
     static object CreateBelow(object coords)
     {
         Type t = coords.GetType();
-        int x = GetInt(coords, "x");
-        int y = GetInt(coords, "y");
-        int z = GetInt(coords, "z") - 1;
-        return Activator.CreateInstance(t, x, y, z)!;
+        return Activator.CreateInstance(t,
+            GetInt(coords, "x"),
+            GetInt(coords, "y"),
+            GetInt(coords, "z") - 1)!;
     }
 
     static string FormatCoords(object coords)
         => "(" + GetInt(coords, "x") + "," + GetInt(coords, "y") + "," + GetInt(coords, "z") + ")";
 
-    sealed class GroundingCheck
-    {
-        public bool HasSolidFoundation { get; }
-        public bool AllGrounded { get; }
-        public string Details { get; }
-
-        public GroundingCheck(bool hasSolidFoundation, bool allGrounded, string details)
-        {
-            HasSolidFoundation = hasSolidFoundation;
-            AllGrounded = allGrounded;
-            Details = details;
-        }
-    }
-
     sealed class ValidatorState
     {
         public string TypeName { get; }
         public bool IsValid { get; }
-
-        public ValidatorState(string typeName, bool isValid)
-        {
-            TypeName = typeName;
-            IsValid = isValid;
-        }
+        public ValidatorState(string typeName, bool isValid) { TypeName = typeName; IsValid = isValid; }
     }
 
     sealed class ReferenceEqualityComparer : IEqualityComparer<object>
@@ -728,34 +517,23 @@ internal static class Diagnostic
 internal static class HarmonyBridge
 {
     const BindingFlags Any = BindingFlags.Static | BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-
     static readonly Type HarmonyType = Type.GetType("HarmonyLib.Harmony, 0Harmony", throwOnError: true)!;
     static readonly Type HarmonyMethodType = Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", throwOnError: true)!;
 
     public static void PatchPrefix(MethodBase original, MethodInfo patchMethodInfo)
     {
-        object harmony = Activator.CreateInstance(HarmonyType, "ConstructionSupportPassiveDiagnostic")!;
-        object hm = Activator.CreateInstance(HarmonyMethodType, patchMethodInfo)!;
-
-        MethodInfo patch = HarmonyType.GetMethods(BindingFlags.Instance | BindingFlags.Public)
-            .Where(m => m.Name == "Patch")
-            .First(m =>
-            {
-                ParameterInfo[] p = m.GetParameters();
-                return p.Length >= 3 && typeof(MethodBase).IsAssignableFrom(p[0].ParameterType);
-            });
-
-        object?[] args = new object?[patch.GetParameters().Length];
-        args[0] = original;
-        args[1] = hm;
-        patch.Invoke(harmony, args);
+        Patch(original, patchMethodInfo, prefix: true);
     }
 
     public static void PatchPostfix(MethodBase original, MethodInfo patchMethodInfo)
     {
+        Patch(original, patchMethodInfo, prefix: false);
+    }
+
+    static void Patch(MethodBase original, MethodInfo patchMethodInfo, bool prefix)
+    {
         object harmony = Activator.CreateInstance(HarmonyType, "ConstructionSupportPassiveDiagnostic")!;
         object hm = Activator.CreateInstance(HarmonyMethodType, patchMethodInfo)!;
-
         MethodInfo patch = HarmonyType.GetMethods(BindingFlags.Instance | BindingFlags.Public)
             .Where(m => m.Name == "Patch")
             .First(m =>
@@ -766,7 +544,7 @@ internal static class HarmonyBridge
 
         object?[] args = new object?[patch.GetParameters().Length];
         args[0] = original;
-        args[2] = hm;
+        args[prefix ? 1 : 2] = hm;
         patch.Invoke(harmony, args);
     }
 
@@ -775,25 +553,18 @@ internal static class HarmonyBridge
         try
         {
             MethodInfo? getPatchInfo = HarmonyType.GetMethod(
-                "GetPatchInfo",
-                BindingFlags.Static | BindingFlags.Public,
-                null,
-                new[] { typeof(MethodBase) },
-                null);
-
-            if (getPatchInfo == null)
-                return "GetPatchInfo unavailable";
+                "GetPatchInfo", BindingFlags.Static | BindingFlags.Public, null,
+                new[] { typeof(MethodBase) }, null);
+            if (getPatchInfo == null) return "GetPatchInfo unavailable";
 
             object? info = getPatchInfo.Invoke(null, new object?[] { method });
-            if (info == null)
-                return "none";
+            if (info == null) return "none";
 
             var parts = new List<string>();
             foreach (string category in new[] { "Prefixes", "Postfixes", "Transpilers", "Finalizers" })
             {
                 object? collection = ReadMember(info, category);
-                if (collection is not IEnumerable enumerable)
-                    continue;
+                if (collection is not IEnumerable enumerable) continue;
 
                 var entries = new List<string>();
                 foreach (object p in enumerable)
@@ -805,11 +576,8 @@ internal static class HarmonyBridge
                         : "?";
                     entries.Add(owner + "=>" + methodName);
                 }
-
-                if (entries.Count > 0)
-                    parts.Add(category + "[" + string.Join(", ", entries) + "]");
+                if (entries.Count > 0) parts.Add(category + "[" + string.Join(", ", entries) + "]");
             }
-
             return parts.Count == 0 ? "none" : string.Join(" ", parts);
         }
         catch (Exception ex)
@@ -824,16 +592,11 @@ internal static class HarmonyBridge
         while (t != null)
         {
             PropertyInfo? p = t.GetProperty(name, Any);
-            if (p != null)
-                return p.GetValue(instance);
-
+            if (p != null) return p.GetValue(instance);
             FieldInfo? f = t.GetField(name, Any);
-            if (f != null)
-                return f.GetValue(instance);
-
+            if (f != null) return f.GetValue(instance);
             t = t.BaseType;
         }
-
         return null;
     }
 }
@@ -848,14 +611,9 @@ internal static class Log
     {
         try
         {
-            if (UnityLog != null)
-                UnityLog.Invoke(null, new object?[] { message });
-            else
-                Console.WriteLine(message);
+            if (UnityLog != null) UnityLog.Invoke(null, new object?[] { message });
+            else Console.WriteLine(message);
         }
-        catch
-        {
-            Console.WriteLine(message);
-        }
+        catch { Console.WriteLine(message); }
     }
 }
