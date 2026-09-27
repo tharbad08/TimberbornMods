@@ -38,7 +38,7 @@ jobs:
           from pathlib import Path
           import zipfile
           root=Path("package")
-          out=Path("RainbornAcidChanceCap_0.1.1.zip")
+          out=Path("RainbornAcidChanceCap_0.1.2.zip")
           with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
               for p in root.rglob("*"):
                   if p.is_file():
@@ -46,5 +46,5 @@ jobs:
           PY
       - uses: actions/upload-artifact@v4
         with:
-          name: RainbornAcidChanceCap_0.1.1
-          path: .chatgpt-build/rainborn-acid-cap/RainbornAcidChanceCap_0.1.1.zip
+          name: RainbornAcidChanceCap_0.1.2
+          path: .chatgpt-build/rainborn-acid-cap/RainbornAcidChanceCap_0.1.2.zip
