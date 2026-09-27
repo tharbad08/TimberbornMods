@@ -3,10 +3,10 @@ using System;
 namespace Bindito.Core
 {
     [AttributeUsage(AttributeTargets.Class, AllowMultiple = true)]
-    public sealed class Context : Attribute
+    public sealed class ContextAttribute : Attribute
     {
-        public string Name { get; }
-        public Context(string name) { Name = name; }
+        public string ContextName { get; }
+        public ContextAttribute(string contextName) { ContextName = contextName; }
     }
 
     public interface IConfigurator
@@ -16,11 +16,21 @@ namespace Bindito.Core
 
     public interface IContainerDefinition
     {
-        IBindingBuilder<T> Bind<T>();
+        ISingleBindingBuilder<T> Bind<T>();
     }
 
-    public interface IBindingBuilder<T>
+    public interface IBindingBuilder<T> { }
+
+    public interface ISingleBindingBuilder<T> : IBindingBuilder<T>, IScopeAssignee { }
+
+    public interface IScopeAssignee
     {
-        void AsSingleton();
+        IExportAssignee AsSingleton();
+        IExportAssignee AsTransient();
+    }
+
+    public interface IExportAssignee
+    {
+        void AsExported();
     }
 }
