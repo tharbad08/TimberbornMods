@@ -5,7 +5,7 @@ on:
     branches:
       - diag/passive-construction-support
     paths:
-      - 'TestBuild/ConstructionSupportGuard/**'
+      - 'TestBuild/ConstructionSupportPassiveDiagnostic/**'
       - '.github/workflows/build-passive-construction-support-diagnostic.yml'
 
 jobs:
