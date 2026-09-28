@@ -26,10 +26,10 @@ jobs:
           cat > /tmp/ConstructionSupportGuard/ConstructionSupportGuard/version-1.1/manifest.json <<'JSON'
           {
             "Name": "Construction Support Guard",
-            "Version": "0.1.0",
+            "Version": "0.2.0",
             "Id": "ConstructionSupportGuard",
             "MinimumGameVersion": "1.1.1",
-            "Description": "Prevents construction from progressing or finishing while directly supported only by unfinished stackable block objects. Material delivery remains enabled.",
+            "Description": "Prevents construction on unfinished direct supports and enforces Timberborn terrain-physics support limits for UnfinishedGround buildings. Material delivery remains enabled.",
             "RequiredMods": [
               { "Id": "Harmony" }
             ]
