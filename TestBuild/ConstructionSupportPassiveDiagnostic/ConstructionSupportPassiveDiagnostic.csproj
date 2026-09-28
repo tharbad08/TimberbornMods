@@ -1,8 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>netstandard2.1</TargetFramework>
-    <AssemblyName>ConstructionSupportPassiveDiagnostic</AssemblyName>
-    <RootNamespace>ConstructionSupportPassiveDiagnostic</RootNamespace>
+    <AssemblyName>ConstructionSupportGuard</AssemblyName>
+    <RootNamespace>ConstructionSupportGuard</RootNamespace>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
   </PropertyGroup>
