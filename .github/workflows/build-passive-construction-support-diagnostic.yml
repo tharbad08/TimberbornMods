@@ -1,11 +1,11 @@
-name: Build Passive Construction Support Diagnostic
+name: Build Construction Support Guard
 
 on:
   push:
     branches:
       - diag/passive-construction-support
     paths:
-      - 'TestBuild/ConstructionSupportPassiveDiagnostic/**'
+      - 'TestBuild/ConstructionSupportGuard/**'
       - '.github/workflows/build-passive-construction-support-diagnostic.yml'
 
 jobs:
@@ -20,25 +20,25 @@ jobs:
         run: dotnet build TestBuild/ConstructionSupportPassiveDiagnostic/ConstructionSupportPassiveDiagnostic.csproj -c Release
       - name: Package
         run: |
-          rm -rf /tmp/ConstructionSupportPassiveDiagnostic
-          mkdir -p /tmp/ConstructionSupportPassiveDiagnostic/ConstructionSupportPassiveDiagnostic/version-1.1
-          cp TestBuild/ConstructionSupportPassiveDiagnostic/bin/Release/netstandard2.1/ConstructionSupportPassiveDiagnostic.dll /tmp/ConstructionSupportPassiveDiagnostic/ConstructionSupportPassiveDiagnostic/version-1.1/
-          cat > /tmp/ConstructionSupportPassiveDiagnostic/ConstructionSupportPassiveDiagnostic/version-1.1/manifest.json <<'JSON'
+          rm -rf /tmp/ConstructionSupportGuard
+          mkdir -p /tmp/ConstructionSupportGuard/ConstructionSupportGuard/version-1.1
+          cp TestBuild/ConstructionSupportPassiveDiagnostic/bin/Release/netstandard2.1/ConstructionSupportGuard.dll /tmp/ConstructionSupportGuard/ConstructionSupportGuard/version-1.1/
+          cat > /tmp/ConstructionSupportGuard/ConstructionSupportGuard/version-1.1/manifest.json <<'JSON'
           {
-            "Name": "Construction Support Passive Diagnostic",
-            "Version": "0.8.0",
-            "Id": "ConstructionSupportPassiveDiagnostic",
+            "Name": "Construction Support Guard",
+            "Version": "0.1.0",
+            "Id": "ConstructionSupportGuard",
             "MinimumGameVersion": "1.1.1",
-            "Description": "Runtime comparator for vanilla Landscaping Levee vs DamDecoration Square Levee construction/support state.",
+            "Description": "Prevents construction from progressing or finishing while directly supported only by unfinished stackable block objects. Material delivery remains enabled.",
             "RequiredMods": [
               { "Id": "Harmony" }
             ]
           }
           JSON
-          cd /tmp/ConstructionSupportPassiveDiagnostic
-          zip -r ConstructionSupportPassiveDiagnostic.zip ConstructionSupportPassiveDiagnostic
+          cd /tmp/ConstructionSupportGuard
+          zip -r ConstructionSupportGuard.zip ConstructionSupportGuard
       - uses: actions/upload-artifact@v4
         with:
-          name: ConstructionSupportPassiveDiagnostic
-          path: /tmp/ConstructionSupportPassiveDiagnostic/ConstructionSupportPassiveDiagnostic.zip
+          name: ConstructionSupportGuard
+          path: /tmp/ConstructionSupportGuard/ConstructionSupportGuard.zip
           if-no-files-found: error
