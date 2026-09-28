@@ -44,24 +44,25 @@ internal static class Guard
 
         Log.Write("[SUPPORTGUARD] Installed.");
         Log.Write("[SUPPORTGUARD] ReadyToBuild/IncreaseBuildTime/IsReadyToFinish guarded.");
+        Log.Write("[SUPPORTGUARD] Terrain-like UnfinishedGround construction also obeys Timberborn terrain physics.");
         Log.Write("[SUPPORTGUARD] IsOn is intentionally untouched so material delivery remains available.");
     }
 
     public static void AfterReadyToBuild(object __instance, ref bool __result)
     {
-        if (__result && HasUnfinishedDirectSupport(__instance, out _))
+        if (__result && HasUnsafeSupport(__instance, out _))
             __result = false;
     }
 
     public static void AfterIsReadyToFinish(object __instance, ref bool __result)
     {
-        if (__result && HasUnfinishedDirectSupport(__instance, out _))
+        if (__result && HasUnsafeSupport(__instance, out _))
             __result = false;
     }
 
     public static bool BeforeIncreaseBuildTime(object __instance)
     {
-        if (!HasUnfinishedDirectSupport(__instance, out string detail))
+        if (!HasUnsafeSupport(__instance, out string detail))
         {
             LoggedBlockedSites.Remove(GetObjectId(__instance));
             return true;
@@ -75,6 +76,16 @@ internal static class Guard
                 + (upper == null ? "<unknown>" : SafeValue(upper, "Name") + " at " + SafeValue(upper, "Coordinates"))
                 + " | " + detail);
         }
+        return false;
+    }
+
+    static bool HasUnsafeSupport(object site, out string detail)
+    {
+        if (HasUnfinishedDirectSupport(site, out detail))
+            return true;
+        if (ViolatesTerrainPhysics(site, out detail))
+            return true;
+        detail = "";
         return false;
     }
 
@@ -146,6 +157,68 @@ internal static class Guard
             }
         }
         return false;
+    }
+
+    static bool ViolatesTerrainPhysics(object site, out string detail)
+    {
+        detail = "";
+        object? upper = TryGetField(site, "_blockObject");
+        if (upper == null) return false;
+
+        object positioned;
+        try { positioned = GetMember(upper, "PositionedBlocks"); }
+        catch { return false; }
+
+        bool terrainLike = false;
+        try
+        {
+            foreach (object block in Enumerate(InvokeNoArgs(positioned, "GetAllBlocks")))
+            {
+                if (string.Equals(SafeValue(block, "Stackable"), "UnfinishedGround", StringComparison.OrdinalIgnoreCase))
+                {
+                    terrainLike = true;
+                    break;
+                }
+            }
+        }
+        catch { return false; }
+
+        if (!terrainLike) return false;
+
+        object? updater = null;
+        try
+        {
+            foreach (object component in Enumerate(GetMember(upper, "AllComponents")))
+            {
+                if (component.GetType().FullName == "Timberborn.ConstructionSites.PhysicallySupportedConstructionSiteUpdater")
+                {
+                    updater = component;
+                    break;
+                }
+            }
+        }
+        catch { return false; }
+
+        if (updater == null) return false;
+
+        object terrainPhysics;
+        object coords;
+        try
+        {
+            terrainPhysics = GetField(updater, "_terrainPhysicsService");
+            coords = GetMember(upper, "Coordinates");
+        }
+        catch { return false; }
+
+        bool valid;
+        try { valid = Convert.ToBoolean(InvokeOneArg(terrainPhysics, "CanTerrainBeAdded", coords)); }
+        catch { return false; }
+
+        if (valid) return false;
+
+        detail = "terrain-like support limit exceeded at " + FormatCoords(coords)
+            + " (using Timberborn terrain physics / MaxSupportDistance=3)";
+        return true;
     }
 
     static int GetObjectId(object obj)
