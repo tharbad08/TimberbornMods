@@ -22,6 +22,7 @@ internal static class Tracer
     const BindingFlags AnyStatic = BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
 
     static Type BlueprintSourceServiceType = null!;
+    static Type SpecServiceType = null!;
     static Type TemplateSpecType = null!;
     static Type BlockObjectSpecType = null!;
 
@@ -30,6 +31,9 @@ internal static class Tracer
         BlueprintSourceServiceType = Type.GetType(
             "Timberborn.BlueprintSystem.BlueprintSourceService, Timberborn.BlueprintSystem",
             throwOnError: true)!;
+        SpecServiceType = Type.GetType(
+            "Timberborn.BlueprintSystem.SpecService, Timberborn.BlueprintSystem",
+            throwOnError: true)!;
         TemplateSpecType = Type.GetType(
             "Timberborn.TemplateSystem.TemplateSpec, Timberborn.TemplateSystem",
             throwOnError: true)!;
@@ -37,14 +41,72 @@ internal static class Tracer
             "Timberborn.BlockSystem.BlockObjectSpec, Timberborn.BlockSystem",
             throwOnError: true)!;
 
+        MethodInfo deserialize = SpecServiceType.GetMethods(AnyInstance)
+            .Single(m => m.Name == "Deserialize" && m.GetParameters().Length == 1);
         MethodInfo add = BlueprintSourceServiceType.GetMethods(AnyInstance)
             .Single(m => m.Name == "Add" && m.GetParameters().Length == 2);
 
+        HarmonyBridge.PatchPrefix(
+            deserialize,
+            typeof(Tracer).GetMethod(nameof(BeforeSpecDeserialize), AnyStatic)!);
         HarmonyBridge.PatchPostfix(
             add,
             typeof(Tracer).GetMethod(nameof(AfterBlueprintSourceAdded), AnyStatic)!);
 
-        Log.Write("[LEVEE-SOURCE] v0.1.0 installed. Waiting for Levee blueprint deserialization.");
+        Log.Write("[LEVEE-SOURCE] v0.2.0 installed. PRE-MODIFIERS + final Levee source tracing enabled.");
+    }
+
+    public static void BeforeSpecDeserialize(object __instance, object __0)
+    {
+        try
+        {
+            object bundle = __0;
+            string path = SafeValue(bundle, "Path");
+            if (!IsLeveePath(path))
+                return;
+
+            Log.Write("[LEVEE-SOURCE] ===== PRE-MODIFIERS =====");
+            Log.Write("[LEVEE-SOURCE] PRE BlueprintPath=" + path);
+            Log.Write("[LEVEE-SOURCE] PRE BlueprintName=" + SafeValue(bundle, "Name"));
+
+            var sources = Enumerate(GetMember(bundle, "Sources")).Cast<object>()
+                .Select(x => Convert.ToString(x) ?? "<null>").ToList();
+            var jsons = Enumerate(GetMember(bundle, "Jsons")).Cast<object>()
+                .Select(x => Convert.ToString(x) ?? "").ToList();
+
+            Log.Write("[LEVEE-SOURCE] PRE SourcesCount=" + sources.Count);
+            for (int i = 0; i < sources.Count; i++)
+            {
+                string json = i < jsons.Count ? jsons[i] : "";
+                Log.Write("[LEVEE-SOURCE] PRE-SOURCE[" + i + "]=" + sources[i]
+                    + " jsonLength=" + json.Length
+                    + " | " + ExtractHints(json));
+            }
+
+            try
+            {
+                object providersObj = GetMember(__instance, "_blueprintModifierProviders");
+                var providers = Enumerate(providersObj).Cast<object>().ToList();
+                Log.Write("[LEVEE-SOURCE] PRE ModifierProvidersCount=" + providers.Count);
+                for (int i = 0; i < providers.Count; i++)
+                {
+                    object provider = providers[i];
+                    Log.Write("[LEVEE-SOURCE] PRE-PROVIDER[" + i + "]="
+                        + provider.GetType().FullName
+                        + " ModifierName=" + SafeValue(provider, "ModifierName"));
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Write("[LEVEE-SOURCE] PRE provider-list error: " + ex.GetType().Name + ": " + ex.Message);
+            }
+
+            Log.Write("[LEVEE-SOURCE] ===== END PRE-MODIFIERS =====");
+        }
+        catch (Exception ex)
+        {
+            Log.Write("[LEVEE-SOURCE] PRE trace error: " + ex);
+        }
     }
 
     public static void AfterBlueprintSourceAdded(object __0, object __1)
@@ -110,6 +172,12 @@ internal static class Tracer
         {
             Log.Write("[LEVEE-SOURCE] Trace error: " + ex);
         }
+    }
+
+    static bool IsLeveePath(string path)
+    {
+        return path.EndsWith("buildings/landscaping/levee/levee.folktails.blueprint", StringComparison.OrdinalIgnoreCase)
+            || path.EndsWith("buildings/landscaping/levee/levee.ironteeth.blueprint", StringComparison.OrdinalIgnoreCase);
     }
 
     static string ExtractHints(string json)
@@ -189,7 +257,13 @@ internal static class HarmonyBridge
     static readonly Type HarmonyMethodType =
         Type.GetType("HarmonyLib.HarmonyMethod, 0Harmony", throwOnError: true)!;
 
+    public static void PatchPrefix(MethodBase original, MethodInfo patchMethodInfo)
+        => Patch(original, patchMethodInfo, true);
+
     public static void PatchPostfix(MethodBase original, MethodInfo patchMethodInfo)
+        => Patch(original, patchMethodInfo, false);
+
+    static void Patch(MethodBase original, MethodInfo patchMethodInfo, bool prefix)
     {
         object harmony = Activator.CreateInstance(
             HarmonyType, "LeveeBlueprintSourceTracer")!;
@@ -207,7 +281,7 @@ internal static class HarmonyBridge
 
         object?[] args = new object?[patch.GetParameters().Length];
         args[0] = original;
-        args[2] = hm;
+        args[prefix ? 1 : 2] = hm;
         patch.Invoke(harmony, args);
     }
 }
