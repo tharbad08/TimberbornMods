@@ -26,10 +26,10 @@ jobs:
           cat > /tmp/LeveeBlueprintSourceTracer/LeveeBlueprintSourceTracer/version-1.1/manifest.json <<'JSON'
           {
             "Name": "Levee Blueprint Source Tracer",
-            "Version": "0.1.0",
+            "Version": "0.2.0",
             "Id": "LeveeBlueprintSourceTracer",
             "MinimumGameVersion": "1.1.2.4",
-            "Description": "Diagnostic-only mod that reports every source/modifier contributing to vanilla Levee blueprints and their final BlockObjectSpec.",
+            "Description": "Diagnostic-only mod that reports the Levee blueprint bundle before modifier providers run and again after final deserialization.",
             "RequiredMods": [
               { "Id": "Harmony" }
             ]
