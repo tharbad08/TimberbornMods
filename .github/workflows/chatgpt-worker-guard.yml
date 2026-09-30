@@ -1,0 +1,40 @@
+name: Temporary WorkerWorkplaceGuard build
+
+on:
+  push:
+    branches:
+      - chatgpt-worker-guard-build
+    paths:
+      - '.chatgpt-worker-guard/**'
+      - '.github/workflows/chatgpt-worker-guard.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build
+        run: dotnet build .chatgpt-worker-guard/WorkerWorkplaceGuard.csproj -c Release
+
+      - name: Record build output
+        shell: bash
+        run: |
+          mkdir -p .chatgpt-build-output
+          cp .chatgpt-worker-guard/bin/Release/netstandard2.1/Code.dll .chatgpt-build-output/Code.dll
+          base64 -w0 .chatgpt-build-output/Code.dll > .chatgpt-build-output/Code.dll.b64
+          sha256sum .chatgpt-build-output/Code.dll | awk '{print $1}' > .chatgpt-build-output/Code.dll.sha256
+          rm .chatgpt-build-output/Code.dll
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .chatgpt-build-output/Code.dll.b64 .chatgpt-build-output/Code.dll.sha256
+          git commit -m "temporary WorkerWorkplaceGuard compiled output"
+          git push
