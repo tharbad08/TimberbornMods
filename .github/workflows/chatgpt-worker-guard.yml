@@ -31,10 +31,11 @@ jobs:
           mkdir -p .chatgpt-build-output
           cp .chatgpt-worker-guard/bin/Release/netstandard2.1/Code.dll .chatgpt-build-output/Code.dll
           base64 -w0 .chatgpt-build-output/Code.dll > .chatgpt-build-output/Code.dll.b64
+          split -b 6000 -d -a 2 .chatgpt-build-output/Code.dll.b64 .chatgpt-build-output/Code.dll.b64.part
           sha256sum .chatgpt-build-output/Code.dll | awk '{print $1}' > .chatgpt-build-output/Code.dll.sha256
           rm .chatgpt-build-output/Code.dll
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .chatgpt-build-output/Code.dll.b64 .chatgpt-build-output/Code.dll.sha256
+          git add .chatgpt-build-output/Code.dll.b64 .chatgpt-build-output/Code.dll.b64.part* .chatgpt-build-output/Code.dll.sha256
           git commit -m "temporary WorkerWorkplaceGuard compiled output"
           git push
