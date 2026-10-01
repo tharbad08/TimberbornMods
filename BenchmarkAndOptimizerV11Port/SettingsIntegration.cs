@@ -209,7 +209,13 @@ public sealed class OptimizerMenuService(
             return;
         }
 
-        var root = _optionsBox._root;
+        var root = ResolveOptionsRoot(_optionsBox);
+        if (root is null)
+        {
+            Runtime.Log("warning: pause-menu root not found; optimizer menu entry not added");
+            return;
+        }
+
         var resumeButton = root.Q<VisualElement>("ResumeButton")
             ?? root.Q<VisualElement>("Resume");
 
@@ -227,6 +233,37 @@ public sealed class OptimizerMenuService(
 
         button.InsertSelfAfter(resumeButton);
         Runtime.Log("pause-menu entry installed after ResumeButton");
+    }
+
+    private static VisualElement? ResolveOptionsRoot(GameOptionsBox optionsBox)
+    {
+        try
+        {
+            var type = optionsBox.GetType();
+
+            var field = type.GetField(
+                "_root",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            if (field?.GetValue(optionsBox) is VisualElement fieldRoot)
+            {
+                return fieldRoot;
+            }
+
+            var property = type.GetProperty(
+                "Root",
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                ?? type.GetProperty(
+                    "_root",
+                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+
+            return property?.GetValue(optionsBox) as VisualElement;
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log($"warning: failed to resolve pause-menu root: {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
     }
 
     private static Mod? ResolveMod(ModRepository repository, string id)
