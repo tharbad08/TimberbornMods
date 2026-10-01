@@ -3,7 +3,7 @@ using System.Reflection;
 using System.Runtime.CompilerServices;
 using Newtonsoft.Json;
 using HarmonyLib;
-using Timberborn.Modding;
+using Timberborn.ModManagerScene;
 
 namespace BenchmarkAndOptimizerV11;
 
