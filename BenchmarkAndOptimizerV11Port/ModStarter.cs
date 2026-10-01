@@ -377,7 +377,7 @@ internal static class Runtime
         ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
     private static string Csv(string value) =>
-        '"' + value.Replace(""", """") + '"';
+        "\"" + value.Replace("\"", "\"\"") + "\"";
 
     private static void ReloadConfig(bool force)
     {
