@@ -101,7 +101,7 @@ public sealed class OptimizerPanel : VisualElement
         topRow.AddMenuButton("Reset all to 1", Runtime.ResetIntervals);
         topRow.AddMenuButton("Refresh detected systems", Rebuild);
 
-        AddGameLabel("Benchmark", bold: true).SetMarginTop(8);
+        AddGameLabel("Benchmark", bold: true).SetMargin(8, 0, 0, 0);
         var benchRow = AddRow();
         var bench = benchRow.AddSliderInt(
                 label: "Duration (seconds)",
