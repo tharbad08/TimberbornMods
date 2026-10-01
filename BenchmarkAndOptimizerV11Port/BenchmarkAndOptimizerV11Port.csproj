@@ -17,6 +17,7 @@
     <PackageReference Include="Lib.Harmony" Version="2.4.1" />
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <ProjectReference Include="Stubs/Timberborn.Modding/Timberborn.Modding.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/Timberborn.ModManagerScene/Timberborn.ModManagerScene.Stub.csproj" Private="false" />
     <ProjectReference Include="Stubs/Timberborn.SettingsSystem/Timberborn.SettingsSystem.Stub.csproj" Private="false" />
     <ProjectReference Include="Stubs/Bindito.Core/Bindito.Core.Stub.csproj" Private="false" />
     <ProjectReference Include="Stubs/UnityEngine.UIElementsModule/UnityEngine.UIElementsModule.Stub.csproj" Private="false" />
