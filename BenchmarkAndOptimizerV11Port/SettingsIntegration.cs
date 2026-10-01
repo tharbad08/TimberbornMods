@@ -4,6 +4,7 @@ using ModSettings.Core;
 using ModSettings.CoreUI;
 using Timberborn.Modding;
 using Timberborn.SettingsSystem;
+using Timberborn.SingletonSystem;
 using TimberUi.CommonUi;
 using UnityEngine.UIElements;
 
@@ -15,7 +16,8 @@ public sealed class MainMenuConfig : Configurator
     public override void Configure()
     {
         this.BindSingleton<OptimizerSettingsOwner>()
-            .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>();
+            .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
+            .BindSingleton<OptimizerHotkeyService>();
     }
 }
 
@@ -69,7 +71,6 @@ public sealed class OptimizerPanel : VisualElement
     private readonly VisualElement _wellKnown;
     private readonly VisualElement _others;
     private readonly Label _status;
-    private int _benchmarkSeconds = 30;
 
     private static readonly string[] WellKnown =
     {
@@ -111,15 +112,10 @@ public sealed class OptimizerPanel : VisualElement
 
         this.AddGameLabel("Benchmark", bold: true);
         var benchmarkRow = this.AddRow();
-        benchmarkRow.AddSliderInt(
-                label: "Duration",
-                values: new SliderValues<int>(5, 120, _benchmarkSeconds))
-            .AddEndLabel(v => $"{v}s")
-            .RegisterChange(v => _benchmarkSeconds = v)
-            .SetWidthPercent(75);
-        benchmarkRow.AddMenuButton("Start", onClick: () =>
+        benchmarkRow.AddGameLabel($"Fixed duration: {Runtime.BenchmarkDurationSeconds} seconds");
+        benchmarkRow.AddMenuButton("Start 120s benchmark", onClick: () =>
         {
-            Runtime.StartBenchmark(_benchmarkSeconds);
+            Runtime.StartBenchmark();
             UpdateStatus();
         });
 
@@ -176,5 +172,93 @@ public sealed class OptimizerPanel : VisualElement
             .RegisterChange(v => Runtime.SetInterval(typeName, v))
             .SetWidthPercent(100)
             .SetMarginBottom(6);
+    }
+}
+
+
+public sealed class OptimizerHotkeyService(
+    ModSettingsBox modSettingsBox,
+    ModRepository repository
+) : IUpdatableSingleton
+{
+    private Mod? _mod;
+    private bool _wasDown;
+
+    public void UpdateSingleton()
+    {
+        var down = KeyboardCompat.CtrlShiftB;
+        if (down && !_wasDown)
+        {
+            _mod ??= repository.EnabledMods
+                .FirstOrDefault(mod => mod.Manifest.Id == "BenchmarkAndOptimizerV11");
+
+            if (_mod is not null)
+            {
+                modSettingsBox.Open(_mod);
+            }
+            else
+            {
+                Runtime.Log("warning: Ctrl+Shift+B could not resolve BenchmarkAndOptimizerV11 in ModRepository");
+            }
+        }
+
+        _wasDown = down;
+    }
+}
+
+internal static class KeyboardCompat
+{
+    private static readonly Type? KeyboardType =
+        AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(asm => asm.GetName().Name == "Unity.InputSystem")
+            ?.GetType("UnityEngine.InputSystem.Keyboard");
+
+    private static readonly PropertyInfo? CurrentProperty =
+        KeyboardType?.GetProperty("current", BindingFlags.Public | BindingFlags.Static);
+
+    private static readonly PropertyInfo? CtrlKeyProperty =
+        KeyboardType?.GetProperty("ctrlKey", BindingFlags.Public | BindingFlags.Instance);
+
+    private static readonly PropertyInfo? ShiftKeyProperty =
+        KeyboardType?.GetProperty("shiftKey", BindingFlags.Public | BindingFlags.Instance);
+
+    private static readonly PropertyInfo? BKeyProperty =
+        KeyboardType?.GetProperty("bKey", BindingFlags.Public | BindingFlags.Instance);
+
+    public static bool CtrlShiftB
+    {
+        get
+        {
+            try
+            {
+                var keyboard = CurrentProperty?.GetValue(null);
+                if (keyboard is null)
+                {
+                    return false;
+                }
+
+                return IsPressed(CtrlKeyProperty?.GetValue(keyboard))
+                    && IsPressed(ShiftKeyProperty?.GetValue(keyboard))
+                    && IsPressed(BKeyProperty?.GetValue(keyboard));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
+    private static bool IsPressed(object? control)
+    {
+        if (control is null)
+        {
+            return false;
+        }
+
+        var property = control.GetType().GetProperty(
+            "isPressed",
+            BindingFlags.Public | BindingFlags.Instance);
+
+        return property?.GetValue(control) as bool? == true;
     }
 }
