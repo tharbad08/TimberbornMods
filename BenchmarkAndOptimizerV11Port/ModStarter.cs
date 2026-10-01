@@ -1,7 +1,7 @@
 using System.Collections;
 using System.Reflection;
 using System.Runtime.CompilerServices;
-using System.Text.Json;
+using Newtonsoft.Json;
 using HarmonyLib;
 using Timberborn.Modding;
 
@@ -403,7 +403,7 @@ internal static class Runtime
             }
 
             var json = File.ReadAllText(ConfigPath);
-            var loaded = JsonSerializer.Deserialize<Settings>(json, JsonOptions);
+            var loaded = JsonConvert.DeserializeObject<Settings>(json);
             if (loaded is null)
             {
                 return;
@@ -422,18 +422,11 @@ internal static class Runtime
 
     private static void SaveSettings(Settings settings)
     {
-        var json = JsonSerializer.Serialize(settings, JsonOptions);
+        var json = JsonConvert.SerializeObject(settings, Formatting.Indented);
         File.WriteAllText(ConfigPath, json + Environment.NewLine);
         _configWriteUtc = File.GetLastWriteTimeUtc(ConfigPath);
     }
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true,
-        PropertyNameCaseInsensitive = true,
-        ReadCommentHandling = JsonCommentHandling.Skip,
-        AllowTrailingCommas = true,
-    };
 
     public static void Log(string message)
     {
