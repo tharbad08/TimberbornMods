@@ -68,7 +68,9 @@ internal static class Runtime
 {
     private static readonly object Sync = new();
     private static readonly ConditionalWeakTable<object, CounterState> Counters = new();
-    private static readonly Dictionary<Type, ItemAdapter> AdapterCache = new();
+    private static readonly Dictionary<string, ItemAdapter> AdapterCache = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> UnsupportedAdapters = new(StringComparer.Ordinal);
+    private static readonly HashSet<string> LoggedWarnings = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, BenchStat> BenchStats = new(StringComparer.Ordinal);
     private static readonly HashSet<string> Discovered = new(StringComparer.Ordinal);
 
@@ -81,6 +83,8 @@ internal static class Runtime
     public static string ModPath { get; private set; } = "";
     public static string ConfigPath => Path.Combine(ModPath, "optimizer-v11.json");
     private static string DiscoveredPath => Path.Combine(ModPath, "optimizer-v11-discovered.txt");
+
+    public const int BenchmarkDurationSeconds = 120;
 
     public static bool Enabled => _settings.Enabled;
     public static int DefaultInterval => _settings.DefaultInterval;
@@ -151,18 +155,17 @@ internal static class Runtime
         Log("all optimizer intervals reset to vanilla (1)");
     }
 
-    public static void StartBenchmark(int seconds)
+    public static void StartBenchmark()
     {
-        seconds = Math.Clamp(seconds, 5, 3600);
         lock (Sync)
         {
             BenchStats.Clear();
         }
 
-        _settings.BenchmarkSeconds = seconds;
+        _settings.BenchmarkSeconds = BenchmarkDurationSeconds;
         _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
         _benchmarkCompleted = false;
-        Log($"benchmark started for {seconds}s");
+        Log($"benchmark started for {BenchmarkDurationSeconds}s; output will be written under {ModPath}");
     }
 
     private static string ShortTypeName(string value)
@@ -175,6 +178,7 @@ internal static class Runtime
     {
         ModPath = modPath;
         Directory.CreateDirectory(ModPath);
+        RotateOversizedLog();
 
         if (!File.Exists(ConfigPath))
         {
@@ -200,12 +204,22 @@ internal static class Runtime
             return true;
         }
 
+        // Zero-cost normal mode: when all intervals are vanilla (1), do not replace
+        // Timberborn's dispatcher at all. Reflection dispatch is used only while an
+        // actual throttle is configured or while benchmarking.
+        if (!BenchmarkActive && !HasActiveThrottles())
+        {
+            return true;
+        }
+
         try
         {
             var listField = AccessTools.Field(owner.GetType(), listFieldName);
             if (listField?.GetValue(owner) is not IList list)
             {
-                Log($"warning: {owner.GetType().FullName}.{listFieldName} unavailable; falling back to vanilla");
+                LogOnce(
+                    $"missing-list:{owner.GetType().FullName}:{listFieldName}",
+                    $"warning: {owner.GetType().FullName}.{listFieldName} unavailable; falling back to vanilla");
                 return true;
             }
 
@@ -229,7 +243,9 @@ internal static class Runtime
                 adapters[i] = GetAdapter(item.GetType(), actualFieldName, invokeMethodName, enabledMemberName);
                 if (adapters[i] is null)
                 {
-                    Log($"warning: cannot adapt {item.GetType().FullName} in {listFieldName}; falling back to vanilla");
+                    LogOnce(
+                        $"unsupported:{item.GetType().FullName}:{listFieldName}",
+                        $"warning: cannot adapt {item.GetType().FullName} in {listFieldName}; falling back to vanilla");
                     return true;
                 }
             }
@@ -285,7 +301,9 @@ internal static class Runtime
         }
         catch (Exception ex)
         {
-            Log($"warning: optimizer dispatch failed before safe completion: {ex.GetType().Name}: {ex.Message}; falling back to vanilla");
+            LogOnce(
+                $"dispatch:{owner.GetType().FullName}:{listFieldName}:{ex.GetType().FullName}:{ex.Message}",
+                $"warning: optimizer dispatch failed before safe completion: {ex.GetType().Name}: {ex.Message}; falling back to vanilla");
             return true;
         }
     }
@@ -297,14 +315,18 @@ internal static class Runtime
 
     private static ItemAdapter? GetAdapter(Type itemType, string? actualFieldName, string methodName, string? enabledMemberName)
     {
+        var cacheKey = $"{itemType.AssemblyQualifiedName}|{actualFieldName}|{methodName}|{enabledMemberName}";
+
         lock (Sync)
         {
-            if (AdapterCache.TryGetValue(itemType, out var cached)
-                && cached.ActualFieldName == actualFieldName
-                && cached.Method.Name == methodName
-                && cached.EnabledMemberName == enabledMemberName)
+            if (AdapterCache.TryGetValue(cacheKey, out var cached))
             {
                 return cached;
+            }
+
+            if (UnsupportedAdapters.Contains(cacheKey))
+            {
+                return null;
             }
 
             FieldInfo? actualField = null;
@@ -313,13 +335,23 @@ internal static class Runtime
                 actualField = AccessTools.Field(itemType, actualFieldName);
                 if (actualField is null)
                 {
+                    UnsupportedAdapters.Add(cacheKey);
                     return null;
                 }
             }
 
             var method = AccessTools.Method(itemType, methodName, Type.EmptyTypes);
+
+            // Timberborn 1.1 renamed MeteredTickableComponent.StartAndTick() to Tick().
+            // Prefer the old name for compatibility, then use the 1.1 name.
+            if (method is null && methodName == "StartAndTick")
+            {
+                method = AccessTools.Method(itemType, "Tick", Type.EmptyTypes);
+            }
+
             if (method is null)
             {
+                UnsupportedAdapters.Add(cacheKey);
                 return null;
             }
 
@@ -337,14 +369,12 @@ internal static class Runtime
                 {
                     enabled = item => (bool)(field.GetValue(item) ?? true);
                 }
-                else
-                {
-                    return null;
-                }
+                // If 1.1's wrapper no longer exposes Enabled, let its own Tick()
+                // perform that check internally instead of disabling the entire path.
             }
 
             var adapter = new ItemAdapter(actualFieldName, enabledMemberName, actualField, method, enabled);
-            AdapterCache[itemType] = adapter;
+            AdapterCache[cacheKey] = adapter;
             return adapter;
         }
     }
@@ -366,6 +396,16 @@ internal static class Runtime
 
         state.Remaining--;
         return false;
+    }
+
+    private static bool HasActiveThrottles()
+    {
+        if (_settings.DefaultInterval > 1)
+        {
+            return true;
+        }
+
+        return _settings.Intervals.Values.Any(value => value > 1);
     }
 
     private static int GetInterval(Type type)
@@ -527,6 +567,42 @@ internal static class Runtime
         catch
         {
             // Logging must never break the simulation.
+        }
+    }
+
+    private static void LogOnce(string key, string message)
+    {
+        lock (Sync)
+        {
+            if (!LoggedWarnings.Add(key))
+            {
+                return;
+            }
+        }
+
+        Log(message);
+    }
+
+    private static void RotateOversizedLog()
+    {
+        try
+        {
+            var log = Path.Combine(ModPath, "optimizer-v11.log");
+            if (!File.Exists(log) || new FileInfo(log).Length < 5 * 1024 * 1024)
+            {
+                return;
+            }
+
+            var previous = Path.Combine(ModPath, "optimizer-v11.previous.log");
+            if (File.Exists(previous))
+            {
+                File.Delete(previous);
+            }
+            File.Move(log, previous);
+        }
+        catch
+        {
+            // Never block startup because an old diagnostic log cannot be rotated.
         }
     }
 
