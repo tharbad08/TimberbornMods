@@ -84,25 +84,25 @@ public sealed class OptimizerPanel : VisualElement
     {
         this.SetPadding(8);
 
-        AddGameLabel("Benchmark & Optimizer — live controls", bold: true);
-        AddGameLabel("1 = vanilla frequency. 2 = every second dispatcher call. Changes apply immediately.");
+        this.AddGameLabel("Benchmark & Optimizer — live controls", bold: true);
+        this.AddGameLabel("1 = vanilla frequency. 2 = every second dispatcher call. Changes apply immediately.");
 
-        var enabled = AddToggle("Optimizer enabled", onValueChanged: Runtime.SetEnabled);
+        var enabled = this.AddToggle("Optimizer enabled", onValueChanged: Runtime.SetEnabled);
         enabled.SetValueWithoutNotify(Runtime.Enabled);
 
-        var defaultSlider = AddSliderInt(
+        var defaultSlider = this.AddSliderInt(
                 label: "Default interval",
                 values: new SliderValues<int>(1, 50, Runtime.DefaultInterval))
             .AddEndLabel(v => $"1/{v}")
             .RegisterChange(Runtime.SetDefaultInterval);
         defaultSlider.SetWidthPercent(100);
 
-        var topRow = AddRow();
+        var topRow = this.AddRow();
         topRow.AddMenuButton("Reset all to 1", Runtime.ResetIntervals);
         topRow.AddMenuButton("Refresh detected systems", Rebuild);
 
-        AddGameLabel("Benchmark", bold: true).SetMargin(8, 0, 0, 0);
-        var benchRow = AddRow();
+        this.AddGameLabel("Benchmark", bold: true).SetMargin(8, 0, 0, 0);
+        var benchRow = this.AddRow();
         var bench = benchRow.AddSliderInt(
                 label: "Duration (seconds)",
                 values: new SliderValues<int>(5, 120, _benchmarkSeconds))
@@ -111,12 +111,12 @@ public sealed class OptimizerPanel : VisualElement
         bench.SetWidthPercent(70);
         benchRow.AddMenuButton("Start", () => Runtime.StartBenchmark(_benchmarkSeconds));
 
-        _status = AddGameLabel("");
-        _filter = AddTextField(changeCallback: _ => Rebuild());
+        _status = this.AddGameLabel("");
+        _filter = this.AddTextField(changeCallback: _ => Rebuild());
         _filter.value = "";
-        AddGameLabel("Filter systems");
+        this.AddGameLabel("Filter systems");
 
-        _list = AddScrollView();
+        _list = this.AddScrollView();
         _list.SetMaxHeight(650);
 
         Rebuild();
