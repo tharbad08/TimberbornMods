@@ -34,6 +34,11 @@ namespace UnityEngine.UIElements
 
     public class ScrollView : VisualElement { }
 
+    public class TextField : VisualElement
+    {
+        public string value { get; set; } = "";
+    }
+
     public class Button : VisualElement
     {
         public string text { get; set; } = "";
