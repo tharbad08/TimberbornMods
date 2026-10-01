@@ -16,6 +16,8 @@ namespace UnityEngine.UIElements
         Hidden
     }
     public class EventBase { }
+    public class DetachFromPanelEvent : EventBase { }
+
     public class ChangeEvent<T> : EventBase
     {
         public T newValue { get; set; } = default!;
