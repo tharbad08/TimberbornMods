@@ -1,3 +1,4 @@
+using System.Reflection;
 using Bindito.Core;
 using ModSettings.CommonUI;
 using ModSettings.Core;
