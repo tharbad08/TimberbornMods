@@ -189,8 +189,7 @@ public sealed class OptimizerHotkeyService(
         var down = KeyboardCompat.CtrlShiftB;
         if (down && !_wasDown)
         {
-            _mod ??= repository.EnabledMods
-                .FirstOrDefault(mod => mod.Manifest.Id == "BenchmarkAndOptimizerV11");
+            _mod ??= ResolveMod(repository, "BenchmarkAndOptimizerV11");
 
             if (_mod is not null)
             {
@@ -203,6 +202,48 @@ public sealed class OptimizerHotkeyService(
         }
 
         _wasDown = down;
+    }
+
+    private static Mod? ResolveMod(ModRepository repository, string id)
+    {
+        try
+        {
+            var enabledMods = repository.GetType()
+                .GetProperty("EnabledMods", BindingFlags.Public | BindingFlags.Instance)
+                ?.GetValue(repository) as System.Collections.IEnumerable;
+
+            if (enabledMods is null)
+            {
+                return null;
+            }
+
+            foreach (var item in enabledMods)
+            {
+                if (item is not Mod mod)
+                {
+                    continue;
+                }
+
+                var manifest = item.GetType()
+                    .GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(item);
+
+                var manifestId = manifest?.GetType()
+                    .GetProperty("Id", BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(manifest) as string;
+
+                if (manifestId == id)
+                {
+                    return mod;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log($"warning: failed to resolve optimizer mod for hotkey: {ex.GetType().Name}: {ex.Message}");
+        }
+
+        return null;
     }
 }
 
