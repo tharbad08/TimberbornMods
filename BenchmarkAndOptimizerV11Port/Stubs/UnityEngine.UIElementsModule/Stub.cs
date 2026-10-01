@@ -14,7 +14,7 @@ namespace UnityEngine.UIElements
     {
         public void Add(VisualElement child) { }
         public void Clear() { }
-        public T? Q<T>(string name) where T : VisualElement => default;
+        public T Q<T>(string name) where T : VisualElement => default;
         public VisualElement InsertSelfAfter(VisualElement target) => this;
         public void RegisterCallback<TEventType>(EventCallback<TEventType> callback) where TEventType : EventBase { }
     }
