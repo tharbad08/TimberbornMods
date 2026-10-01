@@ -53,7 +53,9 @@ public sealed class OptimizerUiSetting()
     public override void Reset() => Runtime.ResetIntervals();
 }
 
-public sealed class OptimizerSettingElementFactory : IModSettingElementFactory
+public sealed class OptimizerSettingElementFactory(
+    ModSettingsBox modSettingsBox
+) : IModSettingElementFactory
 {
     public int Priority { get; }
 
@@ -65,7 +67,7 @@ public sealed class OptimizerSettingElementFactory : IModSettingElementFactory
             return false;
         }
 
-        element = new ModSettingElement(new OptimizerPanel(), modSetting);
+        element = new ModSettingElement(new OptimizerPanel(modSettingsBox), modSetting);
         return true;
     }
 }
@@ -85,8 +87,18 @@ public sealed class OptimizerPanel : VisualElement
         "ResourceCountingService"
     };
 
-    public OptimizerPanel()
+    public OptimizerPanel(ModSettingsBox modSettingsBox)
     {
+        // ModSettings hard-codes its box to 590 px. This page needs more horizontal
+        // room for full type/origin names, so widen only while this panel is open.
+        var settingsBox = modSettingsBox.GetPanel().Q("Box");
+        settingsBox?.SetWidth(885f);
+
+        RegisterCallback<DetachFromPanelEvent>(_ =>
+        {
+            settingsBox?.SetWidth(590f);
+        });
+
         // Follow datvm's own TimberUi/ModSettings pattern:
         // use AddToggle/AddSliderInt/RegisterChange instead of raw UIElements callbacks.
         this.SetPadding(8);
