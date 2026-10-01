@@ -29,7 +29,8 @@ public sealed class GameConfig : Configurator
     public override void Configure()
     {
         this.BindSingleton<OptimizerSettingsOwner>()
-            .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>();
+            .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
+            .BindSingleton<OptimizerMenuService>();
     }
 }
 
@@ -73,6 +74,7 @@ public sealed class OptimizerPanel : VisualElement
     private readonly VisualElement _wellKnown;
     private readonly VisualElement _others;
     private readonly Label _status;
+    private string _filter = "";
 
     private static readonly string[] WellKnown =
     {
@@ -124,6 +126,15 @@ public sealed class OptimizerPanel : VisualElement
         _status = this.AddGameLabel("");
         _status.SetMarginBottom(8);
 
+        // Same live-filter pattern used by TImprove4Mods.
+        this.AddTextField("Filter", keyword =>
+        {
+            _filter = keyword?.Trim() ?? "";
+            Rebuild();
+        })
+        .SetWidthPercent(100)
+        .SetMarginBottom(8);
+
         var scroll = this.AddScrollView();
         scroll.SetMaxHeight(650);
 
@@ -152,6 +163,8 @@ public sealed class OptimizerPanel : VisualElement
         var names = WellKnown
             .Concat(Runtime.KnownTypes)
             .Distinct(StringComparer.Ordinal)
+            .Where(name => string.IsNullOrEmpty(_filter)
+                || name.Contains(_filter, StringComparison.OrdinalIgnoreCase))
             .OrderBy(n => Array.IndexOf(WellKnown, n) < 0 ? 1 : 0)
             .ThenBy(n => n, StringComparer.OrdinalIgnoreCase);
 
