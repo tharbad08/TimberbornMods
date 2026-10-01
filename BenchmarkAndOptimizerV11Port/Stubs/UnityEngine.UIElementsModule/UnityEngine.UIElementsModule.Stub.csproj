@@ -1,0 +1,3 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>netstandard2.1</TargetFramework><AssemblyName>UnityEngine.UIElementsModule</AssemblyName><RootNamespace>UnityEngine.UIElements</RootNamespace></PropertyGroup>
+</Project>
