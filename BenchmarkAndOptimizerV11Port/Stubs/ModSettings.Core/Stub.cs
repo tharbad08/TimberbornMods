@@ -21,7 +21,7 @@ namespace ModSettings.Core
     public abstract class ModSettingsOwner
     {
         protected ModSettingsOwner(ISettings settings, ModSettingsOwnerRegistry registry, ModRepository repository) { }
-        protected abstract string ModId { get; }
+        public abstract string ModId { get; }
         public virtual ModSettingsContext ChangeableOn => ModSettingsContext.MainMenu;
     }
 }
