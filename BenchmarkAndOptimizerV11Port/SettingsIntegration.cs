@@ -4,6 +4,8 @@ using ModSettings.CommonUI;
 using ModSettings.Core;
 using ModSettings.CoreUI;
 using Timberborn.Modding;
+using Timberborn.Options;
+using Timberborn.OptionsGame;
 using Timberborn.SettingsSystem;
 using Timberborn.SingletonSystem;
 using TimberUi.CommonUi;
@@ -17,8 +19,7 @@ public sealed class MainMenuConfig : Configurator
     public override void Configure()
     {
         this.BindSingleton<OptimizerSettingsOwner>()
-            .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
-            .BindSingleton<OptimizerHotkeyService>();
+            .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>();
     }
 }
 
@@ -177,32 +178,41 @@ public sealed class OptimizerPanel : VisualElement
 }
 
 
-public sealed class OptimizerHotkeyService(
+public sealed class OptimizerMenuService(
+    IOptionsBox optionsBox,
     ModSettingsBox modSettingsBox,
     ModRepository repository
-) : IUpdatableSingleton
+) : ILoadableSingleton
 {
+    private readonly GameOptionsBox _optionsBox = (GameOptionsBox)optionsBox;
     private Mod? _mod;
-    private bool _wasDown;
 
-    public void UpdateSingleton()
+    public void Load()
     {
-        var down = KeyboardCompat.CtrlShiftB;
-        if (down && !_wasDown)
+        _mod = ResolveMod(repository, "BenchmarkAndOptimizerV11");
+        if (_mod is null)
         {
-            _mod ??= ResolveMod(repository, "BenchmarkAndOptimizerV11");
-
-            if (_mod is not null)
-            {
-                modSettingsBox.Open(_mod);
-            }
-            else
-            {
-                Runtime.Log("warning: Ctrl+Shift+B could not resolve BenchmarkAndOptimizerV11 in ModRepository");
-            }
+            Runtime.Log("warning: pause-menu button could not resolve BenchmarkAndOptimizerV11 in ModRepository");
+            return;
         }
 
-        _wasDown = down;
+        var root = _optionsBox._root;
+        var resumeButton = root.Q<VisualElement>("ResumeButton");
+
+        if (resumeButton is null)
+        {
+            Runtime.Log("warning: pause-menu ResumeButton not found; optimizer menu entry not added");
+            return;
+        }
+
+        var button = root.AddMenuButton(
+            "Benchmark & Optimizer",
+            onClick: () => modSettingsBox.Open(_mod),
+            name: "BenchmarkAndOptimizerButton",
+            stretched: true);
+
+        button.InsertSelfAfter(resumeButton);
+        Runtime.Log("pause-menu entry installed after ResumeButton");
     }
 
     private static Mod? ResolveMod(ModRepository repository, string id)
@@ -241,66 +251,9 @@ public sealed class OptimizerHotkeyService(
         }
         catch (Exception ex)
         {
-            Runtime.Log($"warning: failed to resolve optimizer mod for hotkey: {ex.GetType().Name}: {ex.Message}");
+            Runtime.Log($"warning: failed to resolve optimizer mod for pause-menu button: {ex.GetType().Name}: {ex.Message}");
         }
 
         return null;
-    }
-}
-
-internal static class KeyboardCompat
-{
-    private static readonly Type? KeyboardType =
-        AppDomain.CurrentDomain.GetAssemblies()
-            .FirstOrDefault(asm => asm.GetName().Name == "Unity.InputSystem")
-            ?.GetType("UnityEngine.InputSystem.Keyboard");
-
-    private static readonly PropertyInfo? CurrentProperty =
-        KeyboardType?.GetProperty("current", BindingFlags.Public | BindingFlags.Static);
-
-    private static readonly PropertyInfo? CtrlKeyProperty =
-        KeyboardType?.GetProperty("ctrlKey", BindingFlags.Public | BindingFlags.Instance);
-
-    private static readonly PropertyInfo? ShiftKeyProperty =
-        KeyboardType?.GetProperty("shiftKey", BindingFlags.Public | BindingFlags.Instance);
-
-    private static readonly PropertyInfo? BKeyProperty =
-        KeyboardType?.GetProperty("bKey", BindingFlags.Public | BindingFlags.Instance);
-
-    public static bool CtrlShiftB
-    {
-        get
-        {
-            try
-            {
-                var keyboard = CurrentProperty?.GetValue(null);
-                if (keyboard is null)
-                {
-                    return false;
-                }
-
-                return IsPressed(CtrlKeyProperty?.GetValue(keyboard))
-                    && IsPressed(ShiftKeyProperty?.GetValue(keyboard))
-                    && IsPressed(BKeyProperty?.GetValue(keyboard));
-            }
-            catch
-            {
-                return false;
-            }
-        }
-    }
-
-    private static bool IsPressed(object? control)
-    {
-        if (control is null)
-        {
-            return false;
-        }
-
-        var property = control.GetType().GetProperty(
-            "isPressed",
-            BindingFlags.Public | BindingFlags.Instance);
-
-        return property?.GetValue(control) as bool? == true;
     }
 }
