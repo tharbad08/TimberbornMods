@@ -73,6 +73,8 @@ internal static class Runtime
     private static readonly HashSet<string> LoggedWarnings = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, BenchStat> BenchStats = new(StringComparer.Ordinal);
     private static readonly HashSet<string> Discovered = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> OriginByType = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> OriginByAssemblyPath = new(StringComparer.OrdinalIgnoreCase);
 
     private static Settings _settings = new();
     private static DateTime _nextReloadUtc = DateTime.MinValue;
@@ -96,6 +98,22 @@ internal static class Runtime
             {
                 return Discovered.Select(ShortTypeName).Distinct(StringComparer.Ordinal).OrderBy(x => x).ToArray();
             }
+        }
+    }
+
+    public static string GetOrigin(string typeName)
+    {
+        lock (Sync)
+        {
+            if (OriginByType.TryGetValue(typeName, out var direct))
+            {
+                return direct;
+            }
+
+            var full = Discovered.FirstOrDefault(x => ShortTypeName(x) == typeName);
+            return full is not null && OriginByType.TryGetValue(full, out var origin)
+                ? origin
+                : "UNKNOWN";
         }
     }
 
@@ -427,20 +445,176 @@ internal static class Runtime
 
     private static void Discover(Type type)
     {
-        if (!_settings.WriteDiscoveredTypes)
-        {
-            return;
-        }
-
         var name = type.FullName ?? type.Name;
+        var origin = ResolveOrigin(type);
+
         lock (Sync)
         {
+            OriginByType[name] = origin;
+
             if (!Discovered.Add(name))
             {
                 return;
             }
 
-            File.AppendAllText(DiscoveredPath, name + Environment.NewLine);
+            if (_settings.WriteDiscoveredTypes)
+            {
+                File.AppendAllText(
+                    DiscoveredPath,
+                    $"{name}\t{origin}{Environment.NewLine}");
+            }
+        }
+    }
+
+    private static string ResolveOrigin(Type type)
+    {
+        string location;
+        try
+        {
+            location = type.Assembly.Location ?? "";
+        }
+        catch
+        {
+            location = "";
+        }
+
+        if (string.IsNullOrWhiteSpace(location))
+        {
+            return "UNKNOWN";
+        }
+
+        var fullPath = Path.GetFullPath(location);
+        lock (Sync)
+        {
+            if (OriginByAssemblyPath.TryGetValue(fullPath, out var cached))
+            {
+                return cached;
+            }
+        }
+
+        var normalized = fullPath.Replace('\\', '/');
+        string origin;
+
+        if (normalized.Contains("/Timberborn_Data/Managed/", StringComparison.OrdinalIgnoreCase))
+        {
+            origin = "CORE";
+        }
+        else
+        {
+            var manifest = FindNearestManifest(fullPath);
+            if (manifest is not null)
+            {
+                origin = DescribeModOrigin(manifest, normalized);
+            }
+            else
+            {
+                var workshopMarker = "/steamapps/workshop/content/1062090/";
+                var workshopIndex = normalized.IndexOf(workshopMarker, StringComparison.OrdinalIgnoreCase);
+                if (workshopIndex >= 0)
+                {
+                    var rest = normalized[(workshopIndex + workshopMarker.Length)..];
+                    var workshopId = rest.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "?";
+                    origin = $"MOD: Workshop {workshopId}";
+                }
+                else
+                {
+                    var localMarker = "/Timberborn/Mods/";
+                    var localIndex = normalized.IndexOf(localMarker, StringComparison.OrdinalIgnoreCase);
+                    if (localIndex >= 0)
+                    {
+                        var rest = normalized[(localIndex + localMarker.Length)..];
+                        var folder = rest.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? "local";
+                        origin = $"MOD: {folder} (local)";
+                    }
+                    else
+                    {
+                        origin = $"OTHER: {type.Assembly.GetName().Name}";
+                    }
+                }
+            }
+        }
+
+        lock (Sync)
+        {
+            OriginByAssemblyPath[fullPath] = origin;
+        }
+
+        return origin;
+    }
+
+    private static string? FindNearestManifest(string assemblyPath)
+    {
+        try
+        {
+            var directory = new DirectoryInfo(Path.GetDirectoryName(assemblyPath)!);
+            for (var depth = 0; directory is not null && depth < 6; depth++, directory = directory.Parent)
+            {
+                var manifest = Path.Combine(directory.FullName, "manifest.json");
+                if (File.Exists(manifest))
+                {
+                    return manifest;
+                }
+            }
+        }
+        catch
+        {
+            // Origin enrichment is diagnostic only.
+        }
+
+        return null;
+    }
+
+    private static string DescribeModOrigin(string manifestPath, string normalizedAssemblyPath)
+    {
+        try
+        {
+            var json = File.ReadAllText(manifestPath);
+            var manifest = JsonConvert.DeserializeObject<Dictionary<string, object?>>(json);
+            manifest ??= new Dictionary<string, object?>();
+
+            var name = manifest.TryGetValue("Name", out var nameValue)
+                ? Convert.ToString(nameValue)
+                : null;
+            var id = manifest.TryGetValue("Id", out var idValue)
+                ? Convert.ToString(idValue)
+                : null;
+
+            var workshopMarker = "/steamapps/workshop/content/1062090/";
+            var workshopIndex = normalizedAssemblyPath.IndexOf(workshopMarker, StringComparison.OrdinalIgnoreCase);
+            string? suffix = null;
+
+            if (workshopIndex >= 0)
+            {
+                var rest = normalizedAssemblyPath[(workshopIndex + workshopMarker.Length)..];
+                var workshopId = rest.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+                if (!string.IsNullOrWhiteSpace(workshopId))
+                {
+                    suffix = $"Workshop {workshopId}";
+                }
+            }
+            else if (normalizedAssemblyPath.Contains("/Timberborn/Mods/", StringComparison.OrdinalIgnoreCase))
+            {
+                suffix = "local";
+            }
+
+            var display = !string.IsNullOrWhiteSpace(name)
+                ? name!
+                : !string.IsNullOrWhiteSpace(id) ? id! : Path.GetFileName(Path.GetDirectoryName(manifestPath));
+
+            if (!string.IsNullOrWhiteSpace(id) && !string.Equals(display, id, StringComparison.Ordinal))
+            {
+                display += $" ({id})";
+            }
+
+            return suffix is null
+                ? $"MOD: {display}"
+                : $"MOD: {display} [{suffix}]";
+        }
+        catch
+        {
+            return normalizedAssemblyPath.Contains("/Timberborn/Mods/", StringComparison.OrdinalIgnoreCase)
+                ? "MOD: local"
+                : "MOD";
         }
     }
 
@@ -455,7 +629,7 @@ internal static class Runtime
         {
             if (!BenchStats.TryGetValue(name, out var stat))
             {
-                stat = new BenchStat();
+                stat = new BenchStat { Origin = ResolveOrigin(type) };
                 BenchStats[name] = stat;
             }
 
@@ -483,7 +657,7 @@ internal static class Runtime
         _benchmarkCompleted = true;
 
         var file = Path.Combine(ModPath, $"optimizer-v11-benchmark-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
-        var lines = new List<string> { "Type,TotalMs,Count,AverageMs,MinMs,MaxMs" };
+        var lines = new List<string> { "Type,Origin,TotalMs,Count,AverageMs,MinMs,MaxMs" };
 
         lock (Sync)
         {
@@ -494,7 +668,7 @@ internal static class Runtime
                 var minMs = s.Count == 0 ? 0 : TicksToMs(s.MinTicks);
                 var maxMs = s.Count == 0 ? 0 : TicksToMs(s.MaxTicks);
                 var avgMs = s.Count == 0 ? 0 : totalMs / s.Count;
-                lines.Add($"{Csv(pair.Key)},{totalMs:F6},{s.Count},{avgMs:F6},{minMs:F6},{maxMs:F6}");
+                lines.Add($"{Csv(pair.Key)},{Csv(s.Origin)},{totalMs:F6},{s.Count},{avgMs:F6},{minMs:F6},{maxMs:F6}");
             }
         }
 
@@ -613,6 +787,7 @@ internal static class Runtime
 
     private sealed class BenchStat
     {
+        public string Origin = "UNKNOWN";
         public long Count;
         public long TotalTicks;
         public long MinTicks = long.MaxValue;
