@@ -163,8 +163,17 @@ public sealed class OptimizerPanel : VisualElement
         var names = WellKnown
             .Concat(Runtime.KnownTypes)
             .Distinct(StringComparer.Ordinal)
-            .Where(name => string.IsNullOrEmpty(_filter)
-                || name.Contains(_filter, StringComparison.OrdinalIgnoreCase))
+            .Where(name =>
+            {
+                if (string.IsNullOrEmpty(_filter))
+                {
+                    return true;
+                }
+
+                var origin = Runtime.GetOrigin(name);
+                return name.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+                    || origin.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+            })
             .OrderBy(n => Array.IndexOf(WellKnown, n) < 0 ? 1 : 0)
             .ThenBy(n => n, StringComparer.OrdinalIgnoreCase);
 
@@ -179,9 +188,10 @@ public sealed class OptimizerPanel : VisualElement
     private static void AddSystemRow(VisualElement parent, string typeName)
     {
         var current = Runtime.GetInterval(typeName);
+        var origin = Runtime.GetOrigin(typeName);
 
         parent.AddSliderInt(
-                label: typeName,
+                label: $"{typeName}    [{origin}]",
                 values: new SliderValues<int>(1, 50, current))
             .AddEndLabel(v => v == 1 ? "vanilla" : $"1/{v}")
             .RegisterChange(v => Runtime.SetInterval(typeName, v))
