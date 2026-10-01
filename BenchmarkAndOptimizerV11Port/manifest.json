@@ -1,6 +1,6 @@
 {
   "Name": "Benchmark & Optimizer (v1.1 Port)",
-  "Version": "1.1.18",
+  "Version": "1.1.19",
   "Id": "BenchmarkAndOptimizerV11",
   "MinimumGameVersion": "1.1.1.0",
   "Description": "Timberborn v1.1 port of Benchmark & Optimizer with live ModSettings + TimberUi controls.",
