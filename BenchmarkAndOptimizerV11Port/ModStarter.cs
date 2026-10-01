@@ -75,6 +75,8 @@ internal static class Runtime
     private static readonly HashSet<string> Discovered = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> OriginByType = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> OriginByAssemblyPath = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, string> OriginByAssemblyName = new(StringComparer.OrdinalIgnoreCase);
+    private static bool _benchmarkRunning;
 
     private static Settings _settings = new();
     private static DateTime _nextReloadUtc = DateTime.MinValue;
@@ -117,6 +119,11 @@ internal static class Runtime
         }
     }
 
+    public static string Mode =>
+        BenchmarkActive ? "Benchmarking" :
+        HasActiveThrottles() ? "Throttling" :
+        "Vanilla fast path";
+
     public static bool IsBenchmarking => BenchmarkActive;
     public static double BenchmarkRemainingSeconds
     {
@@ -125,7 +132,7 @@ internal static class Runtime
             if (!BenchmarkActive) return 0;
             var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp() - _benchmarkStart)
                           / (double)System.Diagnostics.Stopwatch.Frequency;
-            return Math.Max(0, _settings.BenchmarkSeconds - elapsed);
+            return Math.Max(0, BenchmarkDurationSeconds - elapsed);
         }
     }
 
@@ -180,9 +187,9 @@ internal static class Runtime
             BenchStats.Clear();
         }
 
-        _settings.BenchmarkSeconds = BenchmarkDurationSeconds;
         _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
         _benchmarkCompleted = false;
+        _benchmarkRunning = true;
         Log($"benchmark started for {BenchmarkDurationSeconds}s; output will be written under {ModPath}");
     }
 
@@ -205,6 +212,11 @@ internal static class Runtime
         }
 
         ReloadConfig(force: true);
+
+        // Benchmarks are session-only and must never be resumed from persisted settings.
+        _settings.BenchmarkSeconds = 0;
+        _benchmarkRunning = false;
+        _benchmarkCompleted = true;
         _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
     }
 
@@ -466,6 +478,41 @@ internal static class Runtime
         }
     }
 
+    public static void RegisterModAssemblyOrigin(string assemblyName, string origin)
+    {
+        if (string.IsNullOrWhiteSpace(assemblyName) || string.IsNullOrWhiteSpace(origin))
+        {
+            return;
+        }
+
+        lock (Sync)
+        {
+            OriginByAssemblyName[assemblyName] = origin;
+        }
+    }
+
+    public static void RegisterModPathOrigin(string path, string origin)
+    {
+        if (string.IsNullOrWhiteSpace(path) || string.IsNullOrWhiteSpace(origin))
+        {
+            return;
+        }
+
+        try
+        {
+            path = Path.GetFullPath(path);
+        }
+        catch
+        {
+            return;
+        }
+
+        lock (Sync)
+        {
+            OriginByAssemblyPath[path] = origin;
+        }
+    }
+
     private static string ResolveOrigin(Type type)
     {
         string location;
@@ -480,7 +527,13 @@ internal static class Runtime
 
         if (string.IsNullOrWhiteSpace(location))
         {
-            return "UNKNOWN";
+            var assemblyName = type.Assembly.GetName().Name ?? "";
+            lock (Sync)
+            {
+                return OriginByAssemblyName.TryGetValue(assemblyName, out var mapped)
+                    ? mapped
+                    : $"UNKNOWN: {assemblyName}";
+            }
         }
 
         var fullPath = Path.GetFullPath(location);
@@ -494,6 +547,20 @@ internal static class Runtime
 
         var normalized = fullPath.Replace('\\', '/');
         string origin;
+
+        lock (Sync)
+        {
+            if (OriginByAssemblyPath.TryGetValue(fullPath, out var exactPathOrigin))
+            {
+                return exactPathOrigin;
+            }
+
+            var assemblyName = type.Assembly.GetName().Name ?? "";
+            if (OriginByAssemblyName.TryGetValue(assemblyName, out var assemblyOrigin))
+            {
+                return assemblyOrigin;
+            }
+        }
 
         if (normalized.Contains("/Timberborn_Data/Managed/", StringComparison.OrdinalIgnoreCase))
         {
@@ -619,7 +686,7 @@ internal static class Runtime
     }
 
     private static bool BenchmarkActive =>
-        !_benchmarkCompleted && _settings.BenchmarkSeconds > 0;
+        _benchmarkRunning && !_benchmarkCompleted;
 
     private static void RecordBenchmark(Type type, long elapsedTicks)
     {
@@ -649,12 +716,13 @@ internal static class Runtime
 
         var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp() - _benchmarkStart)
                       / (double)System.Diagnostics.Stopwatch.Frequency;
-        if (elapsed < _settings.BenchmarkSeconds)
+        if (elapsed < BenchmarkDurationSeconds)
         {
             return;
         }
 
         _benchmarkCompleted = true;
+        _benchmarkRunning = false;
 
         var file = Path.Combine(ModPath, $"optimizer-v11-benchmark-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
         var lines = new List<string> { "Type,Origin,TotalMs,Count,AverageMs,MinMs,MaxMs" };
@@ -840,7 +908,9 @@ internal sealed class Settings
     {
         DefaultInterval = Math.Clamp(DefaultInterval, 1, 1000);
         ReloadSeconds = Math.Clamp(ReloadSeconds, 1, 60);
-        BenchmarkSeconds = Math.Clamp(BenchmarkSeconds, 0, 3600);
+        // Legacy field kept only for backwards-compatible config parsing.
+        // Benchmark execution is session-only.
+        BenchmarkSeconds = 0;
         Intervals ??= new Dictionary<string, int>(StringComparer.Ordinal);
 
         foreach (var key in Intervals.Keys.ToArray())
