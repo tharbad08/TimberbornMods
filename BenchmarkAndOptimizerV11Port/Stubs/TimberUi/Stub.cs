@@ -33,8 +33,11 @@ namespace UnityEngine.UIElements
     {
         public static T SetPadding<T>(this T e,float padding) where T:VisualElement=>e;
         public static T SetMargin<T>(this T e,float top,float right,float bottom,float left) where T:VisualElement=>e;
+        public static T SetMarginBottom<T>(this T e,float margin=10f) where T:VisualElement=>e;
         public static T SetWidthPercent<T>(this T e,float p) where T:VisualElement=>e;
         public static T SetMaxHeight<T>(this T e,float h) where T:VisualElement=>e;
+        public static VisualElement AddChild(this VisualElement p,string? name=null,IEnumerable<string>? classes=null)=>new VisualElement();
+        public static T AddChild<T>(this VisualElement p,string? name=null,IEnumerable<string>? classes=null) where T:VisualElement,new()=>new T();
         public static VisualElement AddRow(this VisualElement p)=>new VisualElement();
         public static Label AddGameLabel(this VisualElement p,string? text=null,string? name=null,IEnumerable<string>? additionalClasses=null,UiBuilder.GameLabelSize size=default,UiBuilder.GameLabelColor? color=default,bool bold=default,bool centered=default)=>new Label{ text=text??"" };
         public static Toggle AddToggle(this VisualElement p,string? text=null,string? name=null,IEnumerable<string>? additionalClasses=null,Action<bool>? onValueChanged=null,UiBuilder.ToggleStyle style=default)=>new Toggle{text=text??""};
