@@ -138,7 +138,7 @@ public sealed class OptimizerPanel : VisualElement
 
         var scroll = this.AddScrollView();
         scroll.mode = ScrollViewMode.VerticalAndHorizontal;
-        scroll.horizontalScrollerVisibility = ScrollerVisibility.Auto;
+        scroll.horizontalScrollerVisibility = ScrollerVisibility.AlwaysVisible;
         scroll.verticalScrollerVisibility = ScrollerVisibility.Auto;
         scroll.SetMaxHeight(650);
 
