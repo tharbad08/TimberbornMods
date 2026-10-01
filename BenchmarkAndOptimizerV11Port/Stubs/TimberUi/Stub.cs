@@ -2,7 +2,13 @@ using System; using System.Collections.Generic; using Bindito.Core;
 namespace UiBuilder { public enum GameLabelSize { Normal, Big } public enum GameLabelColor { Default, Yellow } public enum ToggleStyle { Settings, GamePanel } public enum GameButtonSize { Medium, Small, Large } }
 namespace TimberUi.CommonUi
 {
-    public readonly record struct SliderValues<T>(T Low,T High,T Default) where T:IComparable<T>;
+    public readonly struct SliderValues<T> where T:IComparable<T>
+    {
+        public SliderValues(T low, T high, T @default) { Low=low; High=high; Default=@default; }
+        public T Low { get; }
+        public T High { get; }
+        public T Default { get; }
+    }
     public class GameSliderInt : UnityEngine.UIElements.VisualElement
     {
         public int Value { get; set; }
