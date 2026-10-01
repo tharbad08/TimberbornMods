@@ -30,6 +30,7 @@ public sealed class GameConfig : Configurator
     {
         this.BindSingleton<OptimizerSettingsOwner>()
             .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
+            .BindSingleton<OptimizerOriginRegistryService>()
             .BindSingleton<OptimizerMenuService>();
     }
 }
@@ -147,8 +148,8 @@ public sealed class OptimizerPanel : VisualElement
     private void UpdateStatus()
     {
         _status.text = Runtime.IsBenchmarking
-            ? $"Benchmark running — {Runtime.BenchmarkRemainingSeconds:F1}s remaining"
-            : $"Detected systems: {Runtime.KnownTypes.Count}";
+            ? $"Mode: {Runtime.Mode} — {Runtime.BenchmarkRemainingSeconds:F1}s remaining"
+            : $"Mode: {Runtime.Mode} — Detected systems: {Runtime.KnownTypes.Count}";
     }
 
     private void Rebuild()
@@ -197,6 +198,118 @@ public sealed class OptimizerPanel : VisualElement
             .RegisterChange(v => Runtime.SetInterval(typeName, v))
             .SetWidthPercent(100)
             .SetMarginBottom(6);
+    }
+}
+
+
+public sealed class OptimizerOriginRegistryService(
+    ModRepository repository
+) : ILoadableSingleton
+{
+    public void Load()
+    {
+        try
+        {
+            var enabledMods = repository.GetType()
+                .GetProperty("EnabledMods", BindingFlags.Public | BindingFlags.Instance)
+                ?.GetValue(repository) as System.Collections.IEnumerable;
+
+            if (enabledMods is null)
+            {
+                Runtime.Log("warning: origin registry could not read ModRepository.EnabledMods");
+                return;
+            }
+
+            var registeredMods = 0;
+            var registeredAssemblies = 0;
+
+            foreach (var mod in enabledMods)
+            {
+                if (mod is null)
+                {
+                    continue;
+                }
+
+                var modType = mod.GetType();
+                var manifest = modType
+                    .GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(mod);
+                var modDirectory = modType
+                    .GetProperty("ModDirectory", BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(mod);
+
+                if (manifest is null || modDirectory is null)
+                {
+                    continue;
+                }
+
+                var manifestType = manifest.GetType();
+                var name = manifestType
+                    .GetProperty("Name", BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(manifest) as string;
+                var id = manifestType
+                    .GetProperty("Id", BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(manifest) as string;
+
+                var directoryType = modDirectory.GetType();
+                var originPath = directoryType
+                    .GetProperty("OriginPath", BindingFlags.Public | BindingFlags.Instance)
+                    ?.GetValue(modDirectory) as string;
+
+                if (string.IsNullOrWhiteSpace(originPath) || !Directory.Exists(originPath))
+                {
+                    continue;
+                }
+
+                var workshopId = ExtractWorkshopId(originPath);
+                var isLocal = originPath.Replace('\\', '/')
+                    .Contains("/Timberborn/Mods/", StringComparison.OrdinalIgnoreCase);
+
+                var display = !string.IsNullOrWhiteSpace(name)
+                    ? name!
+                    : !string.IsNullOrWhiteSpace(id) ? id! : Path.GetFileName(originPath.TrimEnd(Path.DirectorySeparatorChar));
+
+                if (!string.IsNullOrWhiteSpace(id) && !string.Equals(display, id, StringComparison.Ordinal))
+                {
+                    display += $" ({id})";
+                }
+
+                var suffix = !string.IsNullOrWhiteSpace(workshopId)
+                    ? $" [Workshop {workshopId}]"
+                    : isLocal ? " [local]" : "";
+
+                var origin = $"MOD: {display}{suffix}";
+                registeredMods++;
+
+                foreach (var dll in Directory.EnumerateFiles(originPath, "*.dll", SearchOption.AllDirectories))
+                {
+                    var assemblyName = Path.GetFileNameWithoutExtension(dll);
+                    Runtime.RegisterModAssemblyOrigin(assemblyName, origin);
+                    Runtime.RegisterModPathOrigin(dll, origin);
+                    registeredAssemblies++;
+                }
+            }
+
+            Runtime.Log($"origin registry loaded: mods={registeredMods}, assemblies={registeredAssemblies}");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log($"warning: origin registry failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static string? ExtractWorkshopId(string path)
+    {
+        var normalized = path.Replace('\\', '/');
+        const string marker = "/steamapps/workshop/content/1062090/";
+        var index = normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (index < 0)
+        {
+            return null;
+        }
+
+        var rest = normalized[(index + marker.Length)..];
+        return rest.Split('/', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
     }
 }
 
