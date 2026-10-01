@@ -2,15 +2,19 @@ using System;
 
 namespace UnityEngine.UIElements
 {
-    public class ChangeEvent<T>
+    public class EventBase { }
+    public class ChangeEvent<T> : EventBase
     {
         public T newValue { get; set; } = default!;
     }
+
+    public delegate void EventCallback<in TEventType>(TEventType evt) where TEventType : EventBase;
 
     public class VisualElement
     {
         public void Add(VisualElement child) { }
         public void Clear() { }
+        public void RegisterCallback<TEventType>(EventCallback<TEventType> callback) where TEventType : EventBase { }
     }
 
     public class Label : VisualElement
@@ -23,33 +27,24 @@ namespace UnityEngine.UIElements
     public class Toggle : VisualElement
     {
         public Toggle() { }
-        public Toggle(string text) { this.text = text; }
         public string text { get; set; } = "";
         public bool value { get; set; }
         public void SetValueWithoutNotify(bool value) { this.value = value; }
-        public void RegisterValueChangedCallback(Action<ChangeEvent<bool>> callback) { }
     }
 
     public class ScrollView : VisualElement { }
 
-    public class TextField : VisualElement
-    {
-        public string value { get; set; } = "";
-        public void RegisterValueChangedCallback(Action<ChangeEvent<string>> callback) { }
-    }
-
     public class Button : VisualElement
     {
-        public Button() { }
-        public Button(Action clickEvent) { }
         public string text { get; set; } = "";
+        public event Action? clicked;
     }
 
     public class SliderInt : VisualElement
     {
-        public SliderInt(int lowValue, int highValue) { }
+        public int lowValue { get; set; }
+        public int highValue { get; set; }
         public int value { get; set; }
         public void SetValueWithoutNotify(int value) { this.value = value; }
-        public void RegisterValueChangedCallback(Action<ChangeEvent<int>> callback) { }
     }
 }
