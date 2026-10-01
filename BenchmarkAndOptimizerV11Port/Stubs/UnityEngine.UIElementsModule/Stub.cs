@@ -11,9 +11,10 @@ namespace UnityEngine.UIElements
     {
         public string text { get; set; } = "";
         public bool value { get; set; }
-        public void SetValueWithoutNotify(bool value) { }
+        public void SetValueWithoutNotify(bool value) { this.value = value; }
     }
     public class ScrollView : VisualElement { }
+    public class TextField : VisualElement { public string value { get; set; } = ""; }
     public class Button : VisualElement
     {
         public string text { get; set; } = "";
