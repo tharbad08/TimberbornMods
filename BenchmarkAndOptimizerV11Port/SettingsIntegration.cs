@@ -1,10 +1,10 @@
+using System.Reflection;
 using Bindito.Core;
 using ModSettings.CommonUI;
 using ModSettings.Core;
 using ModSettings.CoreUI;
 using Timberborn.Modding;
 using Timberborn.SettingsSystem;
-using TimberUi.CommonUi;
 using UnityEngine.UIElements;
 
 namespace BenchmarkAndOptimizerV11;
@@ -66,9 +66,9 @@ public sealed class OptimizerSettingElementFactory : IModSettingElementFactory
 
 public sealed class OptimizerPanel : VisualElement
 {
-    private readonly VisualElement _wellKnown;
-    private readonly VisualElement _others;
-    private readonly Label _status;
+    private readonly VisualElement _wellKnown = new();
+    private readonly VisualElement _others = new();
+    private readonly Label _status = new();
     private int _benchmarkSeconds = 30;
 
     private static readonly string[] WellKnown =
@@ -81,58 +81,128 @@ public sealed class OptimizerPanel : VisualElement
 
     public OptimizerPanel()
     {
-        // Follow datvm's own TimberUi/ModSettings pattern:
-        // use AddToggle/AddSliderInt/RegisterChange instead of raw UIElements callbacks.
-        this.SetPadding(8);
+        // ModSettings owns the panel. Functional widgets use only Unity UIElements.
+        // TimberUi is still used for layout/styling, but through a compatibility
+        // reflection shim so concrete TimberUi type renames cannot TypeLoad-crash us.
+        TimberUiCompat.Padding(this, 8);
 
-        this.AddGameLabel("Benchmark & Optimizer — live controls", bold: true);
-        this.AddGameLabel("1 = vanilla frequency. Higher values run that system once every N dispatcher calls. Changes apply immediately.")
-            .SetMarginBottom(8);
+        AddLabel(this, "Benchmark & Optimizer — live controls", bottom: 4);
+        AddLabel(
+            this,
+            "1 = vanilla frequency. Higher values run that system once every N dispatcher calls. Changes apply immediately.",
+            bottom: 8);
 
-        var enabled = this.AddToggle("Optimizer enabled", onValueChanged: Runtime.SetEnabled);
-        enabled.value = Runtime.Enabled;
+        var enabled = new Toggle { text = "Optimizer enabled" };
+        enabled.SetValueWithoutNotify(Runtime.Enabled);
+        enabled.RegisterCallback<ChangeEvent<bool>>(ev => Runtime.SetEnabled(ev.newValue));
+        Add(enabled);
 
-        this.AddSliderInt(
-                label: "Default interval",
-                values: new SliderValues<int>(1, 50, Runtime.DefaultInterval))
-            .AddEndLabel(v => v == 1 ? "vanilla" : $"1/{v}")
-            .RegisterChange(Runtime.SetDefaultInterval)
-            .SetWidthPercent(100)
-            .SetMarginBottom(8);
+        AddIntSlider(
+            this,
+            "Default interval",
+            1,
+            50,
+            Runtime.DefaultInterval,
+            Runtime.SetDefaultInterval,
+            v => v == 1 ? "vanilla" : $"1/{v}");
 
-        var actions = this.AddRow();
-        actions.AddMenuButton("Reset all to 1", onClick: () =>
+        var actions = NewRow(this);
+        AddButton(actions, "Reset all to 1", () =>
         {
             Runtime.ResetIntervals();
             Rebuild();
         });
-        actions.AddMenuButton("Refresh detected systems", onClick: Rebuild);
-        actions.SetMarginBottom(8);
+        AddButton(actions, "Refresh detected systems", Rebuild);
+        TimberUiCompat.MarginBottom(actions, 8);
 
-        this.AddGameLabel("Benchmark", bold: true);
-        var benchmarkRow = this.AddRow();
-        benchmarkRow.AddSliderInt(
-                label: "Duration",
-                values: new SliderValues<int>(5, 120, _benchmarkSeconds))
-            .AddEndLabel(v => $"{v}s")
-            .RegisterChange(v => _benchmarkSeconds = v)
-            .SetWidthPercent(75);
-        benchmarkRow.AddMenuButton("Start", onClick: () =>
+        AddLabel(this, "Benchmark", bottom: 4);
+        var benchmarkRow = NewRow(this);
+        AddIntSlider(
+            benchmarkRow,
+            "Duration",
+            5,
+            120,
+            _benchmarkSeconds,
+            v => _benchmarkSeconds = v,
+            v => $"{v}s");
+        AddButton(benchmarkRow, "Start", () =>
         {
             Runtime.StartBenchmark(_benchmarkSeconds);
             UpdateStatus();
         });
+        TimberUiCompat.MarginBottom(benchmarkRow, 8);
 
-        _status = this.AddGameLabel("");
-        _status.SetMarginBottom(8);
+        Add(_status);
+        TimberUiCompat.MarginBottom(_status, 8);
 
-        var scroll = this.AddScrollView();
-        scroll.SetMaxHeight(650);
+        var scroll = new ScrollView();
+        Add(scroll);
+        TimberUiCompat.MaxHeight(scroll, 650);
 
-        _wellKnown = scroll.AddChild();
-        _others = scroll.AddChild();
+        scroll.Add(_wellKnown);
+        scroll.Add(_others);
 
         Rebuild();
+    }
+
+    private static Label AddLabel(VisualElement parent, string text, float bottom = 0)
+    {
+        var label = new Label(text);
+        parent.Add(label);
+        if (bottom > 0)
+        {
+            TimberUiCompat.MarginBottom(label, bottom);
+        }
+        return label;
+    }
+
+    private static VisualElement NewRow(VisualElement parent)
+    {
+        var row = new VisualElement();
+        parent.Add(row);
+        TimberUiCompat.AsRow(row);
+        return row;
+    }
+
+    private static void AddButton(VisualElement parent, string text, Action onClick)
+    {
+        var button = new Button { text = text };
+        button.clicked += onClick;
+        parent.Add(button);
+    }
+
+    private static void AddIntSlider(
+        VisualElement parent,
+        string label,
+        int min,
+        int max,
+        int value,
+        Action<int> onChanged,
+        Func<int, string> valueText)
+    {
+        var row = NewRow(parent);
+
+        row.Add(new Label(label));
+
+        var slider = new SliderInt
+        {
+            lowValue = min,
+            highValue = max
+        };
+        slider.SetValueWithoutNotify(value);
+        TimberUiCompat.WidthPercent(slider, 65);
+        row.Add(slider);
+
+        var current = new Label(valueText(value));
+        row.Add(current);
+
+        slider.RegisterCallback<ChangeEvent<int>>(ev =>
+        {
+            onChanged(ev.newValue);
+            current.text = valueText(ev.newValue);
+        });
+
+        TimberUiCompat.MarginBottom(row, 6);
     }
 
     private void UpdateStatus()
@@ -148,8 +218,8 @@ public sealed class OptimizerPanel : VisualElement
         _wellKnown.Clear();
         _others.Clear();
 
-        _wellKnown.AddGameLabel("Well-known systems", bold: true).SetMarginBottom(5);
-        _others.AddGameLabel("Other detected systems", bold: true).SetMargin(10, 0, 5, 0);
+        AddLabel(_wellKnown, "Well-known systems", bottom: 5);
+        AddLabel(_others, "Other detected systems", bottom: 5);
 
         var names = WellKnown
             .Concat(Runtime.KnownTypes)
@@ -167,14 +237,82 @@ public sealed class OptimizerPanel : VisualElement
 
     private static void AddSystemRow(VisualElement parent, string typeName)
     {
-        var current = Runtime.GetInterval(typeName);
+        AddIntSlider(
+            parent,
+            typeName,
+            1,
+            50,
+            Runtime.GetInterval(typeName),
+            v => Runtime.SetInterval(typeName, v),
+            v => v == 1 ? "vanilla" : $"1/{v}");
+    }
+}
 
-        parent.AddSliderInt(
-                label: typeName,
-                values: new SliderValues<int>(1, 50, current))
-            .AddEndLabel(v => v == 1 ? "vanilla" : $"1/{v}")
-            .RegisterChange(v => Runtime.SetInterval(typeName, v))
-            .SetWidthPercent(100)
-            .SetMarginBottom(6);
+internal static class TimberUiCompat
+{
+    private static readonly Type? ExtensionsType =
+        AppDomain.CurrentDomain.GetAssemblies()
+            .FirstOrDefault(a => a.GetName().Name == "TimberUi")
+            ?.GetType("UnityEngine.UIElements.UiBuilderExtensions");
+
+    public static void Padding(VisualElement element, float value) =>
+        Invoke("SetPadding", element, value);
+
+    public static void MarginBottom(VisualElement element, float value) =>
+        Invoke("SetMarginBottom", element, value);
+
+    public static void AsRow(VisualElement element) =>
+        Invoke("SetAsRow", element);
+
+    public static void WidthPercent(VisualElement element, float value) =>
+        Invoke("SetWidthPercent", element, value);
+
+    public static void MaxHeight(VisualElement element, float value) =>
+        Invoke("SetMaxHeight", element, value);
+
+    private static void Invoke(string name, VisualElement element, params object[] args)
+    {
+        if (ExtensionsType is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var wantedCount = args.Length + 1;
+            var candidates = ExtensionsType
+                .GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Where(m => m.Name == name && m.GetParameters().Length == wantedCount);
+
+            foreach (var candidate in candidates)
+            {
+                var method = candidate;
+                if (method.IsGenericMethodDefinition)
+                {
+                    var genericArgs = method.GetGenericArguments();
+                    if (genericArgs.Length != 1)
+                    {
+                        continue;
+                    }
+                    method = method.MakeGenericMethod(element.GetType());
+                }
+
+                var parameters = method.GetParameters();
+                if (!parameters[0].ParameterType.IsAssignableFrom(element.GetType()))
+                {
+                    continue;
+                }
+
+                var invokeArgs = new object[wantedCount];
+                invokeArgs[0] = element;
+                Array.Copy(args, 0, invokeArgs, 1, args.Length);
+                method.Invoke(null, invokeArgs);
+                return;
+            }
+        }
+        catch
+        {
+            // Styling must never make the settings page unusable.
+        }
     }
 }
