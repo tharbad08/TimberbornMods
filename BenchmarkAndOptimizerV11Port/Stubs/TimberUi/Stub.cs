@@ -42,8 +42,8 @@ namespace UnityEngine.UIElements
         public static Label AddGameLabel(this VisualElement p,string? text=null,string? name=null,IEnumerable<string>? additionalClasses=null,UiBuilder.GameLabelSize size=default,UiBuilder.GameLabelColor? color=default,bool bold=default,bool centered=default)=>new Label{ text=text??"" };
         public static Toggle AddToggle(this VisualElement p,string? text=null,string? name=null,IEnumerable<string>? additionalClasses=null,Action<bool>? onValueChanged=null,UiBuilder.ToggleStyle style=default)=>new Toggle{text=text??""};
         public static TimberUi.CommonUi.GameSliderInt AddSliderInt(this VisualElement p,string? label=null,string? name=null,IEnumerable<string>? additionalClasses=null,in TimberUi.CommonUi.SliderValues<int>? values=default)=>new TimberUi.CommonUi.GameSliderInt();
-        public static TimberUi.CommonUi.NineSliceButton AddMenuButton(this VisualElement p,string? text=null,Action? onClick=null,string? name=null,IEnumerable<string>? additionalClasses=null,UiBuilder.GameButtonSize? size=default,bool stretched=false)=>new TimberUi.CommonUi.NineSliceButton{text=text??""};
-        public static TimberUi.CommonUi.NineSliceTextField AddTextField(this VisualElement p,string? name=null,Action<string>? changeCallback=null,IEnumerable<string>? additionalClasses=null)=>new TimberUi.CommonUi.NineSliceTextField();
+        public static Timberborn.CoreUI.NineSliceButton AddMenuButton(this VisualElement p,string? text=null,Action? onClick=null,string? name=null,IEnumerable<string>? additionalClasses=null,UiBuilder.GameButtonSize? size=default,bool stretched=false)=>new Timberborn.CoreUI.NineSliceButton{text=text??""};
+        public static Timberborn.CoreUI.NineSliceTextField AddTextField(this VisualElement p,string? name=null,Action<string>? changeCallback=null,IEnumerable<string>? additionalClasses=null)=>new Timberborn.CoreUI.NineSliceTextField();
         public static ScrollView AddScrollView(this VisualElement p,string? name=null,IEnumerable<string>? additionalClasses=null,bool greenDecorated=true)=>new ScrollView();
     }
 }
