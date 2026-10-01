@@ -19,7 +19,8 @@ public sealed class MainMenuConfig : Configurator
     public override void Configure()
     {
         this.BindSingleton<OptimizerSettingsOwner>()
-            .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>();
+            .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
+            .BindSingleton<OptimizerSettingsBoxWidthService>();
     }
 }
 
@@ -30,6 +31,7 @@ public sealed class GameConfig : Configurator
     {
         this.BindSingleton<OptimizerSettingsOwner>()
             .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
+            .BindSingleton<OptimizerSettingsBoxWidthService>()
             .BindSingleton<OptimizerOriginRegistryService>()
             .BindSingleton<OptimizerMenuService>();
     }
@@ -53,9 +55,7 @@ public sealed class OptimizerUiSetting()
     public override void Reset() => Runtime.ResetIntervals();
 }
 
-public sealed class OptimizerSettingElementFactory(
-    ModSettingsBox modSettingsBox
-) : IModSettingElementFactory
+public sealed class OptimizerSettingElementFactory : IModSettingElementFactory
 {
     public int Priority { get; }
 
@@ -67,8 +67,36 @@ public sealed class OptimizerSettingElementFactory(
             return false;
         }
 
-        element = new ModSettingElement(new OptimizerPanel(modSettingsBox), modSetting);
+        element = new ModSettingElement(new OptimizerPanel(), modSetting);
         return true;
+    }
+}
+
+public sealed class OptimizerSettingsBoxWidthService(
+    IContainer container
+) : IPostLoadableSingleton
+{
+    public void PostLoad()
+    {
+        try
+        {
+            // Same pattern as datvm/TImprove4Mods/Services/ModSettingBoxService.cs:
+            // resolve ModSettingsBox from the finished container, then modify its panel.
+            var box = container.GetInstance<ModSettingsBox>();
+            var panelBox = box.GetPanel().Q("Box");
+            if (panelBox is null)
+            {
+                Runtime.Log("warning: ModSettings Box element not found; keeping default width");
+                return;
+            }
+
+            panelBox.SetWidth(885f);
+            Runtime.Log("ModSettings box width set to 885px (1.5x default)");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log($"warning: failed to widen ModSettings box: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 }
 
@@ -87,18 +115,8 @@ public sealed class OptimizerPanel : VisualElement
         "ResourceCountingService"
     };
 
-    public OptimizerPanel(ModSettingsBox modSettingsBox)
+    public OptimizerPanel()
     {
-        // ModSettings hard-codes its box to 590 px. This page needs more horizontal
-        // room for full type/origin names, so widen only while this panel is open.
-        var settingsBox = modSettingsBox.GetPanel().Q("Box");
-        settingsBox?.SetWidth(885f);
-
-        RegisterCallback<DetachFromPanelEvent>(_ =>
-        {
-            settingsBox?.SetWidth(590f);
-        });
-
         // Follow datvm's own TimberUi/ModSettings pattern:
         // use AddToggle/AddSliderInt/RegisterChange instead of raw UIElements callbacks.
         this.SetPadding(8);
