@@ -210,11 +210,12 @@ public sealed class OptimizerMenuService(
         }
 
         var root = _optionsBox._root;
-        var resumeButton = root.Q<VisualElement>("ResumeButton");
+        var resumeButton = root.Q<VisualElement>("ResumeButton")
+            ?? root.Q<VisualElement>("Resume");
 
         if (resumeButton is null)
         {
-            Runtime.Log("warning: pause-menu ResumeButton not found; optimizer menu entry not added");
+            Runtime.Log("warning: pause-menu ResumeButton/Resume not found; optimizer menu entry not added");
             return;
         }
 
