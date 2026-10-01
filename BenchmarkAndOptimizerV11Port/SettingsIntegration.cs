@@ -4,7 +4,6 @@ using ModSettings.Core;
 using ModSettings.CoreUI;
 using Timberborn.Modding;
 using Timberborn.SettingsSystem;
-using TimberUi.CommonUi;
 using UnityEngine.UIElements;
 
 namespace BenchmarkAndOptimizerV11;
@@ -69,7 +68,7 @@ public sealed class OptimizerPanel : VisualElement
 {
     private readonly VisualElement _list;
     private readonly Label _status;
-    private readonly NineSliceTextField _filter;
+    private readonly TextField _filter;
     private int _benchmarkSeconds = 30;
 
     private static readonly string[] WellKnown =
@@ -82,39 +81,59 @@ public sealed class OptimizerPanel : VisualElement
 
     public OptimizerPanel()
     {
+        // TimberUi is intentionally used only through helpers whose signatures contain
+        // vanilla UIElements types. This avoids depending on TimberUi's private/concrete
+        // NineSlice/GameSlider classes, which have changed between releases.
         this.SetPadding(8);
 
-        this.AddGameLabel("Benchmark & Optimizer — live controls", bold: true);
-        this.AddGameLabel("1 = vanilla frequency. 2 = every second dispatcher call. Changes apply immediately.");
+        AddPlainLabel("Benchmark & Optimizer — live controls");
+        AddPlainLabel("1 = vanilla frequency. Higher values run the system once every N dispatcher calls. Changes apply immediately.");
 
-        var enabled = this.AddToggle("Optimizer enabled", onValueChanged: Runtime.SetEnabled);
+        var enabled = new Toggle("Optimizer enabled");
         enabled.SetValueWithoutNotify(Runtime.Enabled);
+        enabled.RegisterValueChangedCallback(ev => Runtime.SetEnabled(ev.newValue));
+        Add(enabled);
 
-        var defaultSlider = this.AddSliderInt(
-                label: "Default interval",
-                values: new SliderValues<int>(1, 50, Runtime.DefaultInterval))
-            .AddEndLabel(v => $"1/{v}")
-            .RegisterChange(Runtime.SetDefaultInterval);
-        defaultSlider.SetWidthPercent(100);
+        AddIntSlider(
+            parent: this,
+            label: "Default interval",
+            min: 1,
+            max: 50,
+            value: Runtime.DefaultInterval,
+            onChanged: Runtime.SetDefaultInterval,
+            valueText: v => v == 1 ? "vanilla" : $"1/{v}");
 
         var topRow = this.AddRow();
-        topRow.AddMenuButton("Reset all to 1", Runtime.ResetIntervals);
-        topRow.AddMenuButton("Refresh detected systems", Rebuild);
+        AddButton(topRow, "Reset all to 1", () =>
+        {
+            Runtime.ResetIntervals();
+            Rebuild();
+        });
+        AddButton(topRow, "Refresh detected systems", Rebuild);
 
-        this.AddGameLabel("Benchmark", bold: true).SetMargin(8, 0, 0, 0);
+        AddPlainLabel("Benchmark");
         var benchRow = this.AddRow();
-        var bench = benchRow.AddSliderInt(
-                label: "Duration (seconds)",
-                values: new SliderValues<int>(5, 120, _benchmarkSeconds))
-            .AddEndLabel(v => $"{v}s")
-            .RegisterChange(v => _benchmarkSeconds = v);
-        bench.SetWidthPercent(70);
-        benchRow.AddMenuButton("Start", () => Runtime.StartBenchmark(_benchmarkSeconds));
+        AddIntSlider(
+            parent: benchRow,
+            label: "Duration (seconds)",
+            min: 5,
+            max: 120,
+            value: _benchmarkSeconds,
+            onChanged: v => _benchmarkSeconds = v,
+            valueText: v => $"{v}s");
+        AddButton(benchRow, "Start", () =>
+        {
+            Runtime.StartBenchmark(_benchmarkSeconds);
+            UpdateStatus();
+        });
 
-        _status = this.AddGameLabel("");
-        _filter = this.AddTextField(changeCallback: _ => Rebuild());
+        _status = AddPlainLabel("");
+
+        AddPlainLabel("Filter systems");
+        _filter = new TextField();
         _filter.value = "";
-        this.AddGameLabel("Filter systems");
+        _filter.RegisterValueChangedCallback(_ => Rebuild());
+        Add(_filter);
 
         _list = this.AddScrollView();
         _list.SetMaxHeight(650);
@@ -122,13 +141,56 @@ public sealed class OptimizerPanel : VisualElement
         Rebuild();
     }
 
-    private void Rebuild()
+    private Label AddPlainLabel(string text)
     {
-        _list.Clear();
+        var label = new Label(text);
+        Add(label);
+        return label;
+    }
 
+    private static void AddButton(VisualElement parent, string text, Action action)
+    {
+        var button = new Button(action) { text = text };
+        parent.Add(button);
+    }
+
+    private static void AddIntSlider(
+        VisualElement parent,
+        string label,
+        int min,
+        int max,
+        int value,
+        Action<int> onChanged,
+        Func<int, string> valueText)
+    {
+        var row = parent.AddRow();
+
+        var title = new Label(label);
+        row.Add(title);
+
+        var slider = new SliderInt(min, max);
+        slider.SetValueWithoutNotify(value);
+        slider.RegisterValueChangedCallback(ev => onChanged(ev.newValue));
+        slider.SetWidthPercent(65);
+        row.Add(slider);
+
+        var current = new Label(valueText(value));
+        row.Add(current);
+
+        slider.RegisterValueChangedCallback(ev => current.text = valueText(ev.newValue));
+    }
+
+    private void UpdateStatus()
+    {
         _status.text = Runtime.IsBenchmarking
             ? $"Benchmark running — {Runtime.BenchmarkRemainingSeconds:F1}s remaining"
             : $"Detected systems: {Runtime.KnownTypes.Count}";
+    }
+
+    private void Rebuild()
+    {
+        _list.Clear();
+        UpdateStatus();
 
         var filter = (_filter.value ?? "").Trim();
         var names = WellKnown
@@ -152,12 +214,13 @@ public sealed class OptimizerPanel : VisualElement
     private void AddSystemRow(string typeName)
     {
         var current = Runtime.GetInterval(typeName);
-        var slider = _list.AddSliderInt(
-                label: typeName,
-                values: new SliderValues<int>(1, 50, current))
-            .AddEndLabel(v => v == 1 ? "vanilla" : $"1/{v}")
-            .RegisterChange(v => Runtime.SetInterval(typeName, v));
-
-        slider.SetWidthPercent(100);
+        AddIntSlider(
+            parent: _list,
+            label: typeName,
+            min: 1,
+            max: 50,
+            value: current,
+            onChanged: v => Runtime.SetInterval(typeName, v),
+            valueText: v => v == 1 ? "vanilla" : $"1/{v}");
     }
 }
