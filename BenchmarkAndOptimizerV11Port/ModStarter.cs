@@ -12,17 +12,17 @@ public sealed class ModStarter : IModStarter
 {
     public void StartMod(IModEnvironment modEnvironment)
     {
-        Runtime.Initialize(modEnvironment.ModPath);
-
         var harmony = new Harmony("shay.BenchmarkAndOptimizerV11");
-        DispatcherPatcher.Patch(harmony);
+        Runtime.Initialize(modEnvironment.ModPath, harmony);
 
-        Runtime.Log($"loaded; config={Runtime.ConfigPath}");
+        Runtime.Log($"loaded; config={Runtime.ConfigPath}; normal throttling uses direct method patches");
     }
 }
 
 internal static class DispatcherPatcher
 {
+    private static bool _patched;
+
     private sealed record Target(string TypeName, string MethodName, string PrefixName);
 
     private static readonly Target[] Targets =
@@ -35,6 +35,11 @@ internal static class DispatcherPatcher
 
     public static void Patch(Harmony harmony)
     {
+        if (_patched)
+        {
+            return;
+        }
+
         foreach (var target in Targets)
         {
             var type = AccessTools.TypeByName(target.TypeName);
@@ -48,8 +53,31 @@ internal static class DispatcherPatcher
             }
 
             harmony.Patch(original, prefix: new HarmonyMethod(prefix) { priority = Priority.Low });
-            Runtime.Log($"patched {target.TypeName}.{target.MethodName}");
+            Runtime.Log($"benchmark patch installed: {target.TypeName}.{target.MethodName}");
         }
+
+        _patched = true;
+    }
+
+    public static void Unpatch(Harmony harmony)
+    {
+        if (!_patched)
+        {
+            return;
+        }
+
+        foreach (var target in Targets)
+        {
+            var type = AccessTools.TypeByName(target.TypeName);
+            var original = type is null ? null : AccessTools.Method(type, target.MethodName);
+            if (original is not null)
+            {
+                harmony.Unpatch(original, HarmonyPatchType.Prefix, harmony.Id);
+            }
+        }
+
+        _patched = false;
+        Runtime.Log("benchmark dispatcher patches removed");
     }
 
     public static bool PrefixTickSingletons(object __instance) =>
@@ -79,6 +107,10 @@ internal static class Runtime
     private static readonly Dictionary<string, string> AssemblyNameByType = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> OriginByAssemblyPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> OriginByAssemblyName = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly Dictionary<string, Type> DiscoveredTypes = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, MethodInfo> DirectMethodsByType = new(StringComparer.Ordinal);
+    private static readonly HashSet<MethodBase> DirectPatchedMethods = new();
+    private static Harmony? _harmony;
     private static bool _benchmarkRunning;
     private static int _settingsGeneration;
 
@@ -145,6 +177,7 @@ internal static class Runtime
         _settings.Enabled = value;
         _settingsGeneration++;
         SaveSettings(_settings);
+        RefreshDirectThrottlePatches();
     }
 
     public static void SetDefaultInterval(int value)
@@ -152,6 +185,7 @@ internal static class Runtime
         _settings.DefaultInterval = Math.Clamp(value, 1, 1000);
         _settingsGeneration++;
         SaveSettings(_settings);
+        RefreshDirectThrottlePatches();
     }
 
     public static int GetInterval(string typeName)
@@ -177,6 +211,7 @@ internal static class Runtime
         _settings.Intervals[key] = value;
         _settingsGeneration++;
         SaveSettings(_settings);
+        RefreshDirectThrottlePatches();
     }
 
     public static void ResetIntervals()
@@ -185,6 +220,7 @@ internal static class Runtime
         _settings.Intervals.Clear();
         _settingsGeneration++;
         SaveSettings(_settings);
+        RefreshDirectThrottlePatches();
         Log("all optimizer intervals reset to vanilla (1)");
     }
 
@@ -193,6 +229,12 @@ internal static class Runtime
         lock (Sync)
         {
             BenchStats.Clear();
+        }
+
+        RemoveDirectThrottlePatches();
+        if (_harmony is not null)
+        {
+            DispatcherPatcher.Patch(_harmony);
         }
 
         _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
@@ -207,8 +249,9 @@ internal static class Runtime
         return i < 0 ? value : value[(i + 1)..];
     }
 
-    public static void Initialize(string modPath)
+    public static void Initialize(string modPath, Harmony harmony)
     {
+        _harmony = harmony;
         ModPath = modPath;
         Directory.CreateDirectory(ModPath);
         RotateOversizedLog();
@@ -226,6 +269,168 @@ internal static class Runtime
         _benchmarkRunning = false;
         _benchmarkCompleted = true;
         _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        DiscoverLoadedOptimizableTypes();
+        RefreshDirectThrottlePatches();
+    }
+
+    public static void RefreshDirectThrottlePatches()
+    {
+        if (_harmony is null || BenchmarkActive)
+        {
+            return;
+        }
+
+        RemoveDirectThrottlePatches();
+
+        if (!_settings.Enabled)
+        {
+            return;
+        }
+
+        foreach (var pair in DiscoveredTypes)
+        {
+            var type = pair.Value;
+            if (GetInterval(type) <= 1)
+            {
+                continue;
+            }
+
+            var method = FindDirectTickMethod(type);
+            if (method is null)
+            {
+                LogOnce(
+                    $"no-direct-method:{type.FullName}",
+                    $"warning: no directly patchable Tick/Update method found for {type.FullName}; leaving vanilla");
+                continue;
+            }
+
+            if (method.DeclaringType != type)
+            {
+                LogOnce(
+                    $"inherited-direct-method:{type.FullName}",
+                    $"warning: {type.FullName} inherits {method.Name} from {method.DeclaringType?.FullName}; cannot throttle safely without affecting sibling types");
+                continue;
+            }
+
+            try
+            {
+                var prefix = AccessTools.Method(typeof(Runtime), nameof(DirectThrottlePrefix));
+                _harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(prefix) { priority = Priority.First });
+
+                DirectPatchedMethods.Add(method);
+                DirectMethodsByType[pair.Key] = method;
+                Log($"direct throttle patch installed: {type.FullName}.{method.Name} interval={GetInterval(type)}");
+            }
+            catch (Exception ex)
+            {
+                LogOnce(
+                    $"direct-patch-failed:{type.FullName}:{method.Name}",
+                    $"warning: direct throttle patch failed for {type.FullName}.{method.Name}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
+    private static void RemoveDirectThrottlePatches()
+    {
+        if (_harmony is null || DirectPatchedMethods.Count == 0)
+        {
+            return;
+        }
+
+        foreach (var method in DirectPatchedMethods.ToArray())
+        {
+            try
+            {
+                _harmony.Unpatch(method, HarmonyPatchType.Prefix, _harmony.Id);
+            }
+            catch
+            {
+                // A stale direct patch must never break settings changes.
+            }
+        }
+
+        DirectPatchedMethods.Clear();
+        DirectMethodsByType.Clear();
+    }
+
+    public static bool DirectThrottlePrefix(object __instance, MethodBase __originalMethod)
+    {
+        if (!_settings.Enabled || BenchmarkActive)
+        {
+            return true;
+        }
+
+        return ShouldRun(__instance);
+    }
+
+    private static MethodInfo? FindDirectTickMethod(Type type)
+    {
+        foreach (var methodName in new[] { "Tick", "UpdateSingleton", "LateUpdateSingleton", "StartAndTick" })
+        {
+            var method = AccessTools.Method(type, methodName, Type.EmptyTypes);
+            if (method is not null && method.ReturnType == typeof(void))
+            {
+                return method;
+            }
+        }
+
+        return null;
+    }
+
+    private static void DiscoverLoadedOptimizableTypes()
+    {
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types = ex.Types.Where(x => x is not null).Cast<Type>().ToArray();
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var type in types)
+            {
+                if (type.IsAbstract || type.IsInterface)
+                {
+                    continue;
+                }
+
+                var method = FindDirectTickMethod(type);
+                if (method is null)
+                {
+                    continue;
+                }
+
+                var interfaces = type.GetInterfaces()
+                    .Select(i => i.FullName ?? i.Name)
+                    .ToArray();
+
+                var looksOptimizable =
+                    interfaces.Any(n =>
+                        n == "Timberborn.TickSystem.ITickableSingleton" ||
+                        n == "Timberborn.SingletonSystem.IUpdatableSingleton" ||
+                        n == "Timberborn.SingletonSystem.ILateUpdatableSingleton" ||
+                        n.Contains("ITickable", StringComparison.Ordinal)) ||
+                    type.BaseType?.FullName == "Timberborn.TickSystem.TickableComponent";
+
+                if (looksOptimizable)
+                {
+                    Discover(type);
+                }
+            }
+        }
+
+        Log($"direct throttle discovery complete: {DiscoveredTypes.Count} type(s)");
     }
 
     public static bool TryDispatch(
@@ -581,6 +786,7 @@ internal static class Runtime
 
             OriginByType[name] = origin;
             AssemblyNameByType[name] = assemblyName;
+            DiscoveredTypes[name] = type;
 
             if (_settings.WriteDiscoveredTypes)
             {
@@ -862,6 +1068,13 @@ internal static class Runtime
         }
 
         File.WriteAllLines(file, lines);
+
+        if (_harmony is not null)
+        {
+            DispatcherPatcher.Unpatch(_harmony);
+        }
+
+        RefreshDirectThrottlePatches();
         Log($"benchmark complete: {file}");
     }
 
@@ -905,6 +1118,10 @@ internal static class Runtime
             _settings = loaded;
             _settingsGeneration++;
             _configWriteUtc = writeUtc;
+            if (!BenchmarkActive)
+            {
+                RefreshDirectThrottlePatches();
+            }
             Log($"config reloaded: {_settings.Intervals.Count} explicit interval(s)");
         }
         catch (Exception ex)
