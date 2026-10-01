@@ -14,9 +14,13 @@ namespace UnityEngine.UIElements
     {
         public void Add(VisualElement child) { }
         public void Clear() { }
-        public T Q<T>(string name) where T : VisualElement => default;
-        public VisualElement InsertSelfAfter(VisualElement target) => this;
         public void RegisterCallback<TEventType>(EventCallback<TEventType> callback) where TEventType : EventBase { }
+    }
+
+    public static class UQueryExtensions
+    {
+        public static VisualElement Q(this VisualElement element, string name = null, string className = null) => null;
+        public static T Q<T>(this VisualElement element, string name = null, string className = null) where T : VisualElement => null;
     }
 
     public class Label : VisualElement
