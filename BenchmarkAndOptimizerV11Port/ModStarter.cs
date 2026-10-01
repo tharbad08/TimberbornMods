@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Reflection;
+using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using Newtonsoft.Json;
 using HarmonyLib;
@@ -74,6 +75,7 @@ internal static class Runtime
     private static readonly Dictionary<string, BenchStat> BenchStats = new(StringComparer.Ordinal);
     private static readonly HashSet<string> Discovered = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> OriginByType = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, string> AssemblyNameByType = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> OriginByAssemblyPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> OriginByAssemblyName = new(StringComparer.OrdinalIgnoreCase);
     private static bool _benchmarkRunning;
@@ -310,12 +312,12 @@ internal static class Runtime
                 if (BenchmarkActive)
                 {
                     var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                    Invoke(adapter.Method, item);
+                    adapter.Invoke(item);
                     RecordBenchmark(actual.GetType(), System.Diagnostics.Stopwatch.GetTimestamp() - started);
                 }
                 else
                 {
-                    Invoke(adapter.Method, item);
+                    adapter.Invoke(item);
                 }
             }
 
@@ -336,11 +338,6 @@ internal static class Runtime
                 $"warning: optimizer dispatch failed before safe completion: {ex.GetType().Name}: {ex.Message}; falling back to vanilla");
             return true;
         }
-    }
-
-    private static void Invoke(MethodInfo method, object target)
-    {
-        method.Invoke(target, null);
     }
 
     private static ItemAdapter? GetAdapter(Type itemType, string? actualFieldName, string methodName, string? enabledMemberName)
@@ -371,9 +368,6 @@ internal static class Runtime
             }
 
             var method = AccessTools.Method(itemType, methodName, Type.EmptyTypes);
-
-            // Timberborn 1.1 renamed MeteredTickableComponent.StartAndTick() to Tick().
-            // Prefer the old name for compatibility, then use the 1.1 name.
             if (method is null && methodName == "StartAndTick")
             {
                 method = AccessTools.Method(itemType, "Tick", Type.EmptyTypes);
@@ -385,27 +379,63 @@ internal static class Runtime
                 return null;
             }
 
-            Func<object, bool> enabled = _ => true;
-            if (!string.IsNullOrEmpty(enabledMemberName))
+            try
             {
-                var prop = AccessTools.Property(itemType, enabledMemberName);
-                var field = AccessTools.Field(itemType, enabledMemberName);
+                var itemParameter = Expression.Parameter(typeof(object), "item");
+                var typedItem = Expression.Convert(itemParameter, itemType);
 
-                if (prop?.PropertyType == typeof(bool) && prop.GetMethod is not null)
+                Func<object, object?> getActual;
+                if (actualField is not null)
                 {
-                    enabled = item => (bool)(prop.GetValue(item) ?? true);
+                    var fieldAccess = Expression.Field(typedItem, actualField);
+                    var boxedField = Expression.Convert(fieldAccess, typeof(object));
+                    getActual = Expression.Lambda<Func<object, object?>>(boxedField, itemParameter).Compile();
                 }
-                else if (field?.FieldType == typeof(bool))
+                else
                 {
-                    enabled = item => (bool)(field.GetValue(item) ?? true);
+                    getActual = item => item;
                 }
-                // If 1.1's wrapper no longer exposes Enabled, let its own Tick()
-                // perform that check internally instead of disabling the entire path.
+
+                var call = Expression.Call(typedItem, method);
+                var invoke = Expression.Lambda<Action<object>>(call, itemParameter).Compile();
+
+                Func<object, bool> enabled = _ => true;
+                if (!string.IsNullOrEmpty(enabledMemberName))
+                {
+                    var prop = AccessTools.Property(itemType, enabledMemberName);
+                    var field = AccessTools.Field(itemType, enabledMemberName);
+                    Expression? enabledExpression = null;
+
+                    if (prop?.PropertyType == typeof(bool) && prop.GetMethod is not null)
+                    {
+                        enabledExpression = Expression.Property(typedItem, prop);
+                    }
+                    else if (field?.FieldType == typeof(bool))
+                    {
+                        enabledExpression = Expression.Field(typedItem, field);
+                    }
+
+                    if (enabledExpression is not null)
+                    {
+                        enabled = Expression.Lambda<Func<object, bool>>(enabledExpression, itemParameter).Compile();
+                    }
+                }
+
+                var adapter = new ItemAdapter(
+                    actualFieldName,
+                    enabledMemberName,
+                    getActual,
+                    invoke,
+                    enabled);
+
+                AdapterCache[cacheKey] = adapter;
+                return adapter;
             }
-
-            var adapter = new ItemAdapter(actualFieldName, enabledMemberName, actualField, method, enabled);
-            AdapterCache[cacheKey] = adapter;
-            return adapter;
+            catch
+            {
+                UnsupportedAdapters.Add(cacheKey);
+                return null;
+            }
         }
     }
 
@@ -458,16 +488,29 @@ internal static class Runtime
     private static void Discover(Type type)
     {
         var name = type.FullName ?? type.Name;
-        var origin = ResolveOrigin(type);
 
         lock (Sync)
         {
-            OriginByType[name] = origin;
+            if (Discovered.Contains(name))
+            {
+                return;
+            }
+        }
 
+        // Origin resolution can touch paths/manifests. Do it only once per discovered type,
+        // never on the per-frame hot path.
+        var origin = ResolveOrigin(type);
+        var assemblyName = type.Assembly.GetName().Name ?? "";
+
+        lock (Sync)
+        {
             if (!Discovered.Add(name))
             {
                 return;
             }
+
+            OriginByType[name] = origin;
+            AssemblyNameByType[name] = assemblyName;
 
             if (_settings.WriteDiscoveredTypes)
             {
@@ -488,6 +531,14 @@ internal static class Runtime
         lock (Sync)
         {
             OriginByAssemblyName[assemblyName] = origin;
+
+            foreach (var pair in AssemblyNameByType)
+            {
+                if (string.Equals(pair.Value, assemblyName, StringComparison.OrdinalIgnoreCase))
+                {
+                    OriginByType[pair.Key] = origin;
+                }
+            }
         }
     }
 
@@ -865,11 +916,11 @@ internal static class Runtime
     private sealed record ItemAdapter(
         string? ActualFieldName,
         string? EnabledMemberName,
-        FieldInfo? ActualField,
-        MethodInfo Method,
+        Func<object, object?> ActualGetter,
+        Action<object> Invoke,
         Func<object, bool> Enabled)
     {
-        public object? GetActual(object item) => ActualField?.GetValue(item) ?? item;
+        public object? GetActual(object item) => ActualGetter(item);
         public bool IsEnabled(object item) => Enabled(item);
     }
 }
