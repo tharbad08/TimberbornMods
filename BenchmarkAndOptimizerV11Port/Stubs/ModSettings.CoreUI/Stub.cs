@@ -8,5 +8,6 @@ namespace ModSettings.CoreUI
     public class ModSettingsBox
     {
         public void Open(Mod mod) { }
+        public VisualElement GetPanel() => new VisualElement();
     }
 }
