@@ -45,5 +45,6 @@ namespace UnityEngine.UIElements
         public static Timberborn.CoreUI.NineSliceButton AddMenuButton(this VisualElement p,string? text=null,Action? onClick=null,string? name=null,IEnumerable<string>? additionalClasses=null,UiBuilder.GameButtonSize? size=default,bool stretched=false)=>new Timberborn.CoreUI.NineSliceButton{text=text??""};
         public static Timberborn.CoreUI.NineSliceTextField AddTextField(this VisualElement p,string? name=null,Action<string>? changeCallback=null,IEnumerable<string>? additionalClasses=null)=>new Timberborn.CoreUI.NineSliceTextField();
         public static ScrollView AddScrollView(this VisualElement p,string? name=null,IEnumerable<string>? additionalClasses=null,bool greenDecorated=true)=>new ScrollView();
+        public static VisualElement InsertSelfAfter(this VisualElement element, VisualElement target)=>element;
     }
 }
