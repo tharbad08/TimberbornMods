@@ -82,6 +82,95 @@ internal static class Runtime
     public static string ConfigPath => Path.Combine(ModPath, "optimizer-v11.json");
     private static string DiscoveredPath => Path.Combine(ModPath, "optimizer-v11-discovered.txt");
 
+    public static bool Enabled => _settings.Enabled;
+    public static int DefaultInterval => _settings.DefaultInterval;
+    public static IReadOnlyCollection<string> KnownTypes
+    {
+        get
+        {
+            lock (Sync)
+            {
+                return Discovered.Select(ShortTypeName).Distinct(StringComparer.Ordinal).OrderBy(x => x).ToArray();
+            }
+        }
+    }
+
+    public static bool IsBenchmarking => BenchmarkActive;
+    public static double BenchmarkRemainingSeconds
+    {
+        get
+        {
+            if (!BenchmarkActive) return 0;
+            var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp() - _benchmarkStart)
+                          / (double)System.Diagnostics.Stopwatch.Frequency;
+            return Math.Max(0, _settings.BenchmarkSeconds - elapsed);
+        }
+    }
+
+    public static void SetEnabled(bool value)
+    {
+        _settings.Enabled = value;
+        SaveSettings(_settings);
+    }
+
+    public static void SetDefaultInterval(int value)
+    {
+        _settings.DefaultInterval = Math.Clamp(value, 1, 1000);
+        SaveSettings(_settings);
+    }
+
+    public static int GetInterval(string typeName)
+    {
+        if (_settings.Intervals.TryGetValue(typeName, out var value))
+        {
+            return Math.Clamp(value, 1, 1000);
+        }
+
+        var full = Discovered.FirstOrDefault(x => ShortTypeName(x) == typeName);
+        if (full is not null && _settings.Intervals.TryGetValue(full, out value))
+        {
+            return Math.Clamp(value, 1, 1000);
+        }
+
+        return _settings.DefaultInterval;
+    }
+
+    public static void SetInterval(string typeName, int value)
+    {
+        value = Math.Clamp(value, 1, 1000);
+        var key = Discovered.FirstOrDefault(x => ShortTypeName(x) == typeName) ?? typeName;
+        _settings.Intervals[key] = value;
+        SaveSettings(_settings);
+    }
+
+    public static void ResetIntervals()
+    {
+        _settings.DefaultInterval = 1;
+        _settings.Intervals.Clear();
+        SaveSettings(_settings);
+        Log("all optimizer intervals reset to vanilla (1)");
+    }
+
+    public static void StartBenchmark(int seconds)
+    {
+        seconds = Math.Clamp(seconds, 5, 3600);
+        lock (Sync)
+        {
+            BenchStats.Clear();
+        }
+
+        _settings.BenchmarkSeconds = seconds;
+        _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        _benchmarkCompleted = false;
+        Log($"benchmark started for {seconds}s");
+    }
+
+    private static string ShortTypeName(string value)
+    {
+        var i = value.LastIndexOf('.');
+        return i < 0 ? value : value[(i + 1)..];
+    }
+
     public static void Initialize(string modPath)
     {
         ModPath = modPath;
