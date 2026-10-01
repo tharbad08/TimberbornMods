@@ -2,6 +2,19 @@ using System;
 
 namespace UnityEngine.UIElements
 {
+    public enum ScrollViewMode
+    {
+        Vertical,
+        Horizontal,
+        VerticalAndHorizontal
+    }
+
+    public enum ScrollerVisibility
+    {
+        Auto,
+        AlwaysVisible,
+        Hidden
+    }
     public class EventBase { }
     public class ChangeEvent<T> : EventBase
     {
@@ -38,7 +51,12 @@ namespace UnityEngine.UIElements
         public void SetValueWithoutNotify(bool value) { this.value = value; }
     }
 
-    public class ScrollView : VisualElement { }
+    public class ScrollView : VisualElement
+    {
+        public ScrollViewMode mode { get; set; }
+        public ScrollerVisibility horizontalScrollerVisibility { get; set; }
+        public ScrollerVisibility verticalScrollerVisibility { get; set; }
+    }
 
     public class TextField : VisualElement
     {
