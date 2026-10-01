@@ -69,6 +69,7 @@ internal static class Runtime
 {
     private static readonly object Sync = new();
     private static readonly ConditionalWeakTable<object, CounterState> Counters = new();
+    private static readonly ConditionalWeakTable<object, OwnerDispatchPlans> DispatchPlans = new();
     private static readonly Dictionary<string, ItemAdapter> AdapterCache = new(StringComparer.Ordinal);
     private static readonly HashSet<string> UnsupportedAdapters = new(StringComparer.Ordinal);
     private static readonly HashSet<string> LoggedWarnings = new(StringComparer.Ordinal);
@@ -79,6 +80,7 @@ internal static class Runtime
     private static readonly Dictionary<string, string> OriginByAssemblyPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, string> OriginByAssemblyName = new(StringComparer.OrdinalIgnoreCase);
     private static bool _benchmarkRunning;
+    private static int _settingsGeneration;
 
     private static Settings _settings = new();
     private static DateTime _nextReloadUtc = DateTime.MinValue;
@@ -141,12 +143,14 @@ internal static class Runtime
     public static void SetEnabled(bool value)
     {
         _settings.Enabled = value;
+        _settingsGeneration++;
         SaveSettings(_settings);
     }
 
     public static void SetDefaultInterval(int value)
     {
         _settings.DefaultInterval = Math.Clamp(value, 1, 1000);
+        _settingsGeneration++;
         SaveSettings(_settings);
     }
 
@@ -171,6 +175,7 @@ internal static class Runtime
         value = Math.Clamp(value, 1, 1000);
         var key = Discovered.FirstOrDefault(x => ShortTypeName(x) == typeName) ?? typeName;
         _settings.Intervals[key] = value;
+        _settingsGeneration++;
         SaveSettings(_settings);
     }
 
@@ -178,6 +183,7 @@ internal static class Runtime
     {
         _settings.DefaultInterval = 1;
         _settings.Intervals.Clear();
+        _settingsGeneration++;
         SaveSettings(_settings);
         Log("all optimizer intervals reset to vanilla (1)");
     }
@@ -236,9 +242,6 @@ internal static class Runtime
             return true;
         }
 
-        // Zero-cost normal mode: when all intervals are vanilla (1), do not replace
-        // Timberborn's dispatcher at all. Reflection dispatch is used only while an
-        // actual throttle is configured or while benchmarking.
         if (!BenchmarkActive && !HasActiveThrottles())
         {
             return true;
@@ -255,56 +258,35 @@ internal static class Runtime
                 return true;
             }
 
-            if (list.Count == 0)
+            var plan = GetDispatchPlan(
+                owner,
+                list,
+                listFieldName,
+                actualFieldName,
+                invokeMethodName,
+                enabledMemberName);
+
+            if (plan is null)
             {
-                FinishBenchmarkIfNeeded();
-                return false;
+                return true;
             }
 
-            // Resolve reflection metadata before invoking anything. If 1.1.x changes
-            // the wrapper layout, we fall back to vanilla without double-running items.
-            var adapters = new ItemAdapter?[list.Count];
-            for (var i = 0; i < list.Count; i++)
+            // Critical fast path: an active optimization elsewhere must not force this
+            // owner through our dispatcher. Let Timberborn run it natively unless this
+            // exact owner contains a throttled type.
+            if (!BenchmarkActive && !plan.HasThrottle)
             {
-                var item = list[i];
-                if (item is null)
-                {
-                    continue;
-                }
-
-                adapters[i] = GetAdapter(item.GetType(), actualFieldName, invokeMethodName, enabledMemberName);
-                if (adapters[i] is null)
-                {
-                    LogOnce(
-                        $"unsupported:{item.GetType().FullName}:{listFieldName}",
-                        $"warning: cannot adapt {item.GetType().FullName} in {listFieldName}; falling back to vanilla");
-                    return true;
-                }
+                return true;
             }
 
-            for (var i = 0; i < list.Count; i++)
+            foreach (var entry in plan.Entries)
             {
-                var item = list[i];
-                var adapter = adapters[i];
-                if (item is null || adapter is null)
+                if (!entry.Adapter.IsEnabled(entry.Item))
                 {
                     continue;
                 }
 
-                var actual = adapter.GetActual(item);
-                if (actual is null)
-                {
-                    continue;
-                }
-
-                Discover(actual.GetType());
-
-                if (!adapter.IsEnabled(item))
-                {
-                    continue;
-                }
-
-                if (!ShouldRun(actual))
+                if (!ShouldRun(entry.Actual))
                 {
                     continue;
                 }
@@ -312,12 +294,12 @@ internal static class Runtime
                 if (BenchmarkActive)
                 {
                     var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                    adapter.Invoke(item);
-                    RecordBenchmark(actual.GetType(), System.Diagnostics.Stopwatch.GetTimestamp() - started);
+                    entry.Adapter.Invoke(entry.Item);
+                    RecordBenchmark(entry.ActualType, System.Diagnostics.Stopwatch.GetTimestamp() - started);
                 }
                 else
                 {
-                    adapter.Invoke(item);
+                    entry.Adapter.Invoke(entry.Item);
                 }
             }
 
@@ -326,8 +308,6 @@ internal static class Runtime
         }
         catch (TargetInvocationException ex) when (ex.InnerException is not null)
         {
-            // Preserve the game's original exception rather than hiding failures inside
-            // gameplay code. This is not a compatibility/reflection failure.
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
             throw;
         }
@@ -338,6 +318,96 @@ internal static class Runtime
                 $"warning: optimizer dispatch failed before safe completion: {ex.GetType().Name}: {ex.Message}; falling back to vanilla");
             return true;
         }
+    }
+
+    private static DispatchPlan? GetDispatchPlan(
+        object owner,
+        IList list,
+        string listFieldName,
+        string? actualFieldName,
+        string invokeMethodName,
+        string? enabledMemberName)
+    {
+        var ownerPlans = DispatchPlans.GetOrCreateValue(owner);
+
+        lock (ownerPlans.Gate)
+        {
+            if (ownerPlans.Plans.TryGetValue(listFieldName, out var cached)
+                && cached.SettingsGeneration == _settingsGeneration
+                && cached.ListCount == list.Count
+                && SameBoundaryItems(cached, list))
+            {
+                return cached;
+            }
+
+            var entries = new List<DispatchEntry>(list.Count);
+            var hasThrottle = false;
+
+            for (var i = 0; i < list.Count; i++)
+            {
+                var item = list[i];
+                if (item is null)
+                {
+                    continue;
+                }
+
+                var adapter = GetAdapter(
+                    item.GetType(),
+                    actualFieldName,
+                    invokeMethodName,
+                    enabledMemberName);
+
+                if (adapter is null)
+                {
+                    LogOnce(
+                        $"unsupported:{item.GetType().FullName}:{listFieldName}",
+                        $"warning: cannot adapt {item.GetType().FullName} in {listFieldName}; falling back to vanilla");
+                    return null;
+                }
+
+                var actual = adapter.GetActual(item);
+                if (actual is null)
+                {
+                    continue;
+                }
+
+                var actualType = actual.GetType();
+                Discover(actualType);
+
+                if (GetInterval(actualType) > 1)
+                {
+                    hasThrottle = true;
+                }
+
+                entries.Add(new DispatchEntry(item, adapter, actual, actualType));
+            }
+
+            var plan = new DispatchPlan(
+                _settingsGeneration,
+                list.Count,
+                list.Count > 0 ? list[0] : null,
+                list.Count > 1 ? list[list.Count - 1] : null,
+                hasThrottle,
+                entries.ToArray());
+
+            ownerPlans.Plans[listFieldName] = plan;
+            return plan;
+        }
+    }
+
+    private static bool SameBoundaryItems(DispatchPlan plan, IList list)
+    {
+        if (list.Count == 0)
+        {
+            return true;
+        }
+
+        if (!ReferenceEquals(plan.FirstItem, list[0]))
+        {
+            return false;
+        }
+
+        return list.Count <= 1 || ReferenceEquals(plan.LastItem, list[list.Count - 1]);
     }
 
     private static ItemAdapter? GetAdapter(Type itemType, string? actualFieldName, string methodName, string? enabledMemberName)
@@ -833,6 +903,7 @@ internal static class Runtime
 
             loaded.Normalize();
             _settings = loaded;
+            _settingsGeneration++;
             _configWriteUtc = writeUtc;
             Log($"config reloaded: {_settings.Intervals.Count} explicit interval(s)");
         }
@@ -903,6 +974,26 @@ internal static class Runtime
     {
         public int Remaining;
     }
+
+    private sealed class OwnerDispatchPlans
+    {
+        public object Gate { get; } = new();
+        public Dictionary<string, DispatchPlan> Plans { get; } = new(StringComparer.Ordinal);
+    }
+
+    private sealed record DispatchPlan(
+        int SettingsGeneration,
+        int ListCount,
+        object? FirstItem,
+        object? LastItem,
+        bool HasThrottle,
+        DispatchEntry[] Entries);
+
+    private sealed record DispatchEntry(
+        object Item,
+        ItemAdapter Adapter,
+        object Actual,
+        Type ActualType);
 
     private sealed class BenchStat
     {
