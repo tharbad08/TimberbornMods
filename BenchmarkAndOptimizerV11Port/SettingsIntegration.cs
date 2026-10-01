@@ -137,6 +137,9 @@ public sealed class OptimizerPanel : VisualElement
         .SetMarginBottom(8);
 
         var scroll = this.AddScrollView();
+        scroll.mode = ScrollViewMode.VerticalAndHorizontal;
+        scroll.horizontalScrollerVisibility = ScrollerVisibility.Auto;
+        scroll.verticalScrollerVisibility = ScrollerVisibility.Auto;
         scroll.SetMaxHeight(650);
 
         _wellKnown = scroll.AddChild();
@@ -191,13 +194,20 @@ public sealed class OptimizerPanel : VisualElement
         var current = Runtime.GetInterval(typeName);
         var origin = Runtime.GetOrigin(typeName);
 
-        parent.AddSliderInt(
-                label: $"{typeName}    [{origin}]",
+        // Two-line layout so long type/origin text never pushes the interval control
+        // out of the visible settings panel.
+        var item = parent.AddChild()
+            .SetMarginBottom(10);
+
+        item.AddGameLabel($"{typeName}    [{origin}]")
+            .SetMarginBottom(3);
+
+        item.AddSliderInt(
+                label: "Tick interval",
                 values: new SliderValues<int>(1, 50, current))
             .AddEndLabel(v => v == 1 ? "vanilla" : $"1/{v}")
             .RegisterChange(v => Runtime.SetInterval(typeName, v))
-            .SetWidthPercent(100)
-            .SetMarginBottom(6);
+            .SetWidthPercent(100);
     }
 }
 
