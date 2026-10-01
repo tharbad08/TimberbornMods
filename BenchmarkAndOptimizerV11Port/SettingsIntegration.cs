@@ -202,37 +202,47 @@ public sealed class OptimizerMenuService(
 
     public void Load()
     {
-        _mod = ResolveMod(repository, "BenchmarkAndOptimizerV11");
-        if (_mod is null)
+        try
         {
-            Runtime.Log("warning: pause-menu button could not resolve BenchmarkAndOptimizerV11 in ModRepository");
-            return;
-        }
+            _mod = ResolveMod(repository, "BenchmarkAndOptimizerV11");
+            if (_mod is null)
+            {
+                Runtime.Log("warning: pause-menu button could not resolve BenchmarkAndOptimizerV11 in ModRepository");
+                return;
+            }
 
-        var root = ResolveOptionsRoot(_optionsBox);
-        if (root is null)
+            var root = ResolveOptionsRoot(_optionsBox);
+            if (root is null)
+            {
+                Runtime.Log("warning: pause-menu root not found; optimizer menu entry not added");
+                return;
+            }
+
+            // Match MapTransformer exactly: use Unity's non-generic Q extension and
+            // support both names used by different Timberborn menu revisions.
+            var resumeButton = root.Q("ResumeButton") ?? root.Q("Resume");
+
+            if (resumeButton is null)
+            {
+                Runtime.Log("warning: pause-menu ResumeButton/Resume not found; optimizer menu entry not added");
+                return;
+            }
+
+            var button = root.AddMenuButton(
+                "Benchmark & Optimizer",
+                onClick: () => modSettingsBox.Open(_mod),
+                name: "BenchmarkAndOptimizerButton",
+                stretched: true);
+
+            button.InsertSelfAfter(resumeButton);
+            Runtime.Log("pause-menu entry installed after ResumeButton/Resume");
+        }
+        catch (Exception ex)
         {
-            Runtime.Log("warning: pause-menu root not found; optimizer menu entry not added");
-            return;
+            // The menu shortcut is convenience-only. It must never be allowed to
+            // abort singleton loading or corrupt a save if Timberborn/TimberUi UI APIs change.
+            Runtime.Log($"warning: pause-menu integration disabled after {ex.GetType().Name}: {ex.Message}");
         }
-
-        var resumeButton = root.Q<VisualElement>("ResumeButton")
-            ?? root.Q<VisualElement>("Resume");
-
-        if (resumeButton is null)
-        {
-            Runtime.Log("warning: pause-menu ResumeButton/Resume not found; optimizer menu entry not added");
-            return;
-        }
-
-        var button = root.AddMenuButton(
-            "Benchmark & Optimizer",
-            onClick: () => modSettingsBox.Open(_mod),
-            name: "BenchmarkAndOptimizerButton",
-            stretched: true);
-
-        button.InsertSelfAfter(resumeButton);
-        Runtime.Log("pause-menu entry installed after ResumeButton");
     }
 
     private static VisualElement? ResolveOptionsRoot(GameOptionsBox optionsBox)
