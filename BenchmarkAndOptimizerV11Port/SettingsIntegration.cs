@@ -3,6 +3,7 @@ using Bindito.Core;
 using ModSettings.CommonUI;
 using ModSettings.Core;
 using ModSettings.CoreUI;
+using Timberborn.CoreUI;
 using Timberborn.Modding;
 using Timberborn.Options;
 using Timberborn.OptionsGame;
@@ -55,7 +56,9 @@ public sealed class OptimizerUiSetting()
     public override void Reset() => Runtime.ResetIntervals();
 }
 
-public sealed class OptimizerSettingElementFactory : IModSettingElementFactory
+public sealed class OptimizerSettingElementFactory(
+    VisualElementInitializer veInit
+) : IModSettingElementFactory
 {
     public int Priority { get; }
 
@@ -67,7 +70,7 @@ public sealed class OptimizerSettingElementFactory : IModSettingElementFactory
             return false;
         }
 
-        element = new ModSettingElement(new OptimizerPanel(), modSetting);
+        element = new ModSettingElement(new OptimizerPanel(veInit), modSetting);
         return true;
     }
 }
@@ -115,7 +118,7 @@ public sealed class OptimizerPanel : VisualElement
         "ResourceCountingService"
     };
 
-    public OptimizerPanel()
+    public OptimizerPanel(VisualElementInitializer veInit)
     {
         // Follow datvm's own TimberUi/ModSettings pattern:
         // use AddToggle/AddSliderInt/RegisterChange instead of raw UIElements callbacks.
@@ -166,10 +169,11 @@ public sealed class OptimizerPanel : VisualElement
         .SetWidthPercent(100)
         .SetMarginBottom(8);
 
-        var scroll = this.AddScrollView();
+        // Match datvm's TechTree horizontal-scroll pattern: initialize the
+        // ScrollView through Timberborn's VisualElementInitializer before use.
+        var scroll = this.AddScrollView().Initialize(veInit);
         scroll.mode = ScrollViewMode.VerticalAndHorizontal;
-        scroll.horizontalScrollerVisibility = ScrollerVisibility.AlwaysVisible;
-        scroll.verticalScrollerVisibility = ScrollerVisibility.Auto;
+        scroll.horizontalScrollerVisibility = scroll.verticalScrollerVisibility = ScrollerVisibility.Auto;
         scroll.SetMaxHeight(650);
 
         _wellKnown = scroll.AddChild();
@@ -232,13 +236,19 @@ public sealed class OptimizerPanel : VisualElement
         item.AddGameLabel($"{typeName}    [{origin}]")
             .SetMarginBottom(3);
 
-        item.AddSliderInt(
-                label: "Tick interval",
-                values: new SliderValues<int>(1, 50, current))
-            .AddEndLabel(v => v == 1 ? "vanilla" : $"1/{v}")
-            .RegisterChange(v => Runtime.SetInterval(typeName, v))
-            .SetWidthPercent(100);
+        var slider = item.AddSliderInt(
+            label: TickIntervalLabel(current),
+            values: new SliderValues<int>(1, 50, current));
+
+        slider.RegisterChange(v =>
+        {
+            slider.SetLabel(TickIntervalLabel(v));
+            Runtime.SetInterval(typeName, v);
+        });
+        slider.SetWidthPercent(100);
     }
+
+    static string TickIntervalLabel(int value) => $"Tick interval - 1/{value}";
 }
 
 
