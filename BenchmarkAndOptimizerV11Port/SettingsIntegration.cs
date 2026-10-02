@@ -112,8 +112,13 @@ public sealed class OptimizerPanel : VisualElement
 
     private static readonly string[] WellKnown =
     {
+        "PhysicsSimulator",
         "BehaviorManager",
         "NavMeshObserver",
+        "NavigationSynchronizer",
+        "AutomationRunner",
+        "WaterSimulator",
+        "SpeedManager",
         "ConstructionSite",
         "ResourceCountingService"
     };
@@ -232,6 +237,7 @@ public sealed class OptimizerPanel : VisualElement
     {
         var current = Runtime.GetInterval(typeName);
         var origin = Runtime.GetOrigin(typeName);
+        var isProtected = Runtime.IsProtected(typeName);
 
         // Two-line layout so long type/origin text never pushes the interval control
         // out of the visible settings panel.
@@ -246,9 +252,15 @@ public sealed class OptimizerPanel : VisualElement
         var intervalRow = item.AddRow()
             .AlignItems(Align.Center);
 
-        var intervalLabel = intervalRow.AddGameLabel(TickIntervalLabel(current))
-            .SetMinSize(125f, null)
+        var intervalLabel = intervalRow.AddGameLabel(
+                isProtected ? "Tick interval - 1/1 (protected)" : TickIntervalLabel(current))
+            .SetMinSize(isProtected ? 220f : 125f, null)
             .SetMarginRight(10f);
+
+        if (isProtected)
+        {
+            return;
+        }
 
         var slider = intervalRow.AddSliderInt(
                 values: new SliderValues<int>(1, 50, current))

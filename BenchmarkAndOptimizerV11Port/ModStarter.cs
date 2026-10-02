@@ -126,8 +126,25 @@ internal static class Runtime
 
     public const int BenchmarkDurationSeconds = 120;
 
+    // These systems own or synchronize authoritative simulation state. Skipping
+    // their updates can break ordering assumptions and leave the world in a
+    // partially-updated state, so they are permanently pinned to vanilla cadence.
+    private static readonly HashSet<string> ProtectedTypeNames = new(StringComparer.Ordinal)
+    {
+        "PhysicsSimulator",
+        "BehaviorManager",
+        "NavMeshObserver",
+        "NavigationSynchronizer",
+        "AutomationRunner",
+        "WaterSimulator",
+        "SpeedManager",
+        "ConstructionSite"
+    };
+
     public static bool Enabled => _settings.Enabled;
     public static int DefaultInterval => _settings.DefaultInterval;
+    public static bool IsProtected(string typeName) =>
+        ProtectedTypeNames.Contains(ShortTypeName(typeName));
     public static IReadOnlyCollection<string> KnownTypes
     {
         get
@@ -190,6 +207,11 @@ internal static class Runtime
 
     public static int GetInterval(string typeName)
     {
+        if (IsProtected(typeName))
+        {
+            return 1;
+        }
+
         if (_settings.Intervals.TryGetValue(typeName, out var value))
         {
             return Math.Clamp(value, 1, 1000);
@@ -206,8 +228,20 @@ internal static class Runtime
 
     public static void SetInterval(string typeName, int value)
     {
-        value = Math.Clamp(value, 1, 1000);
         var key = Discovered.FirstOrDefault(x => ShortTypeName(x) == typeName) ?? typeName;
+
+        if (IsProtected(typeName))
+        {
+            _settings.Intervals[key] = 1;
+            _settingsGeneration++;
+            SaveSettings(_settings);
+            RefreshDirectThrottlePatches();
+            LogOnce($"protected-set:{ShortTypeName(typeName)}",
+                $"protected system {typeName} is permanently pinned to interval=1");
+            return;
+        }
+
+        value = Math.Clamp(value, 1, 1000);
         _settings.Intervals[key] = value;
         _settingsGeneration++;
         SaveSettings(_settings);
@@ -291,7 +325,7 @@ internal static class Runtime
         foreach (var pair in DiscoveredTypes)
         {
             var type = pair.Value;
-            if (GetInterval(type) <= 1)
+            if (IsProtected(type) || GetInterval(type) <= 1)
             {
                 continue;
             }
@@ -358,7 +392,7 @@ internal static class Runtime
 
     public static bool DirectThrottlePrefix(object __instance, MethodBase __originalMethod)
     {
-        if (!_settings.Enabled || BenchmarkActive)
+        if (!_settings.Enabled || BenchmarkActive || IsProtected(__instance.GetType()))
         {
             return true;
         }
@@ -716,6 +750,11 @@ internal static class Runtime
 
     private static bool ShouldRun(object actual)
     {
+        if (IsProtected(actual.GetType()))
+        {
+            return true;
+        }
+
         var interval = GetInterval(actual.GetType());
         if (interval <= 1)
         {
@@ -733,6 +772,25 @@ internal static class Runtime
         return false;
     }
 
+    private static bool IsProtected(Type type) =>
+        ProtectedTypeNames.Contains(type.Name);
+
+    private static bool NormalizeProtectedIntervals(Settings settings)
+    {
+        var changed = false;
+
+        foreach (var key in settings.Intervals.Keys.ToArray())
+        {
+            if (IsProtected(key) && settings.Intervals[key] != 1)
+            {
+                settings.Intervals[key] = 1;
+                changed = true;
+            }
+        }
+
+        return changed;
+    }
+
     private static bool HasActiveThrottles()
     {
         if (_settings.DefaultInterval > 1)
@@ -745,6 +803,11 @@ internal static class Runtime
 
     private static int GetInterval(Type type)
     {
+        if (IsProtected(type))
+        {
+            return 1;
+        }
+
         var full = type.FullName ?? type.Name;
 
         if (_settings.Intervals.TryGetValue(full, out var exact))
@@ -1115,9 +1178,17 @@ internal static class Runtime
             }
 
             loaded.Normalize();
+            var protectedValuesCorrected = NormalizeProtectedIntervals(loaded);
             _settings = loaded;
             _settingsGeneration++;
             _configWriteUtc = writeUtc;
+
+            if (protectedValuesCorrected)
+            {
+                SaveSettings(_settings);
+                Log("protected optimizer intervals found in config and reset to 1");
+            }
+
             if (!BenchmarkActive)
             {
                 RefreshDirectThrottlePatches();
@@ -1132,6 +1203,7 @@ internal static class Runtime
 
     private static void SaveSettings(Settings settings)
     {
+        NormalizeProtectedIntervals(settings);
         var json = JsonConvert.SerializeObject(settings, Formatting.Indented);
         File.WriteAllText(ConfigPath, json + Environment.NewLine);
         _configWriteUtc = File.GetLastWriteTimeUtc(ConfigPath);
