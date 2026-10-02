@@ -11,3 +11,5 @@ This port preserves the original per-system frequency control while avoiding U7-
 - Compatibility failures fall back to vanilla dispatcher behavior instead of intentionally suppressing game updates.
 
 The runtime package requires the normal Timberborn Harmony mod.
+
+- Bober's Laws of Motion / TimberPhysics: caps physics catch-up to 4 fixed substeps per update. Normal 0.02 s physics cadence is unchanged when the game keeps up; excess backlog is dropped to prevent runaway catch-up stalls.
