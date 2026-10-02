@@ -34,8 +34,13 @@ namespace UnityEngine.UIElements
         public static T SetPadding<T>(this T e,float padding) where T:VisualElement=>e;
         public static T SetMargin<T>(this T e,float top,float right,float bottom,float left) where T:VisualElement=>e;
         public static T SetMarginBottom<T>(this T e,float margin=10f) where T:VisualElement=>e;
+        public static T SetMarginRight<T>(this T e,float margin=10f) where T:VisualElement=>e;
         public static T SetWidthPercent<T>(this T e,float p) where T:VisualElement=>e;
         public static T SetMaxHeight<T>(this T e,float h) where T:VisualElement=>e;
+        public static T SetMinSize<T>(this T e,float? minW,float? minH) where T:VisualElement=>e;
+        public static T SetFlexGrow<T>(this T e,float flexGrow=1) where T:VisualElement=>e;
+        public static T AlignItems<T>(this T e,Align align=Align.Center) where T:VisualElement=>e;
+        public static T Initialize<T>(this T e,Timberborn.CoreUI.VisualElementInitializer initializer) where T:VisualElement=>e;
         public static VisualElement AddChild(this VisualElement p,Type? type=null,string? name=null,IEnumerable<string>? classes=null)=>new VisualElement();
         public static T AddChild<T>(this VisualElement p,string? name=null,IEnumerable<string>? classes=null) where T:VisualElement,new()=>new T();
         public static VisualElement AddRow(this VisualElement p,string? name=null)=>new VisualElement();
