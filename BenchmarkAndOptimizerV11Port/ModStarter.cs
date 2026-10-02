@@ -749,7 +749,9 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
     private static MethodInfo? _getColumnMethod;
     private static Func<object, int, object>? _getColumnValue;
     private static MethodInfo? _spawnAllMethod;
+    private static FieldInfo? _boxCollidersField;
     private static bool _disabled;
+    private static bool _skipNextVanillaSpawnXY;
     private static MemberInfo? _verticalStrideMember;
     private static MethodInfo? _cellToIndexMethod;
     private static MethodInfo? _gridToWorldCenteredMethod;
@@ -819,6 +821,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
             }
 
             _spawnAllMethod = spawnAll;
+            _boxCollidersField = originalBoxColliderDictionary;
 
             var mapSizeType = _mapSizeField.FieldType;
             var columnTerrainMapType = _columnTerrainMapField.FieldType;
@@ -1047,6 +1050,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
             States.Remove(__instance);
             _disabled = true;
+            _skipNextVanillaSpawnXY = false;
             Runtime.Log(
                 $"warning: TimberPhysics merged terrain initial build failed: {ex}; " +
                 "merger disabled for this session and vanilla terrain colliders restored");
@@ -1058,6 +1062,15 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
     {
         if (_disabled)
         {
+            if (_skipNextVanillaSpawnXY)
+            {
+                _skipNextVanillaSpawnXY = false;
+                Runtime.Log(
+                    "TimberPhysics terrain merger suppressed one SpawnCollidersXY call " +
+                    "already covered by the full vanilla restore");
+                return false;
+            }
+
             return true;
         }
 
@@ -1070,8 +1083,21 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
         {
             Runtime.Log(
                 $"warning: TimberPhysics merged terrain chunk rebuild failed: " +
-                $"{ex.GetType().Name}: {ex.Message}");
-            return true;
+                $"{ex.GetType().Name}: {ex.Message}; attempting transactional vanilla restore");
+
+            if (TryDisableMergerAndRestoreVanilla(
+                    __instance,
+                    "chunk rebuild",
+                    ex,
+                    skipNextSpawnXY: false))
+            {
+                // The full vanilla terrain set already includes this changed cell.
+                return false;
+            }
+
+            // Do not mix one vanilla chunk into the merged representation. A failed
+            // full restore leaves the merger enabled and logs loudly for diagnosis.
+            return false;
         }
     }
 
@@ -1091,9 +1117,137 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
         {
             Runtime.Log(
                 $"warning: TimberPhysics merged terrain chunk removal failed: " +
-                $"{ex.GetType().Name}: {ex.Message}");
+                $"{ex.GetType().Name}: {ex.Message}; attempting transactional vanilla restore");
+
+            if (TryDisableMergerAndRestoreVanilla(
+                    __instance,
+                    "chunk removal",
+                    ex,
+                    skipNextSpawnXY: true))
+            {
+                // The full vanilla rebuild supersedes both this removal and the
+                // immediately following SpawnCollidersXY for the same terrain edit.
+                return false;
+            }
+
+            return false;
+        }
+    }
+
+    private static bool TryDisableMergerAndRestoreVanilla(
+        object service,
+        string phase,
+        Exception cause,
+        bool skipNextSpawnXY)
+    {
+        _disabled = true;
+        _skipNextVanillaSpawnXY = skipNextSpawnXY;
+
+        try
+        {
+            // Remove any stale vanilla dictionary entries first. In normal merged
+            // operation this dictionary is empty, but clearing it makes recovery
+            // safe even after an earlier partial/fallback path.
+            ClearVanillaColliderDictionary(service);
+
+            // _disabled is already true, so invoking the patched method re-enters
+            // SpawnAllPrefix, which immediately yields to TimberPhysics' original
+            // SpawnColliders implementation.
+            _spawnAllMethod!.Invoke(service, null);
+
+            if (States.TryGetValue(service, out var state))
+            {
+                ClearState(state);
+            }
+
+            States.Remove(service);
+            Runtime.Log(
+                $"TimberPhysics terrain merger disabled after {phase} failure; " +
+                $"vanilla terrain colliders fully restored. Cause: " +
+                $"{cause.GetType().Name}: {cause.Message}");
             return true;
         }
+        catch (Exception restoreEx)
+        {
+            try
+            {
+                ClearVanillaColliderDictionary(service);
+            }
+            catch
+            {
+                // Keep the original restore failure as the useful diagnostic.
+            }
+
+            _disabled = false;
+            _skipNextVanillaSpawnXY = false;
+            Runtime.Log(
+                $"ERROR: TimberPhysics terrain merger could not restore vanilla colliders " +
+                $"after {phase} failure. Merger remains enabled to avoid a mixed " +
+                $"vanilla/merged collider dictionary. Original={cause.GetType().Name}: " +
+                $"{cause.Message}; Restore={restoreEx}");
+            return false;
+        }
+    }
+
+    private static void ClearVanillaColliderDictionary(object service)
+    {
+        var dictionaryObject = _boxCollidersField!.GetValue(service);
+        if (dictionaryObject is null)
+        {
+            return;
+        }
+
+        if (dictionaryObject is IDictionary dictionary)
+        {
+            var colliders = new List<object>();
+            foreach (DictionaryEntry entry in dictionary)
+            {
+                if (entry.Value is not null)
+                {
+                    colliders.Add(entry.Value);
+                }
+            }
+
+            dictionary.Clear();
+            foreach (var collider in colliders)
+            {
+                TryDestroyCollider(collider);
+            }
+
+            return;
+        }
+
+        var dictionaryType = dictionaryObject.GetType();
+        var valuesProperty = AccessTools.Property(dictionaryType, "Values");
+        if (valuesProperty?.GetValue(dictionaryObject) is IEnumerable values)
+        {
+            var colliders = new List<object>();
+            foreach (var value in values)
+            {
+                if (value is not null)
+                {
+                    colliders.Add(value);
+                }
+            }
+
+            var clearMethod = AccessTools.Method(dictionaryType, "Clear");
+            if (clearMethod is null)
+            {
+                throw new InvalidOperationException(
+                    $"Cannot clear TimberPhysics collider dictionary type {dictionaryType.FullName}");
+            }
+
+            clearMethod.Invoke(dictionaryObject, null);
+            foreach (var collider in colliders)
+            {
+                TryDestroyCollider(collider);
+            }
+
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Unsupported TimberPhysics collider dictionary type {dictionaryType.FullName}");
     }
 
     private static void BuildAll(object service)
@@ -1208,20 +1362,34 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
         }
 
         var colliders = new List<object>();
-        foreach (var pair in occupancyByInterval)
+        try
         {
-            MergeInterval(
-                service,
-                originX,
-                originY,
-                pair.Key.Floor,
-                pair.Key.Ceiling,
-                pair.Value,
-                colliders);
-        }
+            foreach (var pair in occupancyByInterval)
+            {
+                MergeInterval(
+                    service,
+                    originX,
+                    originY,
+                    pair.Key.Floor,
+                    pair.Key.Ceiling,
+                    pair.Value,
+                    colliders);
+            }
 
-        state.Chunks[ChunkKey(originX, originY)] = colliders;
-        return (terrainColumns, colliders.Count);
+            state.Chunks[ChunkKey(originX, originY)] = colliders;
+            return (terrainColumns, colliders.Count);
+        }
+        catch
+        {
+            // BuildChunk is transactional: no partially-created merged colliders
+            // may survive into a fallback path.
+            foreach (var collider in colliders)
+            {
+                TryDestroyCollider(collider);
+            }
+
+            throw;
+        }
     }
 
     private static void MergeInterval(
@@ -1327,13 +1495,24 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
             Math.Abs(lastZ - firstZ) + 1f);
 
         var rootObject = _rootObjectField!.GetValue(service)!;
-        var collider = _addComponentByTypeMethod!.Invoke(
-            rootObject,
-            new object[] { _boxColliderType! })!;
+        object? collider = null;
+        try
+        {
+            collider = _addComponentByTypeMethod!.Invoke(
+                rootObject,
+                new object[] { _boxColliderType! })!;
 
-        WriteMember(collider, _colliderCenter!, center);
-        WriteMember(collider, _colliderSize!, size);
-        return collider;
+            WriteMember(collider, _colliderCenter!, center);
+            WriteMember(collider, _colliderSize!, size);
+            return collider;
+        }
+        catch
+        {
+            // If AddComponent succeeded but configuring the collider failed, do
+            // not leave an untracked component behind.
+            TryDestroyCollider(collider);
+            throw;
+        }
     }
 
     private static int ReadIndexedInt(object collection, int index)
@@ -1543,17 +1722,27 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
         foreach (var collider in colliders)
         {
-            try
-            {
-                _destroyMethod!.Invoke(null, new[] { collider });
-            }
-            catch
-            {
-                // A destroyed collider should not prevent rebuilding the rest.
-            }
+            TryDestroyCollider(collider);
         }
 
         state.Chunks.Remove(key);
+    }
+
+    private static void TryDestroyCollider(object? collider)
+    {
+        if (collider is null)
+        {
+            return;
+        }
+
+        try
+        {
+            _destroyMethod!.Invoke(null, new[] { collider });
+        }
+        catch
+        {
+            // A destroyed collider should not prevent rebuilding/recovery.
+        }
     }
 
     private sealed class TerrainState
