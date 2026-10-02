@@ -747,6 +747,9 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
     private static MemberInfo? _terrainSizeMember;
     private static MemberInfo? _columnCountMember;
     private static MethodInfo? _getColumnMethod;
+    private static Func<object, int, object>? _getColumnValue;
+    private static MethodInfo? _spawnAllMethod;
+    private static bool _disabled;
     private static MemberInfo? _verticalStrideMember;
     private static MethodInfo? _cellToIndexMethod;
     private static MethodInfo? _gridToWorldCenteredMethod;
@@ -789,6 +792,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
             _mapIndexServiceField = AccessTools.Field(serviceType, "_mapIndexService");
             var originalBoxColliderDictionary = AccessTools.Field(serviceType, "_boxColliders");
 
+            _disabled = false;
             var spawnAll = FindMethod(serviceType, "SpawnColliders", 0);
             var spawnXY = FindMethod(serviceType, "SpawnCollidersXY", 1);
             var removeXY = FindMethod(serviceType, "RemoveCollidersXY", 1);
@@ -814,6 +818,8 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
                 return;
             }
 
+            _spawnAllMethod = spawnAll;
+
             var mapSizeType = _mapSizeField.FieldType;
             var columnTerrainMapType = _columnTerrainMapField.FieldType;
             var mapIndexServiceType = _mapIndexServiceField.FieldType;
@@ -825,6 +831,9 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
                 "GetColumn",
                 1,
                 m => m.GetParameters()[0].ParameterType == typeof(int));
+            _getColumnValue = _getColumnMethod is null
+                ? null
+                : CreateColumnValueGetter(_getColumnMethod);
             _verticalStrideMember = FindMember(mapIndexServiceType, "VerticalStride");
             _cellToIndexMethod = FindMethod(
                 mapIndexServiceType,
@@ -906,7 +915,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
             }
 
             if (_terrainSizeMember is null || _columnCountMember is null ||
-                _getColumnMethod is null || _verticalStrideMember is null ||
+                _getColumnMethod is null || _getColumnValue is null || _verticalStrideMember is null ||
                 _cellToIndexMethod is null || _gridToWorldCenteredMethod is null ||
                 _vector3Type is null || _boxColliderType is null ||
                 _addComponentByTypeMethod is null || _destroyMethod is null ||
@@ -919,6 +928,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
                     ("TerrainSize", _terrainSizeMember),
                     ("ColumnCount", _columnCountMember),
                     ("GetColumn", _getColumnMethod),
+                    ("GetColumn value getter", _getColumnValue),
                     ("VerticalStride", _verticalStrideMember),
                     ("CellToIndex", _cellToIndexMethod),
                     ("GridToWorldCentered", _gridToWorldCenteredMethod),
@@ -1013,6 +1023,11 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
     private static bool SpawnAllPrefix(object __instance)
     {
+        if (_disabled)
+        {
+            return true;
+        }
+
         try
         {
             BuildAll(__instance);
@@ -1020,16 +1035,32 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
         }
         catch (Exception ex)
         {
-            Runtime.Log(
-                $"warning: TimberPhysics merged terrain initial build failed: " +
-                $"{ex.GetType().Name}: {ex.Message}; falling back to vanilla terrain colliders");
+            try
+            {
+                var state = States.GetOrCreateValue(__instance);
+                ClearState(state);
+            }
+            catch
+            {
+                // Best-effort cleanup only.
+            }
+
             States.Remove(__instance);
+            _disabled = true;
+            Runtime.Log(
+                $"warning: TimberPhysics merged terrain initial build failed: {ex}; " +
+                "merger disabled for this session and vanilla terrain colliders restored");
             return true;
         }
     }
 
     private static bool SpawnXYPrefix(object __instance, object __0)
     {
+        if (_disabled)
+        {
+            return true;
+        }
+
         try
         {
             RebuildChunk(__instance, __0);
@@ -1046,6 +1077,11 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
     private static bool RemoveXYPrefix(object __instance, object __0)
     {
+        if (_disabled)
+        {
+            return true;
+        }
+
         try
         {
             RemoveChunkForCoordinates(__instance, __0);
@@ -1149,7 +1185,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
                 for (var i = 0; i < columnCount; i++)
                 {
                     var index3D = cellIndex + i * verticalStride;
-                    var terrainColumn = _getColumnMethod!.Invoke(columnTerrainMap, new object[] { index3D })!;
+                    var terrainColumn = _getColumnValue!(columnTerrainMap, index3D);
                     var floor = Convert.ToSingle(ReadMember(terrainColumn, _terrainFloor!));
                     var ceiling = Convert.ToSingle(ReadMember(terrainColumn, _terrainCeiling!));
 
@@ -1327,6 +1363,66 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
     private static object CreateVector3(float x, float y, float z) =>
         Activator.CreateInstance(_vector3Type!, new object[] { x, y, z })!;
+
+    private static Func<object, int, object>? CreateColumnValueGetter(MethodInfo method)
+    {
+        try
+        {
+            if (!method.ReturnType.IsByRef)
+            {
+                return (instance, index) =>
+                    method.Invoke(instance, new object[] { index })!;
+            }
+
+            var valueType = method.ReturnType.GetElementType();
+            var declaringType = method.DeclaringType;
+            if (valueType is null || declaringType is null)
+            {
+                return null;
+            }
+
+            // MethodInfo.Invoke cannot reliably invoke by-ref-returning methods on
+            // Timberborn's Mono runtime. Emit a tiny adapter that calls GetColumn,
+            // dereferences TerrainColumn&, boxes the value, and returns it as object.
+            var dynamicMethod = new System.Reflection.Emit.DynamicMethod(
+                "BenchmarkOptimizer_GetTerrainColumnValue",
+                typeof(object),
+                new[] { typeof(object), typeof(int) },
+                typeof(TimberPhysicsTerrainColliderMergerPatcher).Module,
+                true);
+
+            var il = dynamicMethod.GetILGenerator();
+            il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+            il.Emit(System.Reflection.Emit.OpCodes.Castclass, declaringType);
+            il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+            il.Emit(
+                method.IsVirtual
+                    ? System.Reflection.Emit.OpCodes.Callvirt
+                    : System.Reflection.Emit.OpCodes.Call,
+                method);
+
+            if (valueType.IsValueType)
+            {
+                il.Emit(System.Reflection.Emit.OpCodes.Ldobj, valueType);
+                il.Emit(System.Reflection.Emit.OpCodes.Box, valueType);
+            }
+            else
+            {
+                il.Emit(System.Reflection.Emit.OpCodes.Ldind_Ref);
+            }
+
+            il.Emit(System.Reflection.Emit.OpCodes.Ret);
+            return (Func<object, int, object>)dynamicMethod.CreateDelegate(
+                typeof(Func<object, int, object>));
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: TimberPhysics terrain GetColumn by-ref adapter failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
 
     private static MemberInfo? FindMember(Type type, string name)
     {
@@ -1820,6 +1916,7 @@ internal static class Runtime
                 continue;
             }
 
+            method = ResolveImplementedMethod(method);
             var declaringType = method.DeclaringType;
             var inherited = declaringType is not null && declaringType != type;
 
@@ -1900,6 +1997,22 @@ internal static class Runtime
         }
 
         return ShouldRun(__instance);
+    }
+
+    private static MethodInfo ResolveImplementedMethod(MethodInfo method)
+    {
+        var declaringType = method.DeclaringType;
+        if (declaringType is null || method.ReflectedType == declaringType)
+        {
+            return method;
+        }
+
+        var parameterTypes = method.GetParameters()
+            .Select(parameter => parameter.ParameterType)
+            .ToArray();
+
+        return AccessTools.DeclaredMethod(declaringType, method.Name, parameterTypes)
+            ?? method;
     }
 
     private static MethodInfo? FindDirectTickMethod(Type type)
