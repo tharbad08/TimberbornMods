@@ -1679,24 +1679,139 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
                string.Equals(actualName[(separator + 1)..], wantedName, StringComparison.Ordinal);
     }
 
-    private static object? ReadMember(object instance, MemberInfo member) =>
-        member switch
+    private static object? ReadMember(object instance, MemberInfo member)
+    {
+        var runtimeType = instance.GetType();
+
+        if (member is FieldInfo field)
         {
-            FieldInfo field => field.GetValue(instance),
-            PropertyInfo property => property.GetValue(instance),
-            _ => throw new InvalidOperationException($"Unsupported member: {member}")
-        };
+            if (field.DeclaringType is not null &&
+                !field.DeclaringType.IsInstanceOfType(instance))
+            {
+                var rebound = FindMember(runtimeType, TerminalMemberName(field.Name));
+                if (rebound is not null && !ReferenceEquals(rebound, member))
+                {
+                    return ReadMember(instance, rebound);
+                }
+            }
+
+            return field.GetValue(instance);
+        }
+
+        if (member is PropertyInfo property)
+        {
+            var getter = property.GetGetMethod(true);
+            if (getter is not null &&
+                getter.DeclaringType is not null &&
+                getter.DeclaringType.IsInstanceOfType(instance))
+            {
+                return getter.Invoke(instance, null);
+            }
+
+            // Re-resolve against the actual boxed/runtime type. This handles
+            // Timberborn properties discovered through an interface/base metadata
+            // view whose PropertyInfo cannot be invoked directly on the object Mono
+            // gives us at runtime.
+            var rebound = FindMember(runtimeType, TerminalMemberName(property.Name));
+            if (rebound is not null && !SameMember(rebound, member))
+            {
+                return ReadMember(instance, rebound);
+            }
+
+            if (property.DeclaringType?.IsInterface == true && getter is not null)
+            {
+                var map = runtimeType.GetInterfaceMap(property.DeclaringType);
+                for (var i = 0; i < map.InterfaceMethods.Length; i++)
+                {
+                    if (map.InterfaceMethods[i] == getter)
+                    {
+                        return map.TargetMethods[i].Invoke(instance, null);
+                    }
+                }
+            }
+
+            throw new TargetException(
+                $"Cannot read {property.DeclaringType?.FullName}.{property.Name} " +
+                $"from runtime type {runtimeType.FullName}");
+        }
+
+        throw new InvalidOperationException($"Unsupported member: {member}");
+    }
+
+    private static string TerminalMemberName(string name)
+    {
+        var separator = name.LastIndexOf('.');
+        return separator >= 0 ? name[(separator + 1)..] : name;
+    }
+
+    private static bool SameMember(MemberInfo left, MemberInfo right)
+    {
+        try
+        {
+            return left.Module == right.Module &&
+                   left.MetadataToken == right.MetadataToken;
+        }
+        catch
+        {
+            return ReferenceEquals(left, right);
+        }
+    }
 
     private static void WriteMember(object instance, MemberInfo member, object value)
     {
+        var runtimeType = instance.GetType();
+
         switch (member)
         {
             case FieldInfo field:
+                if (field.DeclaringType is not null &&
+                    !field.DeclaringType.IsInstanceOfType(instance))
+                {
+                    var rebound = FindMember(runtimeType, TerminalMemberName(field.Name));
+                    if (rebound is not null && !SameMember(rebound, member))
+                    {
+                        WriteMember(instance, rebound, value);
+                        return;
+                    }
+                }
+
                 field.SetValue(instance, value);
-                break;
+                return;
+
             case PropertyInfo property:
-                property.SetValue(instance, value);
-                break;
+                var setter = property.GetSetMethod(true);
+                if (setter is not null &&
+                    setter.DeclaringType is not null &&
+                    setter.DeclaringType.IsInstanceOfType(instance))
+                {
+                    setter.Invoke(instance, new[] { value });
+                    return;
+                }
+
+                var reboundProperty = FindMember(runtimeType, TerminalMemberName(property.Name));
+                if (reboundProperty is not null && !SameMember(reboundProperty, member))
+                {
+                    WriteMember(instance, reboundProperty, value);
+                    return;
+                }
+
+                if (property.DeclaringType?.IsInterface == true && setter is not null)
+                {
+                    var map = runtimeType.GetInterfaceMap(property.DeclaringType);
+                    for (var i = 0; i < map.InterfaceMethods.Length; i++)
+                    {
+                        if (map.InterfaceMethods[i] == setter)
+                        {
+                            map.TargetMethods[i].Invoke(instance, new[] { value });
+                            return;
+                        }
+                    }
+                }
+
+                throw new TargetException(
+                    $"Cannot write {property.DeclaringType?.FullName}.{property.Name} " +
+                    $"on runtime type {runtimeType.FullName}");
+
             default:
                 throw new InvalidOperationException($"Unsupported member: {member}");
         }
