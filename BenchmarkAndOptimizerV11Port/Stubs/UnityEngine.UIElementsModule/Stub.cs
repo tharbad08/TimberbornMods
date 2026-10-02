@@ -15,6 +15,15 @@ namespace UnityEngine.UIElements
         AlwaysVisible,
         Hidden
     }
+
+    public enum Align
+    {
+        Auto,
+        FlexStart,
+        Center,
+        FlexEnd,
+        Stretch
+    }
     public class EventBase { }
     public class DetachFromPanelEvent : EventBase { }
 
