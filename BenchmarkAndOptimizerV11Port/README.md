@@ -33,3 +33,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.34: same runtime-member rebinding terrain fix that was briefly mislabeled as a second v1.1.33 build; version corrected to keep artifacts unambiguous.
 
 - v1.1.35: adds always-on low-overhead ITickableSingleton timing for freeze attribution. Slow/frozen frame logs now include the top TickSingleton offenders even when the full benchmark is not running.
+
+- v1.1.36: adds frame phase-gap timing for unattributed stalls and a targeted SoilContaminationService deep profiler with per-callee timing and GC deltas.
