@@ -450,31 +450,26 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 {
     private const string ServiceTypeName = "TimberPhysics.Terrain.TerrainColliderService";
     private const string CoordinateSystemTypeName = "Timberborn.Coordinates.CoordinateSystem";
-    private const string Vector2IntTypeName = "UnityEngine.Vector2Int";
-    private const string Vector3TypeName = "UnityEngine.Vector3";
-    private const string BoxColliderTypeName = "UnityEngine.BoxCollider";
-    private const string UnityObjectTypeName = "UnityEngine.Object";
     private const int ChunkSize = 16;
 
     private static readonly ConditionalWeakTable<object, TerrainState> States = new();
 
     private static bool _patched;
-    private static Type? _serviceType;
-    private static Type? _vector2IntType;
-    private static Type? _vector3Type;
-    private static Type? _boxColliderType;
     private static FieldInfo? _rootObjectField;
     private static FieldInfo? _columnTerrainMapField;
     private static FieldInfo? _mapSizeField;
     private static FieldInfo? _mapIndexServiceField;
-    private static PropertyInfo? _terrainSizeProperty;
-    private static PropertyInfo? _columnCountProperty;
+    private static MemberInfo? _terrainSizeMember;
+    private static MemberInfo? _columnCountMember;
     private static MethodInfo? _getColumnMethod;
-    private static PropertyInfo? _verticalStrideProperty;
+    private static MemberInfo? _verticalStrideMember;
     private static MethodInfo? _cellToIndexMethod;
     private static MethodInfo? _gridToWorldCenteredMethod;
     private static MethodInfo? _addComponentByTypeMethod;
     private static MethodInfo? _destroyMethod;
+    private static Type? _vector2IntType;
+    private static Type? _vector3Type;
+    private static Type? _boxColliderType;
     private static MemberInfo? _vector2X;
     private static MemberInfo? _vector2Y;
     private static MemberInfo? _vector3X;
@@ -494,36 +489,43 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
         try
         {
-            _serviceType = AccessTools.TypeByName(ServiceTypeName);
-            _vector2IntType = AccessTools.TypeByName(Vector2IntTypeName);
-            _vector3Type = AccessTools.TypeByName(Vector3TypeName);
-            _boxColliderType = AccessTools.TypeByName(BoxColliderTypeName);
+            var serviceType = AccessTools.TypeByName(ServiceTypeName);
             var coordinateSystemType = AccessTools.TypeByName(CoordinateSystemTypeName);
-            var unityObjectType = AccessTools.TypeByName(UnityObjectTypeName);
 
-            if (_serviceType is null || _vector2IntType is null || _vector3Type is null ||
-                _boxColliderType is null || coordinateSystemType is null || unityObjectType is null)
+            if (serviceType is null || coordinateSystemType is null)
             {
-                Runtime.Log("TimberPhysics terrain merger not installed: required types are not loaded");
+                Runtime.Log("TimberPhysics terrain merger not installed: required TimberPhysics/CoordinateSystem types are not loaded");
                 return;
             }
 
-            _rootObjectField = AccessTools.Field(_serviceType, "_rootObject");
-            _columnTerrainMapField = AccessTools.Field(_serviceType, "_columnTerrainMap");
-            _mapSizeField = AccessTools.Field(_serviceType, "_mapSize");
-            _mapIndexServiceField = AccessTools.Field(_serviceType, "_mapIndexService");
+            _rootObjectField = AccessTools.Field(serviceType, "_rootObject");
+            _columnTerrainMapField = AccessTools.Field(serviceType, "_columnTerrainMap");
+            _mapSizeField = AccessTools.Field(serviceType, "_mapSize");
+            _mapIndexServiceField = AccessTools.Field(serviceType, "_mapIndexService");
+            var originalBoxColliderDictionary = AccessTools.Field(serviceType, "_boxColliders");
 
-            var spawnAll = AccessTools.Method(_serviceType, "SpawnColliders", Type.EmptyTypes);
-            var spawnXY = AccessTools.Method(_serviceType, "SpawnCollidersXY", new[] { _vector2IntType });
-            var removeXY = AccessTools.Method(_serviceType, "RemoveCollidersXY", new[] { _vector2IntType });
+            var spawnAll = FindMethod(serviceType, "SpawnColliders", 0);
+            var spawnXY = FindMethod(serviceType, "SpawnCollidersXY", 1);
+            var removeXY = FindMethod(serviceType, "RemoveCollidersXY", 1);
+
+            _vector2IntType = spawnXY?.GetParameters().FirstOrDefault()?.ParameterType;
 
             if (_rootObjectField is null || _columnTerrainMapField is null ||
                 _mapSizeField is null || _mapIndexServiceField is null ||
-                spawnAll is null || spawnXY is null || removeXY is null)
+                originalBoxColliderDictionary is null ||
+                spawnAll is null || spawnXY is null || removeXY is null ||
+                _vector2IntType is null)
             {
-                Runtime.Log(
-                    "warning: TimberPhysics terrain merger unavailable; " +
-                    "TerrainColliderService does not match expected v1.1.1.0 layout");
+                LogResolutionFailure(
+                    ("rootObject", _rootObjectField),
+                    ("columnTerrainMap", _columnTerrainMapField),
+                    ("mapSize", _mapSizeField),
+                    ("mapIndexService", _mapIndexServiceField),
+                    ("boxColliders", originalBoxColliderDictionary),
+                    ("SpawnColliders", spawnAll),
+                    ("SpawnCollidersXY", spawnXY),
+                    ("RemoveCollidersXY", removeXY),
+                    ("Vector2Int", _vector2IntType));
                 return;
             }
 
@@ -531,25 +533,56 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
             var columnTerrainMapType = _columnTerrainMapField.FieldType;
             var mapIndexServiceType = _mapIndexServiceField.FieldType;
 
-            _terrainSizeProperty = AccessTools.Property(mapSizeType, "TerrainSize");
-            _columnCountProperty = AccessTools.Property(columnTerrainMapType, "ColumnCount");
-            _getColumnMethod = AccessTools.Method(columnTerrainMapType, "GetColumn", new[] { typeof(int) });
-            _verticalStrideProperty = AccessTools.Property(mapIndexServiceType, "VerticalStride");
-            _cellToIndexMethod = AccessTools.Method(mapIndexServiceType, "CellToIndex", new[] { _vector2IntType });
-            _gridToWorldCenteredMethod = AccessTools.Method(
-                coordinateSystemType, "GridToWorldCentered", new[] { _vector3Type });
+            _terrainSizeMember = FindMember(mapSizeType, "TerrainSize");
+            _columnCountMember = FindMember(columnTerrainMapType, "ColumnCount");
+            _getColumnMethod = FindMethod(columnTerrainMapType, "GetColumn", 1);
+            _verticalStrideMember = FindMember(mapIndexServiceType, "VerticalStride");
+            _cellToIndexMethod = FindMethod(
+                mapIndexServiceType,
+                "CellToIndex",
+                1,
+                m => m.GetParameters()[0].ParameterType == _vector2IntType);
+
+            _gridToWorldCenteredMethod = FindMethod(
+                coordinateSystemType,
+                "GridToWorldCentered",
+                1,
+                m => m.GetParameters()[0].ParameterType.FullName == "UnityEngine.Vector3");
+
+            _vector3Type = _gridToWorldCenteredMethod?.GetParameters()[0].ParameterType;
+
+            var boxArgs = originalBoxColliderDictionary.FieldType.IsGenericType
+                ? originalBoxColliderDictionary.FieldType.GetGenericArguments()
+                : Type.EmptyTypes;
+            _boxColliderType = boxArgs.Length >= 2
+                ? boxArgs[boxArgs.Length - 1]
+                : AccessTools.TypeByName("UnityEngine.BoxCollider");
 
             var gameObjectType = _rootObjectField.FieldType;
-            _addComponentByTypeMethod = AccessTools.Method(gameObjectType, "AddComponent", new[] { typeof(Type) });
-            _destroyMethod = AccessTools.Method(unityObjectType, "Destroy", new[] { unityObjectType });
+            _addComponentByTypeMethod = FindMethod(
+                gameObjectType,
+                "AddComponent",
+                1,
+                m => m.GetParameters()[0].ParameterType == typeof(Type));
+
+            var unityObjectType = gameObjectType.BaseType ?? AccessTools.TypeByName("UnityEngine.Object");
+            _destroyMethod = unityObjectType is null
+                ? null
+                : FindMethod(
+                    unityObjectType,
+                    "Destroy",
+                    1,
+                    m => m.IsStatic);
 
             _vector2X = FindMember(_vector2IntType, "x");
             _vector2Y = FindMember(_vector2IntType, "y");
-            _vector3X = FindMember(_vector3Type, "x");
-            _vector3Y = FindMember(_vector3Type, "y");
-            _vector3Z = FindMember(_vector3Type, "z");
-            _colliderCenter = FindMember(_boxColliderType, "center");
-            _colliderSize = FindMember(_boxColliderType, "size");
+
+            if (_vector3Type is not null)
+            {
+                _vector3X = FindMember(_vector3Type, "x");
+                _vector3Y = FindMember(_vector3Type, "y");
+                _vector3Z = FindMember(_vector3Type, "z");
+            }
 
             var terrainColumnType = _getColumnMethod?.ReturnType;
             if (terrainColumnType is not null)
@@ -558,18 +591,42 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
                 _terrainCeiling = FindMember(terrainColumnType, "Ceiling");
             }
 
-            if (_terrainSizeProperty is null || _columnCountProperty is null ||
-                _getColumnMethod is null || _verticalStrideProperty is null ||
+            if (_boxColliderType is not null)
+            {
+                _colliderCenter = FindMember(_boxColliderType, "center");
+                _colliderSize = FindMember(_boxColliderType, "size");
+            }
+
+            if (_terrainSizeMember is null || _columnCountMember is null ||
+                _getColumnMethod is null || _verticalStrideMember is null ||
                 _cellToIndexMethod is null || _gridToWorldCenteredMethod is null ||
+                _vector3Type is null || _boxColliderType is null ||
                 _addComponentByTypeMethod is null || _destroyMethod is null ||
                 _vector2X is null || _vector2Y is null ||
                 _vector3X is null || _vector3Y is null || _vector3Z is null ||
                 _terrainFloor is null || _terrainCeiling is null ||
                 _colliderCenter is null || _colliderSize is null)
             {
-                Runtime.Log(
-                    "warning: TimberPhysics terrain merger could not resolve all required members; " +
-                    "leaving vanilla terrain colliders");
+                LogResolutionFailure(
+                    ("TerrainSize", _terrainSizeMember),
+                    ("ColumnCount", _columnCountMember),
+                    ("GetColumn", _getColumnMethod),
+                    ("VerticalStride", _verticalStrideMember),
+                    ("CellToIndex", _cellToIndexMethod),
+                    ("GridToWorldCentered", _gridToWorldCenteredMethod),
+                    ("Vector3", _vector3Type),
+                    ("BoxCollider", _boxColliderType),
+                    ("AddComponent(Type)", _addComponentByTypeMethod),
+                    ("Object.Destroy", _destroyMethod),
+                    ("Vector2.x", _vector2X),
+                    ("Vector2.y", _vector2Y),
+                    ("Vector3.x", _vector3X),
+                    ("Vector3.y", _vector3Y),
+                    ("Vector3.z", _vector3Z),
+                    ("TerrainColumn.Floor", _terrainFloor),
+                    ("TerrainColumn.Ceiling", _terrainCeiling),
+                    ("BoxCollider.center", _colliderCenter),
+                    ("BoxCollider.size", _colliderSize));
                 return;
             }
 
@@ -602,6 +659,48 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
                 $"warning: TimberPhysics terrain merger installation failed: " +
                 $"{ex.GetType().Name}: {ex.Message}; leaving vanilla terrain colliders");
         }
+    }
+
+    private static void LogResolutionFailure(params (string Name, object? Value)[] values)
+    {
+        var missing = values
+            .Where(x => x.Value is null)
+            .Select(x => x.Name)
+            .ToArray();
+
+        Runtime.Log(
+            "warning: TimberPhysics terrain merger could not resolve required members: " +
+            (missing.Length == 0 ? "unknown" : string.Join(", ", missing)) +
+            "; leaving vanilla terrain colliders");
+    }
+
+    private static MethodInfo? FindMethod(
+        Type type,
+        string name,
+        int parameterCount,
+        Func<MethodInfo, bool>? predicate = null)
+    {
+        for (var current = type; current is not null; current = current.BaseType)
+        {
+            var methods = current.GetMethods(
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Instance |
+                BindingFlags.Static |
+                BindingFlags.DeclaredOnly);
+
+            var match = methods.FirstOrDefault(m =>
+                m.Name == name &&
+                m.GetParameters().Length == parameterCount &&
+                (predicate is null || predicate(m)));
+
+            if (match is not null)
+            {
+                return match;
+            }
+        }
+
+        return null;
     }
 
     private static bool SpawnAllPrefix(object __instance)
@@ -658,7 +757,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
         var state = States.GetOrCreateValue(service);
         ClearState(state);
 
-        var terrainSize = _terrainSizeProperty!.GetValue(_mapSizeField!.GetValue(service)!)!;
+        var terrainSize = ReadMember(_mapSizeField!.GetValue(service)!, _terrainSizeMember!)!;
         var sizeX = Convert.ToInt32(ReadMember(terrainSize, _vector2X!));
         var sizeY = Convert.ToInt32(ReadMember(terrainSize, _vector2Y!));
 
@@ -690,7 +789,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
         RemoveChunk(state, ChunkKey(originX, originY));
 
-        var terrainSize = _terrainSizeProperty!.GetValue(_mapSizeField!.GetValue(service)!)!;
+        var terrainSize = ReadMember(_mapSizeField!.GetValue(service)!, _terrainSizeMember!)!;
         var sizeX = Convert.ToInt32(ReadMember(terrainSize, _vector2X!));
         var sizeY = Convert.ToInt32(ReadMember(terrainSize, _vector2Y!));
 
@@ -724,8 +823,8 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
         var columnTerrainMap = _columnTerrainMapField!.GetValue(service)!;
         var mapIndexService = _mapIndexServiceField!.GetValue(service)!;
-        var columnCounts = _columnCountProperty!.GetValue(columnTerrainMap)!;
-        var verticalStride = Convert.ToInt32(_verticalStrideProperty!.GetValue(mapIndexService));
+        var columnCounts = ReadMember(columnTerrainMap, _columnCountMember!)!;
+        var verticalStride = Convert.ToInt32(ReadMember(mapIndexService, _verticalStrideMember!));
 
         var occupancyByInterval = new Dictionary<(float Floor, float Ceiling), bool[,]>();
         var terrainColumns = 0;
