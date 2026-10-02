@@ -820,7 +820,11 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
             _terrainSizeMember = FindMember(mapSizeType, "TerrainSize");
             _columnCountMember = FindMember(columnTerrainMapType, "ColumnCount");
-            _getColumnMethod = FindMethod(columnTerrainMapType, "GetColumn", 1);
+            _getColumnMethod = FindMethod(
+                columnTerrainMapType,
+                "GetColumn",
+                1,
+                m => m.GetParameters()[0].ParameterType == typeof(int));
             _verticalStrideMember = FindMember(mapIndexServiceType, "VerticalStride");
             _cellToIndexMethod = FindMethod(
                 mapIndexServiceType,
@@ -874,6 +878,20 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
             {
                 _terrainFloor = FindMember(terrainColumnType, "Floor");
                 _terrainCeiling = FindMember(terrainColumnType, "Ceiling");
+
+                if (_terrainFloor is null || _terrainCeiling is null)
+                {
+                    var members = terrainColumnType
+                        .GetMembers(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static)
+                        .Select(member => member.Name)
+                        .Distinct()
+                        .OrderBy(name => name)
+                        .Take(64);
+
+                    Runtime.Log(
+                        $"TimberPhysics terrain column diagnostic: type={terrainColumnType.FullName}; " +
+                        $"members=[{string.Join(", ", members)}]");
+                }
             }
 
             if (_boxColliderType is not null)
