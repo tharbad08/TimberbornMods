@@ -17,3 +17,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - TimberPhysics terrain experiment: replaces per-column terrain BoxColliders with conservative greedy merges inside 16x16 chunks. Only cells with exactly matching floor/ceiling intervals are merged; terrain edits rebuild only the affected chunk.
 
 - v1.1.27: hardens the TimberPhysics terrain-merger reflection resolver for the actual v1.1.1.0 DLL layout and logs the exact unresolved member if installation still fails.
+
+- v1.1.28: adds an always-on freeze detector. Frames >=250 ms are logged to optimizer-v11-freezes.log with dispatcher timings, TimberPhysics time, GC deltas, unattributed time, and benchmark top systems when available.
