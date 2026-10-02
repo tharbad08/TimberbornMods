@@ -23,3 +23,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.29: fixes TimberPhysics terrain column Floor/Ceiling resolution when those members are exposed through interfaces or explicit interface implementations.
 
 - v1.1.30: terrain merger now resolves ColumnTerrainMap.GetColumn(int) explicitly and logs the runtime terrain-column type/members if Floor/Ceiling still cannot be resolved.
+
+- v1.1.31: clears optimizer/freeze logs at each game process start; shows inherited/nested throttle ownership in the UI and log; safely patches shared inherited tick methods once while keeping per-concrete-type intervals; unwraps by-ref TerrainColumn returns so terrain collider merging can resolve Floor/Ceiling.
