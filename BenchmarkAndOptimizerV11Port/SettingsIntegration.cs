@@ -171,13 +171,18 @@ public sealed class OptimizerPanel : VisualElement
 
         // Match datvm's TechTree horizontal-scroll pattern: initialize the
         // ScrollView through Timberborn's VisualElementInitializer before use.
+        // Unlike TechTree, this list would otherwise shrink to the viewport, so
+        // give its content a wider minimum width to create real horizontal overflow.
         var scroll = this.AddScrollView().Initialize(veInit);
         scroll.mode = ScrollViewMode.VerticalAndHorizontal;
         scroll.horizontalScrollerVisibility = scroll.verticalScrollerVisibility = ScrollerVisibility.Auto;
         scroll.SetMaxHeight(650);
 
-        _wellKnown = scroll.AddChild();
-        _others = scroll.AddChild();
+        var scrollContent = scroll.AddChild()
+            .SetMinSize(1200f, null);
+
+        _wellKnown = scrollContent.AddChild();
+        _others = scrollContent.AddChild();
 
         Rebuild();
     }
@@ -236,16 +241,25 @@ public sealed class OptimizerPanel : VisualElement
         item.AddGameLabel($"{typeName}    [{origin}]")
             .SetMarginBottom(3);
 
-        var slider = item.AddSliderInt(
-            label: TickIntervalLabel(current),
-            values: new SliderValues<int>(1, 50, current));
+        // Keep the interval text outside BaseSlider's fixed-width label area.
+        // Otherwise Timberborn clips the label and the slider thumb overlaps it.
+        var intervalRow = item.AddRow()
+            .AlignItems(Align.Center);
+
+        var intervalLabel = intervalRow.AddGameLabel(TickIntervalLabel(current))
+            .SetMinSize(125f, null)
+            .SetMarginRight(10f);
+
+        var slider = intervalRow.AddSliderInt(
+                values: new SliderValues<int>(1, 50, current))
+            .SetFlexGrow()
+            .SetMinSize(700f, null);
 
         slider.RegisterChange(v =>
         {
-            slider.SetLabel(TickIntervalLabel(v));
+            intervalLabel.text = TickIntervalLabel(v);
             Runtime.SetInterval(typeName, v);
         });
-        slider.SetWidthPercent(100);
     }
 
     static string TickIntervalLabel(int value) => $"Tick interval - 1/{value}";
