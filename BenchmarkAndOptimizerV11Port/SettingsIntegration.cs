@@ -247,6 +247,13 @@ public sealed class OptimizerPanel : VisualElement
         item.AddGameLabel($"{typeName}    [{origin}]")
             .SetMarginBottom(3);
 
+        var ownershipNote = Runtime.GetThrottleOwnershipNote(typeName);
+        if (!string.IsNullOrWhiteSpace(ownershipNote))
+        {
+            item.AddGameLabel(ownershipNote)
+                .SetMarginBottom(3);
+        }
+
         // Keep the interval text outside BaseSlider's fixed-width label area.
         // Otherwise Timberborn clips the label and the slider thumb overlaps it.
         var intervalRow = item.AddRow()
