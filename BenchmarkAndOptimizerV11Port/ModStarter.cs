@@ -148,8 +148,172 @@ internal static class FreezeDetectorPatcher
             Runtime.Log($"freeze detector patch installed: {target.TypeName}.{target.MethodName}");
         }
 
+        PatchTickSingletonMethods();
+
         _patched = true;
         FreezeDetector.Initialize();
+    }
+
+    private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
+    private static readonly HashSet<MethodBase> TickSingletonMethods = new();
+
+    private struct TickSingletonSample
+    {
+        public bool Active;
+        public long Started;
+        public string? TypeName;
+    }
+
+    private static void PatchTickSingletonMethods()
+    {
+        var tickInterface = AccessTools.TypeByName("Timberborn.TickSystem.ITickableSingleton");
+        if (tickInterface is null)
+        {
+            Runtime.Log("warning: always-on TickSingleton freeze profiler unavailable: ITickableSingleton not found");
+            return;
+        }
+
+        var interfaceTick = tickInterface
+            .GetMethods()
+            .FirstOrDefault(method => method.Name == "Tick" && method.GetParameters().Length == 0);
+
+        if (interfaceTick is null)
+        {
+            Runtime.Log("warning: always-on TickSingleton freeze profiler unavailable: ITickableSingleton.Tick not found");
+            return;
+        }
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types = ex.Types.Where(type => type is not null).Cast<Type>().ToArray();
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var type in types)
+            {
+                if (type.IsAbstract || type.IsInterface || !tickInterface.IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                MethodInfo? target = null;
+                try
+                {
+                    var map = type.GetInterfaceMap(tickInterface);
+                    for (var i = 0; i < map.InterfaceMethods.Length; i++)
+                    {
+                        if (map.InterfaceMethods[i].Name == interfaceTick.Name &&
+                            map.InterfaceMethods[i].GetParameters().Length == 0)
+                        {
+                            target = map.TargetMethods[i];
+                            break;
+                        }
+                    }
+                }
+                catch
+                {
+                    // Some generated/runtime types cannot expose an interface map.
+                }
+
+                target ??= AccessTools.Method(type, "Tick", Type.EmptyTypes);
+                if (target is null || target.ReturnType != typeof(void))
+                {
+                    continue;
+                }
+
+                var declaringType = target.DeclaringType;
+                if (declaringType is not null && target.ReflectedType != declaringType)
+                {
+                    var declared = AccessTools.DeclaredMethod(
+                        declaringType,
+                        target.Name,
+                        target.GetParameters().Select(parameter => parameter.ParameterType).ToArray());
+                    if (declared is not null)
+                    {
+                        target = declared;
+                    }
+                }
+
+                TickSingletonRuntimeTypes.Add(type);
+                if (!TickSingletonMethods.Add(target))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    FreezeHarmony.Patch(
+                        target,
+                        prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(FreezeDetectorPatcher), nameof(TickSingletonPrefix)))
+                        {
+                            priority = 900
+                        },
+                        finalizer: new HarmonyMethod(
+                            AccessTools.Method(typeof(FreezeDetectorPatcher), nameof(TickSingletonFinalizer)))
+                        {
+                            priority = Priority.Last
+                        });
+                }
+                catch (Exception ex)
+                {
+                    TickSingletonMethods.Remove(target);
+                    Runtime.Log(
+                        $"warning: TickSingleton freeze profiler could not patch " +
+                        $"{declaringType?.FullName ?? type.FullName}.{target.Name}: " +
+                        $"{ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"always-on TickSingleton freeze profiler installed: " +
+            $"{TickSingletonRuntimeTypes.Count} concrete type(s), " +
+            $"{TickSingletonMethods.Count} effective method(s)");
+    }
+
+    private static void TickSingletonPrefix(object __instance, out TickSingletonSample __state)
+    {
+        __state = default;
+
+        if (Runtime.IsBenchmarking || __instance is null)
+        {
+            return;
+        }
+
+        var runtimeType = __instance.GetType();
+        if (!TickSingletonRuntimeTypes.Contains(runtimeType))
+        {
+            return;
+        }
+
+        __state.Active = true;
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
+    }
+
+    private static Exception? TickSingletonFinalizer(
+        Exception? __exception,
+        TickSingletonSample __state)
+    {
+        if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
+        {
+            FreezeDetector.RecordTickSingleton(
+                __state.TypeName,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+        }
+
+        return __exception;
     }
 
     private static void FrameBoundaryPrefix(out long __state)
@@ -192,6 +356,7 @@ internal static class FreezeDetector
     private static readonly object Gate = new();
     private static readonly Dictionary<string, long> SectionTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SystemTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> TickSingletonTicks = new(StringComparer.Ordinal);
 
     private static bool _initialized;
     private static long _frameStartTicks;
@@ -217,6 +382,7 @@ internal static class FreezeDetector
             _gc2 = GC.CollectionCount(2);
             SectionTicks.Clear();
             SystemTicks.Clear();
+            TickSingletonTicks.Clear();
         }
 
         Runtime.Log(
@@ -263,6 +429,7 @@ internal static class FreezeDetector
             _frameStartTicks = now;
             SectionTicks.Clear();
             SystemTicks.Clear();
+            TickSingletonTicks.Clear();
         }
 
         if (freezeLine is not null)
@@ -309,6 +476,25 @@ internal static class FreezeDetector
         }
     }
 
+    public static void RecordTickSingleton(string name, long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            TickSingletonTicks.TryGetValue(name, out var existing);
+            TickSingletonTicks[name] = existing + elapsedTicks;
+        }
+    }
+
     private static string BuildFreezeLine(
         double elapsedMs,
         int gc0Delta,
@@ -341,6 +527,16 @@ internal static class FreezeDetector
             ? "none (run benchmark for per-system detail)"
             : string.Join(", ", topSystems);
 
+        var topTickSingletons = TickSingletonTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+
+        var topTickText = topTickSingletons.Length == 0
+            ? "none"
+            : string.Join(", ", topTickSingletons);
+
         return
             $"{severity} frame={_frameNumber} elapsed={elapsedMs:F1}ms; " +
             $"dispatch: UpdateSingletons={ToMs(updateTicks):F1}ms, " +
@@ -349,6 +545,7 @@ internal static class FreezeDetector
             $"unattributed={ToMs(unattributedTicks):F1}ms; " +
             $"physics={ToMs(physicsTicks):F1}ms; " +
             $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
+            $"top tick singletons: {topTickText}; " +
             $"top systems: {topText}";
     }
 
