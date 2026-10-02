@@ -445,6 +445,547 @@ internal static class TimberPhysicsCatchUpLimiterPatcher
     }
 }
 
+
+internal static class TimberPhysicsTerrainColliderMergerPatcher
+{
+    private const string ServiceTypeName = "TimberPhysics.Terrain.TerrainColliderService";
+    private const string CoordinateSystemTypeName = "Timberborn.Coordinates.CoordinateSystem";
+    private const string Vector2IntTypeName = "UnityEngine.Vector2Int";
+    private const string Vector3TypeName = "UnityEngine.Vector3";
+    private const string BoxColliderTypeName = "UnityEngine.BoxCollider";
+    private const string UnityObjectTypeName = "UnityEngine.Object";
+    private const int ChunkSize = 16;
+
+    private static readonly ConditionalWeakTable<object, TerrainState> States = new();
+
+    private static bool _patched;
+    private static Type? _serviceType;
+    private static Type? _vector2IntType;
+    private static Type? _vector3Type;
+    private static Type? _boxColliderType;
+    private static FieldInfo? _rootObjectField;
+    private static FieldInfo? _columnTerrainMapField;
+    private static FieldInfo? _mapSizeField;
+    private static FieldInfo? _mapIndexServiceField;
+    private static PropertyInfo? _terrainSizeProperty;
+    private static PropertyInfo? _columnCountProperty;
+    private static MethodInfo? _getColumnMethod;
+    private static PropertyInfo? _verticalStrideProperty;
+    private static MethodInfo? _cellToIndexMethod;
+    private static MethodInfo? _gridToWorldCenteredMethod;
+    private static MethodInfo? _addComponentByTypeMethod;
+    private static MethodInfo? _destroyMethod;
+    private static MemberInfo? _vector2X;
+    private static MemberInfo? _vector2Y;
+    private static MemberInfo? _vector3X;
+    private static MemberInfo? _vector3Y;
+    private static MemberInfo? _vector3Z;
+    private static MemberInfo? _terrainFloor;
+    private static MemberInfo? _terrainCeiling;
+    private static MemberInfo? _colliderCenter;
+    private static MemberInfo? _colliderSize;
+
+    public static void Patch(Harmony harmony)
+    {
+        if (_patched)
+        {
+            return;
+        }
+
+        try
+        {
+            _serviceType = AccessTools.TypeByName(ServiceTypeName);
+            _vector2IntType = AccessTools.TypeByName(Vector2IntTypeName);
+            _vector3Type = AccessTools.TypeByName(Vector3TypeName);
+            _boxColliderType = AccessTools.TypeByName(BoxColliderTypeName);
+            var coordinateSystemType = AccessTools.TypeByName(CoordinateSystemTypeName);
+            var unityObjectType = AccessTools.TypeByName(UnityObjectTypeName);
+
+            if (_serviceType is null || _vector2IntType is null || _vector3Type is null ||
+                _boxColliderType is null || coordinateSystemType is null || unityObjectType is null)
+            {
+                Runtime.Log("TimberPhysics terrain merger not installed: required types are not loaded");
+                return;
+            }
+
+            _rootObjectField = AccessTools.Field(_serviceType, "_rootObject");
+            _columnTerrainMapField = AccessTools.Field(_serviceType, "_columnTerrainMap");
+            _mapSizeField = AccessTools.Field(_serviceType, "_mapSize");
+            _mapIndexServiceField = AccessTools.Field(_serviceType, "_mapIndexService");
+
+            var spawnAll = AccessTools.Method(_serviceType, "SpawnColliders", Type.EmptyTypes);
+            var spawnXY = AccessTools.Method(_serviceType, "SpawnCollidersXY", new[] { _vector2IntType });
+            var removeXY = AccessTools.Method(_serviceType, "RemoveCollidersXY", new[] { _vector2IntType });
+
+            if (_rootObjectField is null || _columnTerrainMapField is null ||
+                _mapSizeField is null || _mapIndexServiceField is null ||
+                spawnAll is null || spawnXY is null || removeXY is null)
+            {
+                Runtime.Log(
+                    "warning: TimberPhysics terrain merger unavailable; " +
+                    "TerrainColliderService does not match expected v1.1.1.0 layout");
+                return;
+            }
+
+            var mapSizeType = _mapSizeField.FieldType;
+            var columnTerrainMapType = _columnTerrainMapField.FieldType;
+            var mapIndexServiceType = _mapIndexServiceField.FieldType;
+
+            _terrainSizeProperty = AccessTools.Property(mapSizeType, "TerrainSize");
+            _columnCountProperty = AccessTools.Property(columnTerrainMapType, "ColumnCount");
+            _getColumnMethod = AccessTools.Method(columnTerrainMapType, "GetColumn", new[] { typeof(int) });
+            _verticalStrideProperty = AccessTools.Property(mapIndexServiceType, "VerticalStride");
+            _cellToIndexMethod = AccessTools.Method(mapIndexServiceType, "CellToIndex", new[] { _vector2IntType });
+            _gridToWorldCenteredMethod = AccessTools.Method(
+                coordinateSystemType, "GridToWorldCentered", new[] { _vector3Type });
+
+            var gameObjectType = _rootObjectField.FieldType;
+            _addComponentByTypeMethod = AccessTools.Method(gameObjectType, "AddComponent", new[] { typeof(Type) });
+            _destroyMethod = AccessTools.Method(unityObjectType, "Destroy", new[] { unityObjectType });
+
+            _vector2X = FindMember(_vector2IntType, "x");
+            _vector2Y = FindMember(_vector2IntType, "y");
+            _vector3X = FindMember(_vector3Type, "x");
+            _vector3Y = FindMember(_vector3Type, "y");
+            _vector3Z = FindMember(_vector3Type, "z");
+            _colliderCenter = FindMember(_boxColliderType, "center");
+            _colliderSize = FindMember(_boxColliderType, "size");
+
+            var terrainColumnType = _getColumnMethod?.ReturnType;
+            if (terrainColumnType is not null)
+            {
+                _terrainFloor = FindMember(terrainColumnType, "Floor");
+                _terrainCeiling = FindMember(terrainColumnType, "Ceiling");
+            }
+
+            if (_terrainSizeProperty is null || _columnCountProperty is null ||
+                _getColumnMethod is null || _verticalStrideProperty is null ||
+                _cellToIndexMethod is null || _gridToWorldCenteredMethod is null ||
+                _addComponentByTypeMethod is null || _destroyMethod is null ||
+                _vector2X is null || _vector2Y is null ||
+                _vector3X is null || _vector3Y is null || _vector3Z is null ||
+                _terrainFloor is null || _terrainCeiling is null ||
+                _colliderCenter is null || _colliderSize is null)
+            {
+                Runtime.Log(
+                    "warning: TimberPhysics terrain merger could not resolve all required members; " +
+                    "leaving vanilla terrain colliders");
+                return;
+            }
+
+            harmony.Patch(
+                spawnAll,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(typeof(TimberPhysicsTerrainColliderMergerPatcher), nameof(SpawnAllPrefix)))
+                { priority = Priority.First });
+
+            harmony.Patch(
+                spawnXY,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(typeof(TimberPhysicsTerrainColliderMergerPatcher), nameof(SpawnXYPrefix)))
+                { priority = Priority.First });
+
+            harmony.Patch(
+                removeXY,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(typeof(TimberPhysicsTerrainColliderMergerPatcher), nameof(RemoveXYPrefix)))
+                { priority = Priority.First });
+
+            _patched = true;
+            Runtime.Log(
+                $"TimberPhysics terrain collider merger installed: {ChunkSize}x{ChunkSize} chunks, " +
+                "exact floor/ceiling interval merging");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: TimberPhysics terrain merger installation failed: " +
+                $"{ex.GetType().Name}: {ex.Message}; leaving vanilla terrain colliders");
+        }
+    }
+
+    private static bool SpawnAllPrefix(object __instance)
+    {
+        try
+        {
+            BuildAll(__instance);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: TimberPhysics merged terrain initial build failed: " +
+                $"{ex.GetType().Name}: {ex.Message}; falling back to vanilla terrain colliders");
+            States.Remove(__instance);
+            return true;
+        }
+    }
+
+    private static bool SpawnXYPrefix(object __instance, object __0)
+    {
+        try
+        {
+            RebuildChunk(__instance, __0);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: TimberPhysics merged terrain chunk rebuild failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+            return true;
+        }
+    }
+
+    private static bool RemoveXYPrefix(object __instance, object __0)
+    {
+        try
+        {
+            RemoveChunkForCoordinates(__instance, __0);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: TimberPhysics merged terrain chunk removal failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+            return true;
+        }
+    }
+
+    private static void BuildAll(object service)
+    {
+        var state = States.GetOrCreateValue(service);
+        ClearState(state);
+
+        var terrainSize = _terrainSizeProperty!.GetValue(_mapSizeField!.GetValue(service)!)!;
+        var sizeX = Convert.ToInt32(ReadMember(terrainSize, _vector2X!));
+        var sizeY = Convert.ToInt32(ReadMember(terrainSize, _vector2Y!));
+
+        var before = 0L;
+        var after = 0L;
+
+        for (var y = 0; y < sizeY; y += ChunkSize)
+        {
+            for (var x = 0; x < sizeX; x += ChunkSize)
+            {
+                var counts = BuildChunk(service, state, x, y, sizeX, sizeY);
+                before += counts.Cells;
+                after += counts.Colliders;
+            }
+        }
+
+        Runtime.Log(
+            $"TimberPhysics terrain merge complete: terrain columns={before}, " +
+            $"merged colliders={after}, reduction={(before == 0 ? 0 : 100.0 * (before - after) / before):F1}%");
+    }
+
+    private static void RebuildChunk(object service, object coordinates)
+    {
+        var state = States.GetOrCreateValue(service);
+        var x = Convert.ToInt32(ReadMember(coordinates, _vector2X!));
+        var y = Convert.ToInt32(ReadMember(coordinates, _vector2Y!));
+        var originX = x / ChunkSize * ChunkSize;
+        var originY = y / ChunkSize * ChunkSize;
+
+        RemoveChunk(state, ChunkKey(originX, originY));
+
+        var terrainSize = _terrainSizeProperty!.GetValue(_mapSizeField!.GetValue(service)!)!;
+        var sizeX = Convert.ToInt32(ReadMember(terrainSize, _vector2X!));
+        var sizeY = Convert.ToInt32(ReadMember(terrainSize, _vector2Y!));
+
+        BuildChunk(service, state, originX, originY, sizeX, sizeY);
+    }
+
+    private static void RemoveChunkForCoordinates(object service, object coordinates)
+    {
+        var state = States.GetOrCreateValue(service);
+        var x = Convert.ToInt32(ReadMember(coordinates, _vector2X!));
+        var y = Convert.ToInt32(ReadMember(coordinates, _vector2Y!));
+        var originX = x / ChunkSize * ChunkSize;
+        var originY = y / ChunkSize * ChunkSize;
+        RemoveChunk(state, ChunkKey(originX, originY));
+    }
+
+    private static (int Cells, int Colliders) BuildChunk(
+        object service,
+        TerrainState state,
+        int originX,
+        int originY,
+        int mapSizeX,
+        int mapSizeY)
+    {
+        var width = Math.Min(ChunkSize, mapSizeX - originX);
+        var height = Math.Min(ChunkSize, mapSizeY - originY);
+        if (width <= 0 || height <= 0)
+        {
+            return (0, 0);
+        }
+
+        var columnTerrainMap = _columnTerrainMapField!.GetValue(service)!;
+        var mapIndexService = _mapIndexServiceField!.GetValue(service)!;
+        var columnCounts = _columnCountProperty!.GetValue(columnTerrainMap)!;
+        var verticalStride = Convert.ToInt32(_verticalStrideProperty!.GetValue(mapIndexService));
+
+        var occupancyByInterval = new Dictionary<(float Floor, float Ceiling), bool[,]>();
+        var terrainColumns = 0;
+
+        for (var localY = 0; localY < height; localY++)
+        {
+            for (var localX = 0; localX < width; localX++)
+            {
+                var coordinates = CreateVector2Int(originX + localX, originY + localY);
+                var cellIndex = Convert.ToInt32(
+                    _cellToIndexMethod!.Invoke(mapIndexService, new[] { coordinates }));
+                var columnCount = ReadIndexedInt(columnCounts, cellIndex);
+
+                for (var i = 0; i < columnCount; i++)
+                {
+                    var index3D = cellIndex + i * verticalStride;
+                    var terrainColumn = _getColumnMethod!.Invoke(columnTerrainMap, new object[] { index3D })!;
+                    var floor = Convert.ToSingle(ReadMember(terrainColumn, _terrainFloor!));
+                    var ceiling = Convert.ToSingle(ReadMember(terrainColumn, _terrainCeiling!));
+
+                    if (ceiling <= floor)
+                    {
+                        continue;
+                    }
+
+                    terrainColumns++;
+                    var key = (floor, ceiling);
+                    if (!occupancyByInterval.TryGetValue(key, out var occupancy))
+                    {
+                        occupancy = new bool[width, height];
+                        occupancyByInterval.Add(key, occupancy);
+                    }
+
+                    occupancy[localX, localY] = true;
+                }
+            }
+        }
+
+        var colliders = new List<object>();
+        foreach (var pair in occupancyByInterval)
+        {
+            MergeInterval(
+                service,
+                originX,
+                originY,
+                pair.Key.Floor,
+                pair.Key.Ceiling,
+                pair.Value,
+                colliders);
+        }
+
+        state.Chunks[ChunkKey(originX, originY)] = colliders;
+        return (terrainColumns, colliders.Count);
+    }
+
+    private static void MergeInterval(
+        object service,
+        int originX,
+        int originY,
+        float floor,
+        float ceiling,
+        bool[,] occupancy,
+        List<object> colliders)
+    {
+        var width = occupancy.GetLength(0);
+        var height = occupancy.GetLength(1);
+        var consumed = new bool[width, height];
+
+        for (var localY = 0; localY < height; localY++)
+        {
+            for (var localX = 0; localX < width; localX++)
+            {
+                if (!occupancy[localX, localY] || consumed[localX, localY])
+                {
+                    continue;
+                }
+
+                var runWidth = 1;
+                while (localX + runWidth < width &&
+                       occupancy[localX + runWidth, localY] &&
+                       !consumed[localX + runWidth, localY])
+                {
+                    runWidth++;
+                }
+
+                var runHeight = 1;
+                var canGrow = true;
+                while (localY + runHeight < height && canGrow)
+                {
+                    for (var x = 0; x < runWidth; x++)
+                    {
+                        if (!occupancy[localX + x, localY + runHeight] ||
+                            consumed[localX + x, localY + runHeight])
+                        {
+                            canGrow = false;
+                            break;
+                        }
+                    }
+
+                    if (canGrow)
+                    {
+                        runHeight++;
+                    }
+                }
+
+                for (var y = 0; y < runHeight; y++)
+                {
+                    for (var x = 0; x < runWidth; x++)
+                    {
+                        consumed[localX + x, localY + y] = true;
+                    }
+                }
+
+                colliders.Add(SpawnMergedCollider(
+                    service,
+                    originX + localX,
+                    originY + localY,
+                    runWidth,
+                    runHeight,
+                    floor,
+                    ceiling));
+            }
+        }
+    }
+
+    private static object SpawnMergedCollider(
+        object service,
+        int startX,
+        int startY,
+        int width,
+        int height,
+        float floor,
+        float ceiling)
+    {
+        var first = _gridToWorldCenteredMethod!.Invoke(
+            null,
+            new[] { CreateVector3(startX, startY, floor) })!;
+        var last = _gridToWorldCenteredMethod.Invoke(
+            null,
+            new[] { CreateVector3(startX + width - 1, startY + height - 1, floor) })!;
+
+        var firstX = Convert.ToSingle(ReadMember(first, _vector3X!));
+        var firstY = Convert.ToSingle(ReadMember(first, _vector3Y!));
+        var firstZ = Convert.ToSingle(ReadMember(first, _vector3Z!));
+        var lastX = Convert.ToSingle(ReadMember(last, _vector3X!));
+        var lastZ = Convert.ToSingle(ReadMember(last, _vector3Z!));
+
+        var colliderHeight = ceiling - floor;
+        var center = CreateVector3(
+            (firstX + lastX) / 2f,
+            firstY + colliderHeight / 2f,
+            (firstZ + lastZ) / 2f);
+        var size = CreateVector3(
+            Math.Abs(lastX - firstX) + 1f,
+            colliderHeight,
+            Math.Abs(lastZ - firstZ) + 1f);
+
+        var rootObject = _rootObjectField!.GetValue(service)!;
+        var collider = _addComponentByTypeMethod!.Invoke(
+            rootObject,
+            new object[] { _boxColliderType! })!;
+
+        WriteMember(collider, _colliderCenter!, center);
+        WriteMember(collider, _colliderSize!, size);
+        return collider;
+    }
+
+    private static int ReadIndexedInt(object collection, int index)
+    {
+        if (collection is Array array)
+        {
+            return Convert.ToInt32(array.GetValue(index));
+        }
+
+        if (collection is IList list)
+        {
+            return Convert.ToInt32(list[index]);
+        }
+
+        var item = AccessTools.Property(collection.GetType(), "Item");
+        if (item is not null)
+        {
+            return Convert.ToInt32(item.GetValue(collection, new object[] { index }));
+        }
+
+        throw new InvalidOperationException(
+            $"Unsupported ColumnCount collection type: {collection.GetType().FullName}");
+    }
+
+    private static object CreateVector2Int(int x, int y) =>
+        Activator.CreateInstance(_vector2IntType!, new object[] { x, y })!;
+
+    private static object CreateVector3(float x, float y, float z) =>
+        Activator.CreateInstance(_vector3Type!, new object[] { x, y, z })!;
+
+    private static MemberInfo? FindMember(Type type, string name) =>
+        (MemberInfo?)AccessTools.Field(type, name) ?? AccessTools.Property(type, name);
+
+    private static object? ReadMember(object instance, MemberInfo member) =>
+        member switch
+        {
+            FieldInfo field => field.GetValue(instance),
+            PropertyInfo property => property.GetValue(instance),
+            _ => throw new InvalidOperationException($"Unsupported member: {member}")
+        };
+
+    private static void WriteMember(object instance, MemberInfo member, object value)
+    {
+        switch (member)
+        {
+            case FieldInfo field:
+                field.SetValue(instance, value);
+                break;
+            case PropertyInfo property:
+                property.SetValue(instance, value);
+                break;
+            default:
+                throw new InvalidOperationException($"Unsupported member: {member}");
+        }
+    }
+
+    private static long ChunkKey(int x, int y) =>
+        ((long)x << 32) | (uint)y;
+
+    private static void ClearState(TerrainState state)
+    {
+        foreach (var key in state.Chunks.Keys.ToArray())
+        {
+            RemoveChunk(state, key);
+        }
+    }
+
+    private static void RemoveChunk(TerrainState state, long key)
+    {
+        if (!state.Chunks.TryGetValue(key, out var colliders))
+        {
+            return;
+        }
+
+        foreach (var collider in colliders)
+        {
+            try
+            {
+                _destroyMethod!.Invoke(null, new[] { collider });
+            }
+            catch
+            {
+                // A destroyed collider should not prevent rebuilding the rest.
+            }
+        }
+
+        state.Chunks.Remove(key);
+    }
+
+    private sealed class TerrainState
+    {
+        public Dictionary<long, List<object>> Chunks { get; } = new();
+    }
+}
+
 internal static class Runtime
 {
     private static readonly object Sync = new();
@@ -659,6 +1200,7 @@ internal static class Runtime
         _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
         TimberPhysicsCatchUpLimiterPatcher.Patch(harmony);
+        TimberPhysicsTerrainColliderMergerPatcher.Patch(harmony);
         DiscoverLoadedOptimizableTypes();
         RefreshDirectThrottlePatches();
     }
