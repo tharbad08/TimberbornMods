@@ -1305,8 +1305,81 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
     private static object CreateVector3(float x, float y, float z) =>
         Activator.CreateInstance(_vector3Type!, new object[] { x, y, z })!;
 
-    private static MemberInfo? FindMember(Type type, string name) =>
-        (MemberInfo?)AccessTools.Field(type, name) ?? AccessTools.Property(type, name);
+    private static MemberInfo? FindMember(Type type, string name)
+    {
+        // AccessTools handles ordinary inherited fields/properties. Timberborn 1.1
+        // also exposes some terrain-column members through interfaces, and explicit
+        // interface implementations are not necessarily discoverable by the simple
+        // AccessTools.Property(type, "Floor") lookup.
+        var direct = (MemberInfo?)AccessTools.Field(type, name) ?? AccessTools.Property(type, name);
+        if (direct is not null)
+        {
+            return direct;
+        }
+
+        for (var current = type; current is not null; current = current.BaseType)
+        {
+            const BindingFlags flags =
+                BindingFlags.Public |
+                BindingFlags.NonPublic |
+                BindingFlags.Instance |
+                BindingFlags.Static |
+                BindingFlags.DeclaredOnly;
+
+            foreach (var field in current.GetFields(flags))
+            {
+                if (MemberNameMatches(field.Name, name))
+                {
+                    return field;
+                }
+            }
+
+            foreach (var property in current.GetProperties(flags))
+            {
+                if (MemberNameMatches(property.Name, name))
+                {
+                    return property;
+                }
+            }
+        }
+
+        foreach (var iface in type.GetInterfaces())
+        {
+            var field = AccessTools.Field(iface, name);
+            if (field is not null)
+            {
+                return field;
+            }
+
+            var property = AccessTools.Property(iface, name);
+            if (property is not null)
+            {
+                return property;
+            }
+
+            foreach (var candidate in iface.GetProperties())
+            {
+                if (MemberNameMatches(candidate.Name, name))
+                {
+                    return candidate;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool MemberNameMatches(string actualName, string wantedName)
+    {
+        if (string.Equals(actualName, wantedName, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        var separator = actualName.LastIndexOf('.');
+        return separator >= 0 &&
+               string.Equals(actualName[(separator + 1)..], wantedName, StringComparison.Ordinal);
+    }
 
     private static object? ReadMember(object instance, MemberInfo member) =>
         member switch
