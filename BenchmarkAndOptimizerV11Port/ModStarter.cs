@@ -94,6 +94,280 @@ internal static class DispatcherPatcher
 }
 
 
+
+internal static class FreezeDetectorPatcher
+{
+    private static readonly Harmony FreezeHarmony = new("shay.BenchmarkAndOptimizerV11.FreezeDetector");
+    private static bool _patched;
+
+    private sealed record Target(string TypeName, string MethodName, string SectionName, bool FrameBoundary);
+
+    private static readonly Target[] Targets =
+    {
+        new("Timberborn.SingletonSystem.SingletonLifecycleService", "UpdateSingletons", "UpdateSingletons", true),
+        new("Timberborn.SingletonSystem.SingletonLifecycleService", "LateUpdateSingletons", "LateUpdateSingletons", false),
+        new("Timberborn.TickSystem.TickableSingletonService", "TickSingletons", "TickSingletons", false),
+    };
+
+    public static void Patch()
+    {
+        if (_patched)
+        {
+            return;
+        }
+
+        foreach (var target in Targets)
+        {
+            var type = AccessTools.TypeByName(target.TypeName);
+            var original = type is null ? null : AccessTools.Method(type, target.MethodName);
+            if (original is null)
+            {
+                Runtime.Log($"warning: freeze detector target not found: {target.TypeName}.{target.MethodName}");
+                continue;
+            }
+
+            var prefixName = target.FrameBoundary
+                ? nameof(FrameBoundaryPrefix)
+                : nameof(SectionPrefix);
+
+            var postfixName = target.FrameBoundary
+                ? nameof(UpdateSingletonsPostfix)
+                : nameof(SectionPostfix);
+
+            FreezeHarmony.Patch(
+                original,
+                prefix: new HarmonyMethod(AccessTools.Method(typeof(FreezeDetectorPatcher), prefixName))
+                {
+                    priority = Priority.First
+                },
+                postfix: new HarmonyMethod(AccessTools.Method(typeof(FreezeDetectorPatcher), postfixName))
+                {
+                    priority = Priority.Last
+                });
+
+            Runtime.Log($"freeze detector patch installed: {target.TypeName}.{target.MethodName}");
+        }
+
+        _patched = true;
+        FreezeDetector.Initialize();
+    }
+
+    private static void FrameBoundaryPrefix(out long __state)
+    {
+        FreezeDetector.FrameBoundary();
+        __state = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    private static void UpdateSingletonsPostfix(long __state)
+    {
+        FreezeDetector.RecordSection(
+            "UpdateSingletons",
+            System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+    }
+
+    private static void SectionPrefix(out long __state)
+    {
+        __state = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    private static void SectionPostfix(long __state, MethodBase __originalMethod)
+    {
+        var section = __originalMethod.Name == "LateUpdateSingletons"
+            ? "LateUpdateSingletons"
+            : "TickSingletons";
+
+        FreezeDetector.RecordSection(
+            section,
+            System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+    }
+}
+
+internal static class FreezeDetector
+{
+    private const double SlowFrameMs = 250.0;
+    private const double SevereFrameMs = 500.0;
+    private const double FreezeFrameMs = 1000.0;
+    private const int TopSystemCount = 8;
+
+    private static readonly object Gate = new();
+    private static readonly Dictionary<string, long> SectionTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> SystemTicks = new(StringComparer.Ordinal);
+
+    private static bool _initialized;
+    private static long _frameStartTicks;
+    private static long _frameNumber;
+    private static int _gc0;
+    private static int _gc1;
+    private static int _gc2;
+
+    public static void Initialize()
+    {
+        lock (Gate)
+        {
+            if (_initialized)
+            {
+                return;
+            }
+
+            _initialized = true;
+            _frameStartTicks = 0;
+            _frameNumber = 0;
+            _gc0 = GC.CollectionCount(0);
+            _gc1 = GC.CollectionCount(1);
+            _gc2 = GC.CollectionCount(2);
+            SectionTicks.Clear();
+            SystemTicks.Clear();
+        }
+
+        Runtime.Log(
+            $"freeze detector enabled: slow>={SlowFrameMs:F0}ms, " +
+            $"severe>={SevereFrameMs:F0}ms, freeze>={FreezeFrameMs:F0}ms");
+    }
+
+    public static void FrameBoundary()
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        string? freezeLine = null;
+
+        lock (Gate)
+        {
+            if (!_initialized)
+            {
+                return;
+            }
+
+            if (_frameStartTicks != 0)
+            {
+                var elapsedTicks = now - _frameStartTicks;
+                var elapsedMs = ToMs(elapsedTicks);
+
+                var nextGc0 = GC.CollectionCount(0);
+                var nextGc1 = GC.CollectionCount(1);
+                var nextGc2 = GC.CollectionCount(2);
+
+                if (elapsedMs >= SlowFrameMs)
+                {
+                    freezeLine = BuildFreezeLine(
+                        elapsedMs,
+                        nextGc0 - _gc0,
+                        nextGc1 - _gc1,
+                        nextGc2 - _gc2);
+                }
+
+                _gc0 = nextGc0;
+                _gc1 = nextGc1;
+                _gc2 = nextGc2;
+            }
+
+            _frameNumber++;
+            _frameStartTicks = now;
+            SectionTicks.Clear();
+            SystemTicks.Clear();
+        }
+
+        if (freezeLine is not null)
+        {
+            Runtime.LogFreeze(freezeLine);
+        }
+    }
+
+    public static void RecordSection(string name, long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            SectionTicks.TryGetValue(name, out var existing);
+            SectionTicks[name] = existing + elapsedTicks;
+        }
+    }
+
+    public static void RecordSystem(string name, long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            SystemTicks.TryGetValue(name, out var existing);
+            SystemTicks[name] = existing + elapsedTicks;
+        }
+    }
+
+    private static string BuildFreezeLine(
+        double elapsedMs,
+        int gc0Delta,
+        int gc1Delta,
+        int gc2Delta)
+    {
+        var severity = elapsedMs >= FreezeFrameMs
+            ? "FREEZE"
+            : elapsedMs >= SevereFrameMs
+                ? "SEVERE"
+                : "SLOW";
+
+        SectionTicks.TryGetValue("UpdateSingletons", out var updateTicks);
+        SectionTicks.TryGetValue("LateUpdateSingletons", out var lateTicks);
+        SectionTicks.TryGetValue("TickSingletons", out var tickTicks);
+        SystemTicks.TryGetValue("TimberPhysics.Core.PhysicsSimulator", out var physicsTicks);
+
+        var dispatcherTicks = updateTicks + lateTicks + tickTicks;
+        var unattributedTicks = Math.Max(
+            0,
+            (long)(elapsedMs * System.Diagnostics.Stopwatch.Frequency / 1000.0) - dispatcherTicks);
+
+        var topSystems = SystemTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+
+        var topText = topSystems.Length == 0
+            ? "none (run benchmark for per-system detail)"
+            : string.Join(", ", topSystems);
+
+        return
+            $"{severity} frame={_frameNumber} elapsed={elapsedMs:F1}ms; " +
+            $"dispatch: UpdateSingletons={ToMs(updateTicks):F1}ms, " +
+            $"LateUpdateSingletons={ToMs(lateTicks):F1}ms, " +
+            $"TickSingletons={ToMs(tickTicks):F1}ms, " +
+            $"unattributed={ToMs(unattributedTicks):F1}ms; " +
+            $"physics={ToMs(physicsTicks):F1}ms; " +
+            $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
+            $"top systems: {topText}";
+    }
+
+    private static string ShortName(string value)
+    {
+        const string timberPrefix = "TimberPhysics.Core.PhysicsSimulator::";
+        if (value.StartsWith(timberPrefix, StringComparison.Ordinal))
+        {
+            return "PhysicsSimulator::" + value[timberPrefix.Length..];
+        }
+
+        var index = value.LastIndexOf('.');
+        return index >= 0 ? value[(index + 1)..] : value;
+    }
+
+    private static double ToMs(long ticks) =>
+        ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+}
+
 internal static class TimberPhysicsBenchmarkPatcher
 {
     private const string SimulatorTypeName = "TimberPhysics.Core.PhysicsSimulator";
@@ -390,6 +664,10 @@ internal static class TimberPhysicsCatchUpLimiterPatcher
 
     private static bool Prefix(object __instance)
     {
+        var freezeStarted = !Runtime.IsBenchmarking
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+
         if (!Runtime.Enabled ||
             _getTimer is null ||
             _setTimer is null ||
@@ -439,6 +717,13 @@ internal static class TimberPhysicsCatchUpLimiterPatcher
                     $"TimberPhysics catch-up limiter activated; dropped {droppedSubsteps} " +
                     "backlogged physics substep(s) on the first overloaded update");
             }
+        }
+
+        if (freezeStarted != 0)
+        {
+            FreezeDetector.RecordSystem(
+                "TimberPhysics.Core.PhysicsSimulator",
+                System.Diagnostics.Stopwatch.GetTimestamp() - freezeStarted);
         }
 
         return false;
@@ -1115,6 +1400,7 @@ internal static class Runtime
     public static string ModPath { get; private set; } = "";
     public static string ConfigPath => Path.Combine(ModPath, "optimizer-v11.json");
     private static string DiscoveredPath => Path.Combine(ModPath, "optimizer-v11-discovered.txt");
+    private static string FreezeLogPath => Path.Combine(ModPath, "optimizer-v11-freezes.log");
 
     public const int BenchmarkDurationSeconds = 120;
 
@@ -1298,6 +1584,7 @@ internal static class Runtime
         _benchmarkCompleted = true;
         _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
+        FreezeDetectorPatcher.Patch();
         TimberPhysicsCatchUpLimiterPatcher.Patch(harmony);
         TimberPhysicsTerrainColliderMergerPatcher.Patch(harmony);
         DiscoverLoadedOptimizableTypes();
@@ -2091,6 +2378,8 @@ internal static class Runtime
             if (elapsedTicks < stat.MinTicks) stat.MinTicks = elapsedTicks;
             if (elapsedTicks > stat.MaxTicks) stat.MaxTicks = elapsedTicks;
         }
+
+        FreezeDetector.RecordSystem(name, elapsedTicks);
     }
 
     public static string ResolveDiagnosticOrigin(Type type) => ResolveOrigin(type);
@@ -2115,6 +2404,8 @@ internal static class Runtime
             if (elapsedTicks < stat.MinTicks) stat.MinTicks = elapsedTicks;
             if (elapsedTicks > stat.MaxTicks) stat.MaxTicks = elapsedTicks;
         }
+
+        FreezeDetector.RecordSystem(name, elapsedTicks);
     }
 
     private static void FinishBenchmarkIfNeeded()
@@ -2245,6 +2536,20 @@ internal static class Runtime
         catch
         {
             // Logging must never break the simulation.
+        }
+    }
+
+    public static void LogFreeze(string message)
+    {
+        try
+        {
+            var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}";
+            File.AppendAllText(FreezeLogPath, line);
+            File.AppendAllText(Path.Combine(ModPath, "optimizer-v11.log"), line);
+        }
+        catch
+        {
+            // Freeze diagnostics must never break the simulation.
         }
     }
 
