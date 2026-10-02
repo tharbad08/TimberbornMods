@@ -874,6 +874,11 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
             }
 
             var terrainColumnType = _getColumnMethod?.ReturnType;
+            if (terrainColumnType?.IsByRef == true)
+            {
+                terrainColumnType = terrainColumnType.GetElementType();
+            }
+
             if (terrainColumnType is not null)
             {
                 _terrainFloor = FindMember(terrainColumnType, "Floor");
@@ -1541,6 +1546,35 @@ internal static class Runtime
         }
     }
 
+    public static string? GetThrottleOwnershipNote(string typeName)
+    {
+        Type? type;
+        lock (Sync)
+        {
+            type = ResolveDiscoveredTypeLocked(typeName);
+        }
+
+        if (type is null)
+        {
+            return null;
+        }
+
+        var method = FindDirectTickMethod(type);
+        var declaringType = method?.DeclaringType;
+        if (method is null || declaringType is null || declaringType == type)
+        {
+            return null;
+        }
+
+        var depth = InheritanceDepth(type, declaringType);
+        var depthText = depth > 0
+            ? $" ({depth} inheritance level{(depth == 1 ? "" : "s")})"
+            : "";
+
+        return $"Inherited {method.Name}{depthText}. Effective throttle target: {FormatMethodTarget(method)}. " +
+               "Shared base method is patched once; this concrete type keeps its own interval.";
+    }
+
     public static string Mode =>
         BenchmarkActive ? "Benchmarking" :
         HasActiveThrottles() ? "Throttling" :
@@ -1654,12 +1688,85 @@ internal static class Runtime
         return i < 0 ? value : value[(i + 1)..];
     }
 
+    private static Type? ResolveDiscoveredTypeLocked(string typeName)
+    {
+        if (DiscoveredTypes.TryGetValue(typeName, out var exact))
+        {
+            return exact;
+        }
+
+        foreach (var pair in DiscoveredTypes)
+        {
+            if (string.Equals(ShortTypeName(pair.Key), typeName, StringComparison.Ordinal))
+            {
+                return pair.Value;
+            }
+        }
+
+        return null;
+    }
+
+    private static int InheritanceDepth(Type concreteType, Type declaringType)
+    {
+        var depth = 0;
+        for (var current = concreteType; current is not null; current = current.BaseType)
+        {
+            if (current == declaringType)
+            {
+                return depth;
+            }
+
+            depth++;
+        }
+
+        return -1;
+    }
+
+    private static string FormatMethodTarget(MethodInfo method)
+    {
+        var declaring = method.DeclaringType;
+        return declaring is null
+            ? method.Name
+            : $"{FormatTypeName(declaring)}.{method.Name}";
+    }
+
+    private static string FormatTypeName(Type type)
+    {
+        if (type.IsByRef)
+        {
+            return FormatTypeName(type.GetElementType()!) + "&";
+        }
+
+        if (type.IsArray)
+        {
+            return FormatTypeName(type.GetElementType()!) + "[]";
+        }
+
+        if (!type.IsGenericType)
+        {
+            return type.FullName?.Replace('+', '.') ?? type.Name;
+        }
+
+        var genericDefinition = type.GetGenericTypeDefinition();
+        var baseName = genericDefinition.FullName ?? genericDefinition.Name;
+        var tick = baseName.IndexOf((char)96);
+        if (tick >= 0)
+        {
+            baseName = baseName[..tick];
+        }
+
+        baseName = baseName.Replace('+', '.');
+        var arguments = string.Join(", ", type.GetGenericArguments().Select(FormatTypeName));
+        return $"{baseName}<{arguments}>";
+    }
+
     public static void Initialize(string modPath, Harmony harmony)
     {
         _harmony = harmony;
         ModPath = modPath;
         Directory.CreateDirectory(ModPath);
-        RotateOversizedLog();
+        ResetSessionLogs();
+        Log("session log started; previous optimizer and freeze logs cleared");
 
         if (!File.Exists(ConfigPath))
         {
@@ -1713,27 +1820,48 @@ internal static class Runtime
                 continue;
             }
 
-            if (method.DeclaringType != type)
+            var declaringType = method.DeclaringType;
+            var inherited = declaringType is not null && declaringType != type;
+
+            if (inherited)
             {
+                var depth = InheritanceDepth(type, declaringType!);
+                var effectiveTarget = FormatMethodTarget(method);
                 LogOnce(
                     $"inherited-direct-method:{type.FullName}",
-                    $"warning: {type.FullName} inherits {method.Name} from {method.DeclaringType?.FullName}; cannot throttle safely without affecting sibling types");
-                continue;
+                    $"nested throttle mapping: {type.FullName}.{method.Name} is inherited" +
+                    $"{(depth > 0 ? $" through {depth} inheritance level(s)" : "")}; " +
+                    $"effective throttle target={effectiveTarget}; sibling runtime types keep their own intervals");
             }
 
             try
             {
                 var prefix = AccessTools.Method(typeof(Runtime), nameof(DirectThrottlePrefix));
-                _harmony.Patch(
-                    method,
-                    prefix: new HarmonyMethod(prefix) { priority = Priority.First });
 
-                DirectPatchedMethods.Add(method);
+                // Several concrete types can share the same inherited method. Patch the
+                // effective method only once; DirectThrottlePrefix uses __instance.GetType()
+                // so each concrete sibling still gets its own configured interval.
+                if (DirectPatchedMethods.Add(method))
+                {
+                    _harmony.Patch(
+                        method,
+                        prefix: new HarmonyMethod(prefix) { priority = Priority.First });
+
+                    Log(
+                        inherited
+                            ? $"direct throttle patch installed: effective target {FormatMethodTarget(method)}"
+                            : $"direct throttle patch installed: {type.FullName}.{method.Name}");
+                }
+
                 DirectMethodsByType[pair.Key] = method;
-                Log($"direct throttle patch installed: {type.FullName}.{method.Name} interval={GetInterval(type)}");
+                Log(
+                    inherited
+                        ? $"direct throttle binding: {type.FullName} interval={GetInterval(type)} -> {FormatMethodTarget(method)}"
+                        : $"direct throttle binding: {type.FullName} interval={GetInterval(type)}");
             }
             catch (Exception ex)
             {
+                DirectPatchedMethods.Remove(method);
                 LogOnce(
                     $"direct-patch-failed:{type.FullName}:{method.Name}",
                     $"warning: direct throttle patch failed for {type.FullName}.{method.Name}: {ex.GetType().Name}: {ex.Message}");
@@ -2657,26 +2785,24 @@ internal static class Runtime
         Log(message);
     }
 
-    private static void RotateOversizedLog()
+    private static void ResetSessionLogs()
     {
         try
         {
-            var log = Path.Combine(ModPath, "optimizer-v11.log");
-            if (!File.Exists(log) || new FileInfo(log).Length < 5 * 1024 * 1024)
-            {
-                return;
-            }
-
-            var previous = Path.Combine(ModPath, "optimizer-v11.previous.log");
-            if (File.Exists(previous))
-            {
-                File.Delete(previous);
-            }
-            File.Move(log, previous);
+            File.WriteAllText(Path.Combine(ModPath, "optimizer-v11.log"), string.Empty);
         }
         catch
         {
-            // Never block startup because an old diagnostic log cannot be rotated.
+            // Never block startup because the main diagnostic log cannot be reset.
+        }
+
+        try
+        {
+            File.WriteAllText(FreezeLogPath, string.Empty);
+        }
+        catch
+        {
+            // Freeze logging remains best-effort if the previous log is locked.
         }
     }
 
