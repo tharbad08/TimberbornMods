@@ -37,3 +37,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.36: adds frame phase-gap timing for unattributed stalls and a targeted SoilContaminationService deep profiler with per-callee timing and GC deltas.
 
 - v1.1.37: removes intrusive SoilContamination inner-method Harmony hooks that caused frequent stutter; keeps phase-gap diagnostics, TickSingleton attribution, and lightweight outer Soil Tick GC tracking.
+
+- v1.1.38: adds low-overhead always-on attribution for UpdateSingleton/LateUpdateSingleton implementations and outer callers of TickableEntity.TickTickableComponents, keeping phase-gap and TickSingleton diagnostics without hot inner-method hooks.
