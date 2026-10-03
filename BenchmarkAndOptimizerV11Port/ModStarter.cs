@@ -162,6 +162,10 @@ internal static class FreezeDetectorPatcher
         ExtendedBuilderReachNavOptimizer.Patch(FreezeHarmony);
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
+        InputProcessorProfiler.Patch(FreezeHarmony);
+        MonoBehaviourLateUpdateProfiler.Patch(FreezeHarmony);
+        FaunaSpawnInnerProfiler.Patch(FreezeHarmony);
+        SoilMoistureProfiler.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
 
         _patched = true;
@@ -520,6 +524,8 @@ internal static class FreezeDetectorPatcher
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
         EntityTickDispatcherProfiler.FlushFrame();
+        InputProcessorProfiler.FlushFrame();
+        MonoBehaviourLateUpdateProfiler.FlushFrame();
         FreezeDetector.FrameBoundary(now, "UpdateSingletons");
         __state = now;
     }
@@ -1523,7 +1529,6 @@ internal static class ExtendedBuilderReachNavOptimizer
         "Timberborn.Navigation.NavMeshListenerEntityRegistry";
 
     private static Type? _ebrType;
-    private static Type? _updateType;
     private static FieldInfo? _registryListenersField;
     private static Func<object, object, bool>? _intersects;
     private static Action<object, object>? _notify;
@@ -1567,14 +1572,14 @@ internal static class ExtendedBuilderReachNavOptimizer
             return;
         }
 
-        _updateType = notifyAll.GetParameters().FirstOrDefault()?.ParameterType;
+        var updateType = notifyAll.GetParameters().FirstOrDefault()?.ParameterType;
         var ebrBounds = AccessTools.Field(_ebrType, "bounds");
-        var updateBounds = _updateType is null ? null : AccessTools.Property(_updateType, "Bounds");
-        var notifyMethod = _updateType is null
+        var updateBounds = updateType is null ? null : AccessTools.Property(updateType, "Bounds");
+        var notifyMethod = updateType is null
             ? null
-            : AccessTools.Method(_ebrType, "OnNavMeshUpdated", new[] { _updateType });
+            : AccessTools.Method(_ebrType, "OnNavMeshUpdated", new[] { updateType });
 
-        if (_updateType is null ||
+        if (updateType is null ||
             ebrBounds is null ||
             updateBounds?.GetGetMethod(true) is null ||
             notifyMethod is null)
@@ -1604,7 +1609,7 @@ internal static class ExtendedBuilderReachNavOptimizer
         {
             _intersects = CreateIntersectsDelegate(
                 _ebrType,
-                _updateType,
+                updateType,
                 ebrBounds,
                 updateBounds.GetGetMethod(true)!,
                 boundsType,
@@ -1614,7 +1619,7 @@ internal static class ExtendedBuilderReachNavOptimizer
                 maxX,
                 maxY,
                 maxZ);
-            _notify = CreateNotifyDelegate(_ebrType, _updateType, notifyMethod);
+            _notify = CreateNotifyDelegate(_ebrType, updateType, notifyMethod);
 
             harmony.Patch(
                 register,
@@ -1654,8 +1659,8 @@ internal static class ExtendedBuilderReachNavOptimizer
             _installed = true;
             Runtime.Log(
                 "Extended Builder Reach nav optimizer installed: " +
-                "ExtendedDemolishableAccessible listeners are separated from the generic " +
-                "registry and fast-filtered by BoundingBox before callback");
+                "ExtendedDemolishableAccessible listeners separated from generic registry; " +
+                "BoundingBox fast-filter active before EBR callback");
         }
         catch (Exception ex)
         {
@@ -1698,9 +1703,6 @@ internal static class ExtendedBuilderReachNavOptimizer
             return;
         }
 
-        // v1.1.44 normally installs before entities register. This migration is
-        // still required for hot-reload/order variations: move any EBR listeners
-        // already present in the vanilla list into our side list exactly once.
         if (_registryListenersField.GetValue(__instance) is IList listeners)
         {
             var migrated = 0;
@@ -1737,10 +1739,6 @@ internal static class ExtendedBuilderReachNavOptimizer
         var candidates = EbrListeners.Count;
         var notified = 0;
 
-        // Preserve EBR's own OnNavMeshUpdated implementation for candidates:
-        // it still checks the live setting and recalculates accesses exactly as
-        // the mod intended. The optimization only avoids 20k+ interface calls
-        // whose BoundingBox cannot intersect this update.
         for (var i = 0; i < EbrListeners.Count; i++)
         {
             var listener = EbrListeners[i];
@@ -1798,81 +1796,6 @@ internal static class ExtendedBuilderReachNavOptimizer
         FieldInfo maxZ)
     {
         var dynamicMethod = new System.Reflection.Emit.DynamicMethod(
-            "BenchmarkOptimizer_EbrBoundsIntersect",
-            typeof(bool),
-            new[] { typeof(object), typeof(object) },
-            typeof(ExtendedBuilderReachNavOptimizer).Module,
-            true);
-
-        var il = dynamicMethod.GetILGenerator();
-        var left = il.DeclareLocal(boundsType);
-        var right = il.DeclareLocal(boundsType);
-
-        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
-        il.Emit(System.Reflection.Emit.OpCodes.Castclass, listenerType);
-        il.Emit(System.Reflection.Emit.OpCodes.Ldfld, listenerBounds);
-        il.Emit(System.Reflection.Emit.OpCodes.Stloc, left);
-
-        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
-        if (updateType.IsValueType)
-        {
-            il.Emit(System.Reflection.Emit.OpCodes.Unbox_Any, updateType);
-        }
-        else
-        {
-            il.Emit(System.Reflection.Emit.OpCodes.Castclass, updateType);
-        }
-        il.Emit(
-            getUpdateBounds.IsVirtual
-                ? System.Reflection.Emit.OpCodes.Callvirt
-                : System.Reflection.Emit.OpCodes.Call,
-            getUpdateBounds);
-        il.Emit(System.Reflection.Emit.OpCodes.Stloc, right);
-
-        // Same exact BoundingBox.Intersects logic, emitted directly so the
-        // rejected 20k+ listeners do not pay interface-dispatch/Harmony cost.
-        EmitDisconnectedAxisCheck(il, left, right, minX, maxX);
-        EmitDisconnectedAxisCheck(il, left, right, minY, maxY);
-        EmitDisconnectedAxisCheck(il, left, right, minZ, maxZ);
-
-        il.Emit(System.Reflection.Emit.OpCodes.Ldc_I4_1);
-        il.Emit(System.Reflection.Emit.OpCodes.Ret);
-
-        var disconnected = il.DefineLabel();
-        // The axis helpers branch to a common "false" target stored via a
-        // temporary static holder on first use.
-        EbrIlBranchTarget.Target = disconnected;
-
-        // Re-emit with the now-known branch target.
-        il = null!;
-        return CreateIntersectsDelegateWithTarget(
-            listenerType,
-            updateType,
-            listenerBounds,
-            getUpdateBounds,
-            boundsType,
-            minX,
-            minY,
-            minZ,
-            maxX,
-            maxY,
-            maxZ);
-    }
-
-    private static Func<object, object, bool> CreateIntersectsDelegateWithTarget(
-        Type listenerType,
-        Type updateType,
-        FieldInfo listenerBounds,
-        MethodInfo getUpdateBounds,
-        Type boundsType,
-        FieldInfo minX,
-        FieldInfo minY,
-        FieldInfo minZ,
-        FieldInfo maxX,
-        FieldInfo maxY,
-        FieldInfo maxZ)
-    {
-        var dynamicMethod = new System.Reflection.Emit.DynamicMethod(
             "BenchmarkOptimizer_EbrBoundsIntersectFast",
             typeof(bool),
             new[] { typeof(object), typeof(object) },
@@ -1882,6 +1805,7 @@ internal static class ExtendedBuilderReachNavOptimizer
         var il = dynamicMethod.GetILGenerator();
         var left = il.DeclareLocal(boundsType);
         var right = il.DeclareLocal(boundsType);
+        var update = updateType.IsValueType ? il.DeclareLocal(updateType) : null;
         var noIntersection = il.DefineLabel();
 
         il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
@@ -1892,17 +1816,23 @@ internal static class ExtendedBuilderReachNavOptimizer
         il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
         if (updateType.IsValueType)
         {
+            // Property getter is an instance method on a value type. The v1.1.44
+            // code unboxed the struct value and called the getter directly, which
+            // produces invalid IL because the getter expects a managed address.
             il.Emit(System.Reflection.Emit.OpCodes.Unbox_Any, updateType);
+            il.Emit(System.Reflection.Emit.OpCodes.Stloc, update!);
+            il.Emit(System.Reflection.Emit.OpCodes.Ldloca, update!);
+            il.Emit(System.Reflection.Emit.OpCodes.Call, getUpdateBounds);
         }
         else
         {
             il.Emit(System.Reflection.Emit.OpCodes.Castclass, updateType);
+            il.Emit(
+                getUpdateBounds.IsVirtual
+                    ? System.Reflection.Emit.OpCodes.Callvirt
+                    : System.Reflection.Emit.OpCodes.Call,
+                getUpdateBounds);
         }
-        il.Emit(
-            getUpdateBounds.IsVirtual
-                ? System.Reflection.Emit.OpCodes.Callvirt
-                : System.Reflection.Emit.OpCodes.Call,
-            getUpdateBounds);
         il.Emit(System.Reflection.Emit.OpCodes.Stloc, right);
 
         EmitAxisIntersection(il, left, right, minX, maxX, noIntersection);
@@ -1920,22 +1850,6 @@ internal static class ExtendedBuilderReachNavOptimizer
             typeof(Func<object, object, bool>));
     }
 
-    // Kept only to make the intended comparison explicit in source; the actual
-    // delegate is emitted by EmitAxisIntersection once its shared label exists.
-    private static void EmitDisconnectedAxisCheck(
-        System.Reflection.Emit.ILGenerator il,
-        System.Reflection.Emit.LocalBuilder left,
-        System.Reflection.Emit.LocalBuilder right,
-        FieldInfo min,
-        FieldInfo max)
-    {
-    }
-
-    private static class EbrIlBranchTarget
-    {
-        public static System.Reflection.Emit.Label Target;
-    }
-
     private static void EmitAxisIntersection(
         System.Reflection.Emit.ILGenerator il,
         System.Reflection.Emit.LocalBuilder left,
@@ -1944,14 +1858,12 @@ internal static class ExtendedBuilderReachNavOptimizer
         FieldInfo max,
         System.Reflection.Emit.Label noIntersection)
     {
-        // left.min <= right.max
         il.Emit(System.Reflection.Emit.OpCodes.Ldloca, left);
         il.Emit(System.Reflection.Emit.OpCodes.Ldfld, min);
         il.Emit(System.Reflection.Emit.OpCodes.Ldloca, right);
         il.Emit(System.Reflection.Emit.OpCodes.Ldfld, max);
         il.Emit(System.Reflection.Emit.OpCodes.Bgt, noIntersection);
 
-        // left.max >= right.min
         il.Emit(System.Reflection.Emit.OpCodes.Ldloca, left);
         il.Emit(System.Reflection.Emit.OpCodes.Ldfld, max);
         il.Emit(System.Reflection.Emit.OpCodes.Ldloca, right);
@@ -2007,12 +1919,6 @@ internal static class InputAndFaunaDetailProfiler
             AccessTools.TypeByName("Timberborn.InputSystem.InputService"),
             "CallInputProcessors",
             "Input.Processors");
-        PatchMethod(
-            harmony,
-            AccessTools.TypeByName("Timberborn.InputSystem.InputUpdater"),
-            "Update",
-            "Input.Updater");
-
         var faunaType = AccessTools.TypeByName("Keystone.Mod.Fauna.FaunaSpawnDrainer");
         PatchMethod(harmony, faunaType, "UpdateSingleton", "Fauna.Total");
         PatchMethod(harmony, faunaType, "VisitCluster", "Fauna.VisitCluster");
@@ -2355,6 +2261,574 @@ internal static class NavigationEntityListenerProfiler
     {
         var index = value.LastIndexOf('.');
         return index >= 0 ? value[(index + 1)..] : value;
+    }
+}
+
+
+internal static class InputProcessorProfiler
+{
+    private static readonly HashSet<MethodBase> PatchedMethods = new();
+    private static readonly Dictionary<string, long> FrameTicks = new(StringComparer.Ordinal);
+
+    [ThreadStatic]
+    private static int _inputDepth;
+
+    private struct Sample
+    {
+        public long Started;
+        public string? TypeName;
+    }
+
+    public static void Patch(Harmony harmony)
+    {
+        var interfaces = new[]
+        {
+            AccessTools.TypeByName("Timberborn.InputSystem.IInputProcessor"),
+            AccessTools.TypeByName("Timberborn.InputSystem.IPriorityInputProcessor"),
+        }.Where(type => type is not null).Cast<Type>().ToArray();
+
+        var inputService = AccessTools.TypeByName("Timberborn.InputSystem.InputService");
+        var callProcessors = inputService is null
+            ? null
+            : AccessTools.Method(inputService, "CallInputProcessors");
+
+        if (interfaces.Length == 0 || callProcessors is null)
+        {
+            Runtime.Log(
+                "warning: per-input-processor profiler unavailable: interfaces or CallInputProcessors missing");
+            return;
+        }
+
+        harmony.Patch(
+            callProcessors,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(InputProcessorProfiler), nameof(CallPrefix)))
+            {
+                priority = Priority.First
+            },
+            finalizer: new HarmonyMethod(
+                AccessTools.Method(typeof(InputProcessorProfiler), nameof(CallFinalizer)))
+            {
+                priority = Priority.Last
+            });
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in SafeGetTypes(assembly))
+            {
+                if (type.IsAbstract || type.IsInterface)
+                {
+                    continue;
+                }
+
+                foreach (var iface in interfaces)
+                {
+                    if (!iface.IsAssignableFrom(type))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        var map = type.GetInterfaceMap(iface);
+                        for (var i = 0; i < map.InterfaceMethods.Length; i++)
+                        {
+                            if (map.InterfaceMethods[i].Name != "ProcessInput")
+                            {
+                                continue;
+                            }
+
+                            var target = map.TargetMethods[i];
+                            if (target.IsAbstract || !PatchedMethods.Add(target))
+                            {
+                                continue;
+                            }
+
+                            harmony.Patch(
+                                target,
+                                prefix: new HarmonyMethod(
+                                    AccessTools.Method(typeof(InputProcessorProfiler), nameof(ProcessorPrefix)))
+                                {
+                                    priority = Priority.First
+                                },
+                                finalizer: new HarmonyMethod(
+                                    AccessTools.Method(typeof(InputProcessorProfiler), nameof(ProcessorFinalizer)))
+                                {
+                                    priority = Priority.Last
+                                });
+                        }
+                    }
+                    catch
+                    {
+                        // Some generated/proxy types cannot produce an interface map.
+                    }
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"per-input-processor profiler installed: {PatchedMethods.Count} effective ProcessInput method(s)");
+    }
+
+    private static void CallPrefix()
+    {
+        if (!Runtime.IsBenchmarking)
+        {
+            _inputDepth++;
+        }
+    }
+
+    private static Exception? CallFinalizer(Exception? __exception)
+    {
+        if (!Runtime.IsBenchmarking && _inputDepth > 0)
+        {
+            _inputDepth--;
+        }
+
+        return __exception;
+    }
+
+    private static void ProcessorPrefix(object __instance, out Sample __state)
+    {
+        __state = default;
+        if (Runtime.IsBenchmarking || _inputDepth <= 0 || __instance is null)
+        {
+            return;
+        }
+
+        var type = __instance.GetType();
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.TypeName = type.FullName ?? type.Name;
+    }
+
+    private static Exception? ProcessorFinalizer(Exception? __exception, Sample __state)
+    {
+        if (__state.Started == 0 || __state.TypeName is null)
+        {
+            return __exception;
+        }
+
+        var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
+        if (elapsed > 0)
+        {
+            FrameTicks.TryGetValue(__state.TypeName, out var existing);
+            FrameTicks[__state.TypeName] = existing + elapsed;
+        }
+
+        return __exception;
+    }
+
+    public static void FlushFrame()
+    {
+        foreach (var pair in FrameTicks)
+        {
+            FreezeDetector.RecordInputDetail(
+                $"Processor.{ShortName(pair.Key)}",
+                pair.Value);
+        }
+
+        FrameTicks.Clear();
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch
+        {
+            return Array.Empty<Type>();
+        }
+    }
+
+    private static string ShortName(string name)
+    {
+        var index = name.LastIndexOf('.');
+        return index >= 0 ? name[(index + 1)..] : name;
+    }
+}
+
+internal static class MonoBehaviourLateUpdateProfiler
+{
+    private static readonly HashSet<MethodBase> PatchedMethods = new();
+    private static readonly Dictionary<string, long> FrameTicks = new(StringComparer.Ordinal);
+
+    private struct Sample
+    {
+        public long Started;
+        public string? TypeName;
+    }
+
+    public static void Patch(Harmony harmony)
+    {
+        var monoBehaviour = AccessTools.TypeByName("UnityEngine.MonoBehaviour");
+        if (monoBehaviour is null)
+        {
+            Runtime.Log("warning: MonoBehaviour LateUpdate profiler unavailable: MonoBehaviour not found");
+            return;
+        }
+
+        const BindingFlags flags =
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in SafeGetTypes(assembly))
+            {
+                if (type.IsAbstract ||
+                    type.IsInterface ||
+                    !monoBehaviour.IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                MethodInfo? lateUpdate;
+                try
+                {
+                    lateUpdate = type
+                        .GetMethods(flags)
+                        .FirstOrDefault(method =>
+                            method.Name == "LateUpdate" &&
+                            !method.IsAbstract &&
+                            method.ReturnType == typeof(void) &&
+                            method.GetParameters().Length == 0);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (lateUpdate is null || !PatchedMethods.Add(lateUpdate))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    harmony.Patch(
+                        lateUpdate,
+                        prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(MonoBehaviourLateUpdateProfiler), nameof(Prefix)))
+                        {
+                            priority = Priority.First
+                        },
+                        finalizer: new HarmonyMethod(
+                            AccessTools.Method(typeof(MonoBehaviourLateUpdateProfiler), nameof(Finalizer)))
+                        {
+                            priority = Priority.Last
+                        });
+                }
+                catch
+                {
+                    PatchedMethods.Remove(lateUpdate);
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"MonoBehaviour LateUpdate profiler installed: {PatchedMethods.Count} managed LateUpdate method(s)");
+    }
+
+    private static void Prefix(object __instance, out Sample __state)
+    {
+        __state = default;
+        if (Runtime.IsBenchmarking || __instance is null)
+        {
+            return;
+        }
+
+        var type = __instance.GetType();
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.TypeName = type.FullName ?? type.Name;
+    }
+
+    private static Exception? Finalizer(Exception? __exception, Sample __state)
+    {
+        if (__state.Started == 0 || __state.TypeName is null)
+        {
+            return __exception;
+        }
+
+        var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
+        if (elapsed > 0)
+        {
+            FrameTicks.TryGetValue(__state.TypeName, out var existing);
+            FrameTicks[__state.TypeName] = existing + elapsed;
+        }
+
+        return __exception;
+    }
+
+    public static void FlushFrame()
+    {
+        foreach (var pair in FrameTicks)
+        {
+            FreezeDetector.RecordLateBehaviour(pair.Key, pair.Value);
+        }
+
+        FrameTicks.Clear();
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch
+        {
+            return Array.Empty<Type>();
+        }
+    }
+}
+
+internal static class FaunaSpawnInnerProfiler
+{
+    [ThreadStatic]
+    private static int _spawnDepth;
+
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        var drainer = AccessTools.TypeByName("Keystone.Mod.Fauna.FaunaSpawnDrainer");
+        var spawn = drainer is null
+            ? null
+            : drainer.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(method => method.Name == "Spawn");
+
+        if (spawn is null)
+        {
+            Runtime.Log("warning: fauna inner profiler unavailable: FaunaSpawnDrainer.Spawn not found");
+            return;
+        }
+
+        harmony.Patch(
+            spawn,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(FaunaSpawnInnerProfiler), nameof(SpawnPrefix)))
+            {
+                priority = Priority.First
+            },
+            finalizer: new HarmonyMethod(
+                AccessTools.Method(typeof(FaunaSpawnInnerProfiler), nameof(SpawnFinalizer)))
+            {
+                priority = Priority.Last
+            });
+
+        var entityService = AccessTools.TypeByName("Timberborn.EntitySystem.EntityService");
+        PatchNamedOverload(
+            harmony,
+            entityService,
+            "Instantiate",
+            method => method.GetParameters().Length == 1,
+            "Fauna.Instantiate");
+
+        PatchNamedOverload(
+            harmony,
+            AccessTools.TypeByName("Keystone.Mod.Fauna.KeystoneFaunaAgent"),
+            "ConfigureFromRecipe",
+            _ => true,
+            "Fauna.ConfigureLand");
+        PatchNamedOverload(
+            harmony,
+            AccessTools.TypeByName("Keystone.Mod.Fauna.KeystoneAquaticAgent"),
+            "ConfigureFromRecipe",
+            _ => true,
+            "Fauna.ConfigureAquatic");
+        PatchNamedOverload(
+            harmony,
+            AccessTools.TypeByName("Keystone.Core.Fauna.KeystoneFaunaRegistry") ??
+                AccessTools.TypeByName("Keystone.Mod.Fauna.KeystoneFaunaRegistry"),
+            "Add",
+            _ => true,
+            "Fauna.RegistryAdd");
+
+        Runtime.Log(
+            $"fauna Spawn inner profiler installed: {Labels.Count} inner method(s)");
+    }
+
+    private static void PatchNamedOverload(
+        Harmony harmony,
+        Type? type,
+        string name,
+        Func<MethodInfo, bool> predicate,
+        string label)
+    {
+        if (type is null)
+        {
+            Runtime.Log($"warning: fauna inner profiler target type missing for {label}");
+            return;
+        }
+
+        const BindingFlags flags =
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        foreach (var method in type.GetMethods(flags)
+                     .Where(method => method.Name == name && predicate(method)))
+        {
+            try
+            {
+                Labels[method] = label;
+                harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(typeof(FaunaSpawnInnerProfiler), nameof(InnerPrefix)))
+                    {
+                        priority = Priority.First
+                    },
+                    finalizer: new HarmonyMethod(
+                        AccessTools.Method(typeof(FaunaSpawnInnerProfiler), nameof(InnerFinalizer)))
+                    {
+                        priority = Priority.Last
+                    });
+            }
+            catch (Exception ex)
+            {
+                Labels.Remove(method);
+                Runtime.Log(
+                    $"warning: fauna inner profiler could not patch {type.FullName}.{name}: " +
+                    $"{ex.GetType().Name}: {ex.Message}");
+            }
+        }
+    }
+
+    private static void SpawnPrefix()
+    {
+        if (!Runtime.IsBenchmarking)
+        {
+            _spawnDepth++;
+        }
+    }
+
+    private static Exception? SpawnFinalizer(Exception? __exception)
+    {
+        if (!Runtime.IsBenchmarking && _spawnDepth > 0)
+        {
+            _spawnDepth--;
+        }
+
+        return __exception;
+    }
+
+    private static void InnerPrefix(out long __state)
+    {
+        __state = !Runtime.IsBenchmarking && _spawnDepth > 0
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+    }
+
+    private static Exception? InnerFinalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+        {
+            FreezeDetector.RecordFaunaDetail(
+                label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        return __exception;
+    }
+}
+
+internal static class SoilMoistureProfiler
+{
+    private struct Sample
+    {
+        public bool Active;
+        public long Started;
+        public long AllocatedBytes;
+        public int Gc0;
+        public int Gc1;
+        public int Gc2;
+    }
+
+    public static void Patch(Harmony harmony)
+    {
+        var type = AccessTools.TypeByName("Timberborn.SoilMoistureSystem.SoilMoistureService");
+        var tick = type is null ? null : AccessTools.Method(type, "Tick", Type.EmptyTypes);
+        if (tick is null)
+        {
+            Runtime.Log("warning: SoilMoisture profiler unavailable: SoilMoistureService.Tick not found");
+            return;
+        }
+
+        try
+        {
+            harmony.Patch(
+                tick,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(typeof(SoilMoistureProfiler), nameof(Prefix)))
+                {
+                    priority = Priority.First
+                },
+                finalizer: new HarmonyMethod(
+                    AccessTools.Method(typeof(SoilMoistureProfiler), nameof(Finalizer)))
+                {
+                    priority = Priority.Last
+                });
+
+            Runtime.Log(
+                "SoilMoisture allocation/GC profiler installed: outer Tick only");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: SoilMoisture profiler installation failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void Prefix(out Sample __state)
+    {
+        __state = default;
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        __state.Active = true;
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.AllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
+        __state.Gc0 = GC.CollectionCount(0);
+        __state.Gc1 = GC.CollectionCount(1);
+        __state.Gc2 = GC.CollectionCount(2);
+    }
+
+    private static Exception? Finalizer(Exception? __exception, Sample __state)
+    {
+        if (!__state.Active || __state.Started == 0)
+        {
+            return __exception;
+        }
+
+        var allocated =
+            GC.GetAllocatedBytesForCurrentThread() - __state.AllocatedBytes;
+        if (allocated < 0)
+        {
+            allocated = 0;
+        }
+
+        FreezeDetector.RecordSoilMoistureProfile(
+            System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started,
+            allocated,
+            GC.CollectionCount(0) - __state.Gc0,
+            GC.CollectionCount(1) - __state.Gc1,
+            GC.CollectionCount(2) - __state.Gc2);
+
+        return __exception;
     }
 }
 
@@ -2776,6 +3250,7 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> NavigationDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> InputDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> FaunaDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> LateBehaviourTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, KeystoneProfileRecord> KeystoneProfiles = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PlayerLoopMarkers = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
@@ -2787,6 +3262,11 @@ internal static class FreezeDetector
     private static int _soilGc0;
     private static int _soilGc1;
     private static int _soilGc2;
+    private static long _soilMoistureTicks;
+    private static long _soilMoistureAllocatedBytes;
+    private static int _soilMoistureGc0;
+    private static int _soilMoistureGc1;
+    private static int _soilMoistureGc2;
     private static long _frameStartTicks;
     private static long _frameNumber;
 
@@ -2833,6 +3313,7 @@ internal static class FreezeDetector
             NavigationDetailTicks.Clear();
             InputDetailTicks.Clear();
             FaunaDetailTicks.Clear();
+            LateBehaviourTicks.Clear();
             KeystoneProfiles.Clear();
             PlayerLoopMarkers.Clear();
             PhaseGapTicks.Clear();
@@ -2842,6 +3323,11 @@ internal static class FreezeDetector
             _soilGc0 = 0;
             _soilGc1 = 0;
             _soilGc2 = 0;
+            _soilMoistureTicks = 0;
+            _soilMoistureAllocatedBytes = 0;
+            _soilMoistureGc0 = 0;
+            _soilMoistureGc1 = 0;
+            _soilMoistureGc2 = 0;
         }
 
         Runtime.Log(
@@ -2899,6 +3385,7 @@ internal static class FreezeDetector
             NavigationDetailTicks.Clear();
             InputDetailTicks.Clear();
             FaunaDetailTicks.Clear();
+            LateBehaviourTicks.Clear();
             KeystoneProfiles.Clear();
             PlayerLoopMarkers.Clear();
             PhaseGapTicks.Clear();
@@ -2906,6 +3393,11 @@ internal static class FreezeDetector
             _soilGc0 = 0;
             _soilGc1 = 0;
             _soilGc2 = 0;
+            _soilMoistureTicks = 0;
+            _soilMoistureAllocatedBytes = 0;
+            _soilMoistureGc0 = 0;
+            _soilMoistureGc1 = 0;
+            _soilMoistureGc2 = 0;
             _lastPhaseEndTicks = 0;
             _lastPhaseName = null;
         }
@@ -3038,6 +3530,31 @@ internal static class FreezeDetector
 
     public static void RecordFaunaDetail(string name, long elapsedTicks) =>
         RecordNamedTicks(FaunaDetailTicks, name, elapsedTicks);
+
+    public static void RecordLateBehaviour(string name, long elapsedTicks) =>
+        RecordNamedTicks(LateBehaviourTicks, name, elapsedTicks);
+
+    public static void RecordSoilMoistureProfile(
+        long elapsedTicks,
+        long allocatedBytes,
+        int gc0,
+        int gc1,
+        int gc2)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            _soilMoistureTicks += Math.Max(0, elapsedTicks);
+            _soilMoistureAllocatedBytes += Math.Max(0, allocatedBytes);
+            _soilMoistureGc0 += gc0;
+            _soilMoistureGc1 += gc1;
+            _soilMoistureGc2 += gc2;
+        }
+    }
 
     public static void RecordKeystoneProfile(
         string name,
@@ -3262,6 +3779,15 @@ internal static class FreezeDetector
             ? "none"
             : string.Join(", ", faunaDetails);
 
+        var lateBehaviours = LateBehaviourTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var lateBehaviourText = lateBehaviours.Length == 0
+            ? "none"
+            : string.Join(", ", lateBehaviours);
+
         var keystoneProfiles = KeystoneProfiles
             .OrderByDescending(pair => pair.Value.MaxTicks)
             .Take(TopSystemCount)
@@ -3309,10 +3835,13 @@ internal static class FreezeDetector
             $"navigation detail: {navigationDetailText}; " +
             $"input detail: {inputDetailText}; " +
             $"fauna detail: {faunaDetailText}; " +
+            $"LateUpdate behaviours: {lateBehaviourText}; " +
             $"Keystone profile: {keystoneProfileText}; " +
             $"PlayerLoop: {playerLoop}; " +
             $"top tick singletons: {topTickText}; " +
             $"soil GC=[gen0:{_soilGc0}, gen1:{_soilGc1}, gen2:{_soilGc2}]; " +
+            $"soil moisture=[time:{ToMs(_soilMoistureTicks):F1}ms, alloc:{FormatBytes(_soilMoistureAllocatedBytes)}, " +
+            $"GC:{_soilMoistureGc0}/{_soilMoistureGc1}/{_soilMoistureGc2}]; " +
             $"top systems: {topText}";
     }
 
