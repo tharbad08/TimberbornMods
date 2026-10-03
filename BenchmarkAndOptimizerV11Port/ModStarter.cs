@@ -160,10 +160,13 @@ internal static class FreezeDetectorPatcher
         EntityTickDispatcherProfiler.Patch(FreezeHarmony);
         BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
+        NavigationEntityListenerProfiler.Patch(FreezeHarmony);
+        KeystoneComponentAllocationProfiler.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
 
         _patched = true;
         FreezeDetector.Initialize();
+        PlayerLoopPhaseProfiler.Install();
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -517,6 +520,7 @@ internal static class FreezeDetectorPatcher
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
         EntityTickDispatcherProfiler.FlushFrame();
+        KeystoneComponentAllocationProfiler.FlushFrame();
         FreezeDetector.FrameBoundary(now, "UpdateSingletons");
         __state = now;
     }
@@ -1348,6 +1352,637 @@ internal static class NavigationSynchronizerDetailProfiler
 
         return __exception;
     }
+}
+
+
+internal static class KeystoneComponentAllocationProfiler
+{
+    private static readonly string[] TypeNames =
+    {
+        "Keystone.Mod.Flourish.KeystoneFlourish",
+        "Keystone.Mod.Flourish.KeystoneRockTint",
+        "Keystone.Mod.Growth.KeystoneGrowthBonus",
+        "Keystone.Mod.Overgrowth.KeystoneOvergrowth",
+    };
+
+    private sealed class Aggregate
+    {
+        public long TotalTicks;
+        public long MaxTicks;
+        public long TotalAllocatedBytes;
+        public long MaxAllocatedBytes;
+        public int Calls;
+        public int Gc0;
+        public int Gc1;
+        public int Gc2;
+    }
+
+    private struct Sample
+    {
+        public bool Active;
+        public long Started;
+        public long AllocatedBytes;
+        public int Gc0;
+        public int Gc1;
+        public int Gc2;
+    }
+
+    private static readonly Dictionary<string, Aggregate> FrameStats =
+        new(StringComparer.Ordinal);
+
+    public static void Patch(Harmony harmony)
+    {
+        var installed = 0;
+
+        foreach (var typeName in TypeNames)
+        {
+            var type = AccessTools.TypeByName(typeName);
+            var tick = type is null ? null : AccessTools.Method(type, "Tick", Type.EmptyTypes);
+            if (tick is null)
+            {
+                Runtime.Log(
+                    $"warning: Keystone allocation profiler target not found: {typeName}.Tick");
+                continue;
+            }
+
+            try
+            {
+                harmony.Patch(
+                    tick,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(
+                            typeof(KeystoneComponentAllocationProfiler),
+                            nameof(Prefix)))
+                    {
+                        priority = Priority.First
+                    },
+                    postfix: new HarmonyMethod(
+                        AccessTools.Method(
+                            typeof(KeystoneComponentAllocationProfiler),
+                            nameof(Postfix)))
+                    {
+                        priority = Priority.Last
+                    });
+
+                installed++;
+            }
+            catch (Exception ex)
+            {
+                Runtime.Log(
+                    $"warning: Keystone allocation profiler could not patch {typeName}.Tick: " +
+                    $"{ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        Runtime.Log(
+            $"Keystone allocation/GC profiler installed: {installed}/{TypeNames.Length} component Tick method(s)");
+    }
+
+    private static void Prefix(out Sample __state)
+    {
+        __state = default;
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        __state.Active = true;
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.AllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
+        __state.Gc0 = GC.CollectionCount(0);
+        __state.Gc1 = GC.CollectionCount(1);
+        __state.Gc2 = GC.CollectionCount(2);
+    }
+
+    private static void Postfix(
+        MethodBase __originalMethod,
+        bool __runOriginal,
+        Sample __state)
+    {
+        if (!__state.Active || !__runOriginal || __state.Started == 0)
+        {
+            return;
+        }
+
+        var elapsed =
+            System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
+        var allocated =
+            GC.GetAllocatedBytesForCurrentThread() - __state.AllocatedBytes;
+        if (allocated < 0)
+        {
+            allocated = 0;
+        }
+
+        var typeName =
+            __originalMethod.DeclaringType?.FullName ??
+            __originalMethod.DeclaringType?.Name ??
+            "UnknownKeystoneComponent";
+
+        if (!FrameStats.TryGetValue(typeName, out var aggregate))
+        {
+            aggregate = new Aggregate();
+            FrameStats[typeName] = aggregate;
+        }
+
+        aggregate.TotalTicks += Math.Max(0, elapsed);
+        aggregate.MaxTicks = Math.Max(aggregate.MaxTicks, elapsed);
+        aggregate.TotalAllocatedBytes += allocated;
+        aggregate.MaxAllocatedBytes = Math.Max(aggregate.MaxAllocatedBytes, allocated);
+        aggregate.Calls++;
+        aggregate.Gc0 += GC.CollectionCount(0) - __state.Gc0;
+        aggregate.Gc1 += GC.CollectionCount(1) - __state.Gc1;
+        aggregate.Gc2 += GC.CollectionCount(2) - __state.Gc2;
+    }
+
+    public static void FlushFrame()
+    {
+        foreach (var pair in FrameStats)
+        {
+            var value = pair.Value;
+            FreezeDetector.RecordKeystoneProfile(
+                pair.Key,
+                value.TotalTicks,
+                value.MaxTicks,
+                value.TotalAllocatedBytes,
+                value.MaxAllocatedBytes,
+                value.Calls,
+                value.Gc0,
+                value.Gc1,
+                value.Gc2);
+        }
+
+        FrameStats.Clear();
+    }
+}
+
+internal static class NavigationEntityListenerProfiler
+{
+    private const double SlowNotifyThresholdMs = 50.0;
+    private const int ThresholdCheckInterval = 32;
+
+    private sealed class ListenerStat
+    {
+        public long Ticks;
+        public int Calls;
+    }
+
+    private static readonly Dictionary<string, ListenerStat> Stats =
+        new(StringComparer.Ordinal);
+
+    [ThreadStatic]
+    private static int _depth;
+
+    [ThreadStatic]
+    private static long _callStarted;
+
+    [ThreadStatic]
+    private static int _listenerCounter;
+
+    [ThreadStatic]
+    private static bool _profileThisCall;
+
+    private static bool _profileNextCall;
+    private static bool _installed;
+
+    public static void Patch(Harmony harmony)
+    {
+        if (_installed)
+        {
+            return;
+        }
+
+        var registryType =
+            AccessTools.TypeByName("Timberborn.Navigation.NavMeshListenerEntityRegistry");
+        var notify = registryType is null
+            ? null
+            : AccessTools.Method(registryType, "NotifyAll");
+
+        if (notify is null)
+        {
+            Runtime.Log(
+                "warning: per-listener navmesh profiler unavailable: " +
+                "NavMeshListenerEntityRegistry.NotifyAll not found");
+            return;
+        }
+
+        try
+        {
+            harmony.Patch(
+                notify,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(NavigationEntityListenerProfiler),
+                        nameof(Prefix)))
+                {
+                    priority = Priority.First
+                },
+                finalizer: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(NavigationEntityListenerProfiler),
+                        nameof(Finalizer)))
+                {
+                    priority = Priority.Last
+                },
+                transpiler: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(NavigationEntityListenerProfiler),
+                        nameof(Transpiler))));
+
+            _installed = true;
+            Runtime.Log(
+                "adaptive per-entity navmesh-listener profiler installed: " +
+                "profiles the tail of a >50ms NotifyAll call and fully profiles the following call");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: per-listener navmesh profiler installation failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void Prefix()
+    {
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        if (_depth++ == 0)
+        {
+            _callStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            _listenerCounter = 0;
+            _profileThisCall = _profileNextCall;
+            _profileNextCall = false;
+            Stats.Clear();
+        }
+    }
+
+    private static Exception? Finalizer(Exception? __exception)
+    {
+        if (Runtime.IsBenchmarking || _depth <= 0)
+        {
+            return __exception;
+        }
+
+        if (--_depth != 0)
+        {
+            return __exception;
+        }
+
+        var elapsed =
+            System.Diagnostics.Stopwatch.GetTimestamp() - _callStarted;
+        var elapsedMs =
+            elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+        if (elapsedMs >= SlowNotifyThresholdMs)
+        {
+            _profileNextCall = true;
+        }
+
+        if (_profileThisCall || Stats.Count > 0)
+        {
+            foreach (var pair in Stats.OrderByDescending(pair => pair.Value.Ticks).Take(12))
+            {
+                FreezeDetector.RecordNavigationDetail(
+                    $"EntityListener.{ShortName(pair.Key)}[{pair.Value.Calls}]",
+                    pair.Value.Ticks);
+            }
+        }
+
+        _callStarted = 0;
+        _listenerCounter = 0;
+        _profileThisCall = false;
+        Stats.Clear();
+        return __exception;
+    }
+
+    private static IEnumerable<CodeInstruction> Transpiler(
+        IEnumerable<CodeInstruction> instructions)
+    {
+        foreach (var instruction in instructions)
+        {
+            if (instruction.operand is MethodInfo method &&
+                method.DeclaringType?.FullName == "Timberborn.Navigation.INavMeshListener" &&
+                method.Name == "OnNavMeshUpdated" &&
+                method.GetParameters().Length == 1)
+            {
+                var replacement = AccessTools.Method(
+                        typeof(NavigationEntityListenerProfiler),
+                        nameof(NotifyListener))!
+                    .MakeGenericMethod(
+                        method.DeclaringType,
+                        method.GetParameters()[0].ParameterType);
+
+                instruction.opcode = System.Reflection.Emit.OpCodes.Call;
+                instruction.operand = replacement;
+            }
+
+            yield return instruction;
+        }
+    }
+
+    private static void NotifyListener<TListener, TUpdate>(
+        TListener listener,
+        TUpdate update)
+    {
+        if (_depth <= 0 || Runtime.IsBenchmarking)
+        {
+            ListenerInvoker<TListener, TUpdate>.Invoke(listener, update);
+            return;
+        }
+
+        if (!_profileThisCall)
+        {
+            _listenerCounter++;
+            if ((_listenerCounter % ThresholdCheckInterval) == 0)
+            {
+                var elapsed =
+                    System.Diagnostics.Stopwatch.GetTimestamp() - _callStarted;
+                var elapsedMs =
+                    elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                if (elapsedMs >= SlowNotifyThresholdMs)
+                {
+                    _profileThisCall = true;
+                    Stats.Clear();
+                }
+            }
+
+            if (!_profileThisCall)
+            {
+                ListenerInvoker<TListener, TUpdate>.Invoke(listener, update);
+                return;
+            }
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        try
+        {
+            ListenerInvoker<TListener, TUpdate>.Invoke(listener, update);
+        }
+        finally
+        {
+            var elapsed =
+                System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            var key = listener?.GetType().FullName ?? typeof(TListener).FullName ?? "UnknownListener";
+            if (!Stats.TryGetValue(key, out var stat))
+            {
+                stat = new ListenerStat();
+                Stats[key] = stat;
+            }
+
+            stat.Ticks += elapsed;
+            stat.Calls++;
+        }
+    }
+
+    private static class ListenerInvoker<TListener, TUpdate>
+    {
+        public static readonly Action<TListener, TUpdate> Invoke = Create();
+
+        private static Action<TListener, TUpdate> Create()
+        {
+            var method = typeof(TListener)
+                .GetMethods()
+                .First(candidate =>
+                    candidate.Name == "OnNavMeshUpdated" &&
+                    candidate.GetParameters().Length == 1 &&
+                    candidate.GetParameters()[0].ParameterType == typeof(TUpdate));
+
+            return (Action<TListener, TUpdate>)Delegate.CreateDelegate(
+                typeof(Action<TListener, TUpdate>),
+                method);
+        }
+    }
+
+    private static string ShortName(string value)
+    {
+        var index = value.LastIndexOf('.');
+        return index >= 0 ? value[(index + 1)..] : value;
+    }
+}
+
+internal static class PlayerLoopPhaseProfiler
+{
+    private static readonly string[] PhaseNames =
+    {
+        "UnityEngine.PlayerLoop.EarlyUpdate",
+        "UnityEngine.PlayerLoop.FixedUpdate",
+        "UnityEngine.PlayerLoop.PreUpdate",
+        "UnityEngine.PlayerLoop.Update",
+        "UnityEngine.PlayerLoop.PreLateUpdate",
+        "UnityEngine.PlayerLoop.PostLateUpdate",
+    };
+
+    private static Type? _systemType;
+    private static FieldInfo? _typeField;
+    private static FieldInfo? _subSystemsField;
+    private static FieldInfo? _updateDelegateField;
+    private static bool _installed;
+
+    private sealed class EarlyUpdateStartMarker { }
+    private sealed class EarlyUpdateEndMarker { }
+    private sealed class FixedUpdateStartMarker { }
+    private sealed class FixedUpdateEndMarker { }
+    private sealed class PreUpdateStartMarker { }
+    private sealed class PreUpdateEndMarker { }
+    private sealed class UpdateStartMarker { }
+    private sealed class UpdateEndMarker { }
+    private sealed class PreLateUpdateStartMarker { }
+    private sealed class PreLateUpdateEndMarker { }
+    private sealed class PostLateUpdateStartMarker { }
+    private sealed class PostLateUpdateEndMarker { }
+
+    public static void Install()
+    {
+        if (_installed)
+        {
+            return;
+        }
+
+        try
+        {
+            var playerLoopType = AccessTools.TypeByName("UnityEngine.LowLevel.PlayerLoop");
+            _systemType = AccessTools.TypeByName("UnityEngine.LowLevel.PlayerLoopSystem");
+            if (playerLoopType is null || _systemType is null)
+            {
+                Runtime.Log(
+                    "warning: PlayerLoop phase profiler unavailable: UnityEngine.LowLevel.PlayerLoop types not found");
+                return;
+            }
+
+            const BindingFlags flags =
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            _typeField = _systemType.GetField("type", flags);
+            _subSystemsField = _systemType.GetField("subSystemList", flags);
+            _updateDelegateField = _systemType.GetField("updateDelegate", flags);
+
+            var getCurrent = AccessTools.Method(playerLoopType, "GetCurrentPlayerLoop");
+            var setCurrent = playerLoopType
+                .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(method =>
+                    method.Name == "SetPlayerLoop" &&
+                    method.GetParameters().Length == 1 &&
+                    method.GetParameters()[0].ParameterType == _systemType);
+
+            if (_typeField is null ||
+                _subSystemsField is null ||
+                _updateDelegateField is null ||
+                getCurrent is null ||
+                setCurrent is null)
+            {
+                Runtime.Log(
+                    "warning: PlayerLoop phase profiler unavailable: required fields/methods not found");
+                return;
+            }
+
+            var root = getCurrent.Invoke(null, null);
+            if (root is null)
+            {
+                Runtime.Log(
+                    "warning: PlayerLoop phase profiler unavailable: GetCurrentPlayerLoop returned null");
+                return;
+            }
+
+            var installedPhases = 0;
+            root = Rewrite(root, ref installedPhases);
+            if (installedPhases == 0)
+            {
+                Runtime.Log(
+                    "warning: PlayerLoop phase profiler found no requested phases; leaving loop unchanged");
+                return;
+            }
+
+            setCurrent.Invoke(null, new[] { root });
+            _installed = true;
+
+            Runtime.Log(
+                $"PlayerLoop phase profiler installed: {installedPhases}/{PhaseNames.Length} " +
+                "major phases marked at start/end");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: PlayerLoop phase profiler installation failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static object Rewrite(object system, ref int installedPhases)
+    {
+        var subs = _subSystemsField!.GetValue(system) as Array;
+        if (subs is null)
+        {
+            return system;
+        }
+
+        for (var i = 0; i < subs.Length; i++)
+        {
+            var child = subs.GetValue(i);
+            if (child is null)
+            {
+                continue;
+            }
+
+            var childType = _typeField!.GetValue(child) as Type;
+            var fullName = childType?.FullName;
+
+            if (fullName is not null && PhaseNames.Contains(fullName))
+            {
+                child = AddMarkers(child, fullName);
+                installedPhases++;
+            }
+            else
+            {
+                child = Rewrite(child, ref installedPhases);
+            }
+
+            subs.SetValue(child, i);
+        }
+
+        _subSystemsField.SetValue(system, subs);
+        return system;
+    }
+
+    private static object AddMarkers(object phase, string phaseName)
+    {
+        var original = _subSystemsField!.GetValue(phase) as Array;
+        var originalLength = original?.Length ?? 0;
+        var replacement = Array.CreateInstance(_systemType!, originalLength + 2);
+
+        var start = CreateMarker(phaseName, isStart: true);
+        var end = CreateMarker(phaseName, isStart: false);
+
+        replacement.SetValue(start, 0);
+        if (original is not null)
+        {
+            for (var i = 0; i < originalLength; i++)
+            {
+                replacement.SetValue(original.GetValue(i), i + 1);
+            }
+        }
+        replacement.SetValue(end, originalLength + 1);
+
+        _subSystemsField.SetValue(phase, replacement);
+        return phase;
+    }
+
+    private static object CreateMarker(string phaseName, bool isStart)
+    {
+        var marker = Activator.CreateInstance(_systemType!)!;
+        var methodName = MarkerMethodName(phaseName, isStart);
+        var method = AccessTools.Method(typeof(PlayerLoopPhaseProfiler), methodName)!;
+        var callback = Delegate.CreateDelegate(_updateDelegateField!.FieldType, method);
+
+        _typeField!.SetValue(marker, MarkerType(phaseName, isStart));
+        _updateDelegateField.SetValue(marker, callback);
+        return marker;
+    }
+
+    private static string MarkerMethodName(string phaseName, bool isStart)
+    {
+        var shortName = phaseName[(phaseName.LastIndexOf('.') + 1)..];
+        return shortName + (isStart ? "Start" : "End");
+    }
+
+    private static Type MarkerType(string phaseName, bool isStart)
+    {
+        var shortName = phaseName[(phaseName.LastIndexOf('.') + 1)..];
+        return (shortName, isStart) switch
+        {
+            ("EarlyUpdate", true) => typeof(EarlyUpdateStartMarker),
+            ("EarlyUpdate", false) => typeof(EarlyUpdateEndMarker),
+            ("FixedUpdate", true) => typeof(FixedUpdateStartMarker),
+            ("FixedUpdate", false) => typeof(FixedUpdateEndMarker),
+            ("PreUpdate", true) => typeof(PreUpdateStartMarker),
+            ("PreUpdate", false) => typeof(PreUpdateEndMarker),
+            ("Update", true) => typeof(UpdateStartMarker),
+            ("Update", false) => typeof(UpdateEndMarker),
+            ("PreLateUpdate", true) => typeof(PreLateUpdateStartMarker),
+            ("PreLateUpdate", false) => typeof(PreLateUpdateEndMarker),
+            ("PostLateUpdate", true) => typeof(PostLateUpdateStartMarker),
+            _ => typeof(PostLateUpdateEndMarker),
+        };
+    }
+
+    private static void Mark(string name) =>
+        FreezeDetector.RecordPlayerLoopMarker(
+            name,
+            System.Diagnostics.Stopwatch.GetTimestamp());
+
+    private static void EarlyUpdateStart() => Mark("EarlyUpdate.Start");
+    private static void EarlyUpdateEnd() => Mark("EarlyUpdate.End");
+    private static void FixedUpdateStart() => Mark("FixedUpdate.Start");
+    private static void FixedUpdateEnd() => Mark("FixedUpdate.End");
+    private static void PreUpdateStart() => Mark("PreUpdate.Start");
+    private static void PreUpdateEnd() => Mark("PreUpdate.End");
+    private static void UpdateStart() => Mark("Update.Start");
+    private static void UpdateEnd() => Mark("Update.End");
+    private static void PreLateUpdateStart() => Mark("PreLateUpdate.Start");
+    private static void PreLateUpdateEnd() => Mark("PreLateUpdate.End");
+    private static void PostLateUpdateStart() => Mark("PostLateUpdate.Start");
+    private static void PostLateUpdateEnd() => Mark("PostLateUpdate.End");
 }
 
 internal static class SoilContaminationDeepProfiler
