@@ -514,6 +514,7 @@ internal static class FreezeDetectorPatcher
     private static void UpdatePhasePrefix(out long __state)
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        EntityTickDispatcherProfiler.FlushFrame();
         FreezeDetector.FrameBoundary(now, "UpdateSingletons");
         __state = now;
     }
@@ -542,13 +543,17 @@ internal static class FreezeDetectorPatcher
 internal static class EntityTickDispatcherProfiler
 {
     private const int MaxCallers = 32;
+    private const double SlowEntityTickMs = 20.0;
+    private const int MaxComponentTypes = 20;
     private static readonly HashSet<MethodBase> PatchedCallers = new();
+    private static readonly Dictionary<string, long> SlowEntityTicks = new(StringComparer.Ordinal);
+    private static long _frameTicks;
+    private static int _frameCalls;
 
     private struct Sample
     {
         public bool Active;
         public long Started;
-        public string? Name;
     }
 
     public static void Patch(Harmony harmony)
@@ -612,7 +617,7 @@ internal static class EntityTickDispatcherProfiler
         }
     }
 
-    private static void Prefix(MethodBase __originalMethod, out Sample __state)
+    private static void Prefix(out Sample __state)
     {
         __state = default;
         if (Runtime.IsBenchmarking)
@@ -622,21 +627,129 @@ internal static class EntityTickDispatcherProfiler
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.Name =
-            $"{__originalMethod.DeclaringType?.FullName ?? "Unknown"}::{__originalMethod.Name}";
     }
 
-    private static Exception? Finalizer(Exception? __exception, Sample __state)
+    private static Exception? Finalizer(
+        object __instance,
+        Exception? __exception,
+        Sample __state)
     {
-        if (__state.Active && __state.Started != 0 && __state.Name is not null)
+        if (!__state.Active || __state.Started == 0)
         {
-            FreezeDetector.RecordEntityDispatcher(
-                __state.Name,
-                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+            return __exception;
+        }
+
+        var elapsedTicks =
+            System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
+        if (elapsedTicks <= 0)
+        {
+            return __exception;
+        }
+
+        // TickableEntity.Tick runs on the main simulation thread. Accumulate locally
+        // and take the FreezeDetector lock only once per frame, rather than once per
+        // entity. This keeps the diagnostic from becoming a hot-path bottleneck.
+        _frameTicks += elapsedTicks;
+        _frameCalls++;
+
+        var elapsedMs =
+            elapsedTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        if (elapsedMs >= SlowEntityTickMs)
+        {
+            var label = DescribeSlowEntity(__instance);
+            SlowEntityTicks.TryGetValue(label, out var existing);
+            SlowEntityTicks[label] = existing + elapsedTicks;
         }
 
         return __exception;
     }
+
+    public static void FlushFrame()
+    {
+        if (_frameTicks > 0)
+        {
+            FreezeDetector.RecordEntityDispatcher("TickableEntity.Tick", _frameTicks);
+        }
+
+        foreach (var pair in SlowEntityTicks)
+        {
+            FreezeDetector.RecordSlowEntityTick(pair.Key, pair.Value);
+        }
+
+        _frameTicks = 0;
+        _frameCalls = 0;
+        SlowEntityTicks.Clear();
+    }
+
+    private static string DescribeSlowEntity(object instance)
+    {
+        try
+        {
+            var id = RuntimeHelpers.GetHashCode(instance).ToString("X8");
+            var componentsMember =
+                (MemberInfo?)AccessTools.Field(instance.GetType(), "_tickableComponents") ??
+                AccessTools.Property(instance.GetType(), "_tickableComponents");
+
+            var raw = ReadMember(instance, componentsMember);
+            if (raw is not IEnumerable enumerable)
+            {
+                return $"entity#{id}[components=unavailable]";
+            }
+
+            var componentTypes = new List<string>();
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var total = 0;
+
+            foreach (var item in enumerable)
+            {
+                if (item is null)
+                {
+                    continue;
+                }
+
+                total++;
+                var actual = ExtractTickableComponent(item) ?? item;
+                var type = actual.GetType();
+                var name = type.FullName ?? type.Name;
+                if (seen.Add(name) && componentTypes.Count < MaxComponentTypes)
+                {
+                    componentTypes.Add(name);
+                }
+            }
+
+            var suffix = seen.Count > MaxComponentTypes ? "|..." : "";
+            var components = componentTypes.Count == 0
+                ? "none"
+                : string.Join("|", componentTypes) + suffix;
+
+            return $"entity#{id}[count={total};components={components}]";
+        }
+        catch (Exception ex)
+        {
+            return $"entity[description-error={ex.GetType().Name}]";
+        }
+    }
+
+    private static object? ExtractTickableComponent(object wrapper)
+    {
+        var type = wrapper.GetType();
+        var member =
+            (MemberInfo?)AccessTools.Field(type, "_tickableComponent") ??
+            AccessTools.Property(type, "_tickableComponent") ??
+            AccessTools.Field(type, "TickableComponent") ??
+            AccessTools.Property(type, "TickableComponent");
+
+        return ReadMember(wrapper, member);
+    }
+
+    private static object? ReadMember(object instance, MemberInfo? member) =>
+        member switch
+        {
+            FieldInfo field => field.GetValue(instance),
+            PropertyInfo property when property.GetIndexParameters().Length == 0 =>
+                property.GetValue(instance),
+            _ => null
+        };
 
     private static IEnumerable<MethodInfo> FindDirectCallers(MethodInfo target)
     {
@@ -927,6 +1040,7 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> UpdateSingletonTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> LateUpdateSingletonTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> EntityDispatcherTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> SlowEntityTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SoilDetailTicks = new(StringComparer.Ordinal);
 
@@ -963,6 +1077,7 @@ internal static class FreezeDetector
             UpdateSingletonTicks.Clear();
             LateUpdateSingletonTicks.Clear();
             EntityDispatcherTicks.Clear();
+            SlowEntityTicks.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             _lastPhaseEndTicks = 0;
@@ -1021,6 +1136,7 @@ internal static class FreezeDetector
             UpdateSingletonTicks.Clear();
             LateUpdateSingletonTicks.Clear();
             EntityDispatcherTicks.Clear();
+            SlowEntityTicks.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             _soilGc0 = 0;
@@ -1140,6 +1256,9 @@ internal static class FreezeDetector
 
     public static void RecordEntityDispatcher(string name, long elapsedTicks) =>
         RecordNamedTicks(EntityDispatcherTicks, name, elapsedTicks);
+
+    public static void RecordSlowEntityTick(string name, long elapsedTicks) =>
+        RecordNamedTicks(SlowEntityTicks, name, elapsedTicks);
 
     private static void RecordNamedTicks(
         Dictionary<string, long> destination,
@@ -1262,6 +1381,15 @@ internal static class FreezeDetector
             ? "none"
             : string.Join(", ", entityDispatchers);
 
+        var slowEntities = SlowEntityTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var slowEntityText = slowEntities.Length == 0
+            ? "none >=20ms"
+            : string.Join(", ", slowEntities);
+
         var phaseGaps = PhaseGapTicks
             .OrderByDescending(x => x.Value)
             .Take(TopSystemCount)
@@ -1288,6 +1416,7 @@ internal static class FreezeDetector
             $"top update singletons: {topUpdateText}; " +
             $"top late-update singletons: {topLateUpdateText}; " +
             $"entity tick dispatchers: {entityDispatcherText}; " +
+            $"slow entity ticks: {slowEntityText}; " +
             $"top tick singletons: {topTickText}; " +
             $"soil GC=[gen0:{_soilGc0}, gen1:{_soilGc1}, gen2:{_soilGc2}]; " +
             $"top systems: {topText}";
