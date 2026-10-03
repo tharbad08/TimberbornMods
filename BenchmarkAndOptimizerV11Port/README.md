@@ -41,3 +41,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.38: adds low-overhead always-on attribution for UpdateSingleton/LateUpdateSingleton implementations and outer callers of TickableEntity.TickTickableComponents, keeping phase-gap and TickSingleton diagnostics without hot inner-method hooks.
 
 - v1.1.39: batches TickableEntity timing once per frame instead of locking per entity, and records only individual entity ticks >=20ms with their tickable component type set for targeted freeze attribution.
+
+- v1.1.40: batches merged TimberPhysics terrain-collider rebuilds by dirty 16x16 chunk and flushes them once immediately before the next physics step, preventing repeated same-chunk rebuilds during dynamite/terrain-edit bursts.
