@@ -51,3 +51,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.43: bundles targeted Keystone Tick allocation/GC attribution, adaptive per-entity navmesh-listener profiling for expensive NotifyAll passes, and lightweight major Unity PlayerLoop phase markers. Diagnostic-only; no new throttling or simulation behavior changes.
 
 - v1.1.44: optimizes Extended Builder Reach navmesh notifications by separating ExtendedDemolishableAccessible listeners from the generic registry and fast-filtering by BoundingBox before preserving EBR's normal callback; removes the resolved Keystone allocation profiler; adds child-level PreLateUpdate PlayerLoop timing and targeted InputService/FaunaSpawnDrainer internal timing. No new cadence throttles.
+
+- v1.1.45: fixes the EBR fast-dispatch value-type IL bug so BoundingBox filtering can activate; adds per-input-processor timing, managed MonoBehaviour LateUpdate attribution, FaunaSpawnDrainer inner Spawn timing around EntityService.Instantiate/configuration/registry add, and SoilMoisture outer-Tick allocation/GC attribution. Removes the unresolved InputUpdater probe. No new cadence throttles.
