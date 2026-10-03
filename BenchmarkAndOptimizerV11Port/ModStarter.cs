@@ -1135,9 +1135,8 @@ internal static class BfrLocalizedChangeOptimizerPatcher
                 _localizedMethod!.Invoke(__instance, new object?[] { typedList });
             }
 
-            Runtime.LogOnce(
-                "bfr-sparse-localized-split",
-                $"BFR sparse localized-change batching active: first split reduced a " +
+            Runtime.Log(
+                $"BFR sparse localized-change batching active: reduced a " +
                 $"{originalArea}-cell padded bounding scan to {groupedArea} cells across " +
                 $"{groups.Length} local group(s)");
             return false;
