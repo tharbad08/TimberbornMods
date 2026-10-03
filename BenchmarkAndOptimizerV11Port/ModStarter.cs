@@ -1820,6 +1820,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
     private const int ChunkSize = 16;
 
     private static readonly ConditionalWeakTable<object, TerrainState> States = new();
+    private static readonly List<WeakReference<object>> TrackedServices = new();
 
     private static bool _patched;
     private static FieldInfo? _rootObjectField;
@@ -2051,10 +2052,31 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
                     AccessTools.Method(typeof(TimberPhysicsTerrainColliderMergerPatcher), nameof(RemoveXYPrefix)))
                 { priority = Priority.First });
 
+            var physicsSimulatorType = AccessTools.TypeByName("TimberPhysics.Core.PhysicsSimulator");
+            var physicsUpdate = physicsSimulatorType is null
+                ? null
+                : AccessTools.Method(physicsSimulatorType, "UpdateSingleton", Type.EmptyTypes);
+
+            if (physicsUpdate is null)
+            {
+                Runtime.Log(
+                    "warning: TimberPhysics terrain merger could not install batched terrain flush; " +
+                    "PhysicsSimulator.UpdateSingleton not found. Leaving vanilla terrain colliders.");
+                return;
+            }
+
+            harmony.Patch(
+                physicsUpdate,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(TimberPhysicsTerrainColliderMergerPatcher),
+                        nameof(FlushDirtyChunksBeforePhysics)))
+                { priority = Priority.First });
+
             _patched = true;
             Runtime.Log(
                 $"TimberPhysics terrain collider merger installed: {ChunkSize}x{ChunkSize} chunks, " +
-                "exact floor/ceiling interval merging");
+                "exact floor/ceiling interval merging; terrain edits are batched per dirty chunk");
         }
         catch (Exception ex)
         {
@@ -2158,27 +2180,20 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
         try
         {
-            RebuildChunk(__instance, __0);
+            MarkChunkDirty(__instance, __0);
             return false;
         }
         catch (Exception ex)
         {
             Runtime.Log(
-                $"warning: TimberPhysics merged terrain chunk rebuild failed: " +
+                $"warning: TimberPhysics merged terrain dirty-mark failed: " +
                 $"{ex.GetType().Name}: {ex.Message}; attempting transactional vanilla restore");
 
-            if (TryDisableMergerAndRestoreVanilla(
-                    __instance,
-                    "chunk rebuild",
-                    ex,
-                    skipNextSpawnXY: false))
-            {
-                // The full vanilla terrain set already includes this changed cell.
-                return false;
-            }
-
-            // Do not mix one vanilla chunk into the merged representation. A failed
-            // full restore leaves the merger enabled and logs loudly for diagnosis.
+            TryDisableMergerAndRestoreVanilla(
+                __instance,
+                "terrain dirty-mark",
+                ex,
+                skipNextSpawnXY: false);
             return false;
         }
     }
@@ -2192,27 +2207,67 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 
         try
         {
-            RemoveChunkForCoordinates(__instance, __0);
+            // Do not destroy/rebuild the 16x16 merged collider chunk here. One
+            // explosion can edit several cells in the same chunk; doing the work
+            // once per cell caused the blast-time FPS collapse. SpawnCollidersXY
+            // will mark the same chunk dirty, and we rebuild it once before the
+            // next physics step.
+            MarkChunkDirty(__instance, __0);
             return false;
         }
         catch (Exception ex)
         {
             Runtime.Log(
-                $"warning: TimberPhysics merged terrain chunk removal failed: " +
+                $"warning: TimberPhysics merged terrain dirty-mark failed during removal: " +
                 $"{ex.GetType().Name}: {ex.Message}; attempting transactional vanilla restore");
 
-            if (TryDisableMergerAndRestoreVanilla(
-                    __instance,
-                    "chunk removal",
-                    ex,
-                    skipNextSpawnXY: true))
+            TryDisableMergerAndRestoreVanilla(
+                __instance,
+                "terrain removal dirty-mark",
+                ex,
+                skipNextSpawnXY: true);
+            return false;
+        }
+    }
+
+    private static void FlushDirtyChunksBeforePhysics()
+    {
+        if (_disabled)
+        {
+            return;
+        }
+
+        foreach (var pair in TrackedServices.ToArray())
+        {
+            if (!pair.TryGetTarget(out var service))
             {
-                // The full vanilla rebuild supersedes both this removal and the
-                // immediately following SpawnCollidersXY for the same terrain edit.
-                return false;
+                TrackedServices.Remove(pair);
+                continue;
             }
 
-            return false;
+            if (!States.TryGetValue(service, out var state) || state.DirtyChunks.Count == 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                FlushDirtyChunks(service, state);
+            }
+            catch (Exception ex)
+            {
+                Runtime.Log(
+                    $"warning: TimberPhysics batched terrain chunk rebuild failed: " +
+                    $"{ex.GetType().Name}: {ex.Message}; attempting transactional vanilla restore");
+
+                state.DirtyChunks.Clear();
+                TryDisableMergerAndRestoreVanilla(
+                    service,
+                    "batched chunk rebuild",
+                    ex,
+                    skipNextSpawnXY: false);
+                return;
+            }
         }
     }
 
@@ -2335,7 +2390,9 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
     private static void BuildAll(object service)
     {
         var state = States.GetOrCreateValue(service);
+        TrackService(service, state);
         ClearState(state);
+        state.DirtyChunks.Clear();
 
         var terrainSize = ReadMember(_mapSizeField!.GetValue(service)!, _terrainSizeMember!)!;
         var sizeX = Convert.ToInt32(ReadMember(terrainSize, _vector2X!));
@@ -2359,31 +2416,61 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
             $"merged colliders={after}, reduction={(before == 0 ? 0 : 100.0 * (before - after) / before):F1}%");
     }
 
-    private static void RebuildChunk(object service, object coordinates)
+    private static void MarkChunkDirty(object service, object coordinates)
     {
         var state = States.GetOrCreateValue(service);
+        TrackService(service, state);
+
         var x = Convert.ToInt32(ReadMember(coordinates, _vector2X!));
         var y = Convert.ToInt32(ReadMember(coordinates, _vector2Y!));
         var originX = x / ChunkSize * ChunkSize;
         var originY = y / ChunkSize * ChunkSize;
 
-        RemoveChunk(state, ChunkKey(originX, originY));
+        state.DirtyChunks.Add(ChunkKey(originX, originY));
+    }
+
+    private static void TrackService(object service, TerrainState state)
+    {
+        if (state.Tracked)
+        {
+            return;
+        }
+
+        state.Tracked = true;
+        TrackedServices.Add(new WeakReference<object>(service));
+    }
+
+    private static void FlushDirtyChunks(object service, TerrainState state)
+    {
+        if (state.DirtyChunks.Count == 0)
+        {
+            return;
+        }
 
         var terrainSize = ReadMember(_mapSizeField!.GetValue(service)!, _terrainSizeMember!)!;
         var sizeX = Convert.ToInt32(ReadMember(terrainSize, _vector2X!));
         var sizeY = Convert.ToInt32(ReadMember(terrainSize, _vector2Y!));
 
-        BuildChunk(service, state, originX, originY, sizeX, sizeY);
-    }
+        var dirty = state.DirtyChunks.ToArray();
+        state.DirtyChunks.Clear();
 
-    private static void RemoveChunkForCoordinates(object service, object coordinates)
-    {
-        var state = States.GetOrCreateValue(service);
-        var x = Convert.ToInt32(ReadMember(coordinates, _vector2X!));
-        var y = Convert.ToInt32(ReadMember(coordinates, _vector2Y!));
-        var originX = x / ChunkSize * ChunkSize;
-        var originY = y / ChunkSize * ChunkSize;
-        RemoveChunk(state, ChunkKey(originX, originY));
+        foreach (var key in dirty)
+        {
+            var originX = unchecked((int)(key >> 32));
+            var originY = unchecked((int)(uint)key);
+
+            // Rebuild back-to-back immediately before physics. There is no PhysX
+            // simulation between removing the old merged chunk and creating the
+            // replacement, so a terrain edit cannot leave a persistent collider gap.
+            RemoveChunk(state, key);
+            BuildChunk(service, state, originX, originY, sizeX, sizeY);
+        }
+
+        if (dirty.Length > 1)
+        {
+            Runtime.Log(
+                $"TimberPhysics terrain edits batched: rebuilt {dirty.Length} dirty chunk(s) once before physics");
+        }
     }
 
     private static (int Cells, int Colliders) BuildChunk(
@@ -2908,6 +2995,8 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
         {
             RemoveChunk(state, key);
         }
+
+        state.DirtyChunks.Clear();
     }
 
     private static void RemoveChunk(TerrainState state, long key)
@@ -2945,6 +3034,8 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
     private sealed class TerrainState
     {
         public Dictionary<long, List<object>> Chunks { get; } = new();
+        public HashSet<long> DirtyChunks { get; } = new();
+        public bool Tracked { get; set; }
     }
 }
 
