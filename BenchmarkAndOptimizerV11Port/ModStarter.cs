@@ -339,13 +339,8 @@ internal static class FreezeDetectorPatcher
 
 internal static class SoilContaminationDeepProfiler
 {
-    private const int MaxProfiledMethods = 96;
-    private static readonly HashSet<MethodBase> ProfiledMethods = new();
     private static Type? _soilType;
     private static MethodInfo? _soilTick;
-
-    [ThreadStatic]
-    private static int _soilDepth;
 
     private struct SoilTickSample
     {
@@ -353,13 +348,6 @@ internal static class SoilContaminationDeepProfiler
         public int Gen0;
         public int Gen1;
         public int Gen2;
-    }
-
-    private struct SoilMethodSample
-    {
-        public bool Active;
-        public long Started;
-        public string? Name;
     }
 
     public static void Patch(Harmony harmony)
@@ -372,17 +360,20 @@ internal static class SoilContaminationDeepProfiler
 
             if (_soilType is null)
             {
-                Runtime.Log("warning: SoilContamination deep profiler unavailable: type not found");
+                Runtime.Log("warning: SoilContamination lightweight profiler unavailable: type not found");
                 return;
             }
 
             _soilTick = AccessTools.Method(_soilType, "Tick", Type.EmptyTypes);
             if (_soilTick is null)
             {
-                Runtime.Log("warning: SoilContamination deep profiler unavailable: Tick not found");
+                Runtime.Log("warning: SoilContamination lightweight profiler unavailable: Tick not found");
                 return;
             }
 
+            // Intentionally patch ONLY the outer Tick. The v1.1.36 diagnostic
+            // patched hot inner methods such as SetContaminationLevel, which are
+            // called thousands of times and materially changed game performance.
             harmony.Patch(
                 _soilTick,
                 prefix: new HarmonyMethod(
@@ -396,45 +387,14 @@ internal static class SoilContaminationDeepProfiler
                     priority = Priority.Last
                 });
 
-            var candidates = DiscoverCallees(_soilTick, depth: 2)
-                .Where(IsUsefulCallee)
-                .Distinct()
-                .Take(MaxProfiledMethods)
-                .ToArray();
-
-            foreach (var method in candidates)
-            {
-                try
-                {
-                    harmony.Patch(
-                        method,
-                        prefix: new HarmonyMethod(
-                            AccessTools.Method(typeof(SoilContaminationDeepProfiler), nameof(SoilMethodPrefix)))
-                        {
-                            priority = Priority.First
-                        },
-                        finalizer: new HarmonyMethod(
-                            AccessTools.Method(typeof(SoilContaminationDeepProfiler), nameof(SoilMethodFinalizer)))
-                        {
-                            priority = Priority.Last
-                        });
-
-                    ProfiledMethods.Add(method);
-                }
-                catch
-                {
-                    // Some runtime/generic methods cannot be patched safely; skip them.
-                }
-            }
-
             Runtime.Log(
-                $"SoilContamination deep profiler installed: type={_soilType.FullName}, " +
-                $"direct/recursive callees patched={ProfiledMethods.Count}");
+                $"SoilContamination lightweight profiler installed: " +
+                $"type={_soilType.FullName}; outer Tick only, no inner-method patches");
         }
         catch (Exception ex)
         {
             Runtime.Log(
-                $"warning: SoilContamination deep profiler installation failed: " +
+                $"warning: SoilContamination lightweight profiler installation failed: " +
                 $"{ex.GetType().Name}: {ex.Message}");
         }
     }
@@ -451,46 +411,16 @@ internal static class SoilContaminationDeepProfiler
         __state.Gen0 = GC.CollectionCount(0);
         __state.Gen1 = GC.CollectionCount(1);
         __state.Gen2 = GC.CollectionCount(2);
-        _soilDepth++;
     }
 
     private static Exception? SoilTickFinalizer(Exception? __exception, SoilTickSample __state)
     {
         if (__state.Active)
         {
-            _soilDepth = Math.Max(0, _soilDepth - 1);
             FreezeDetector.RecordSoilGc(
                 GC.CollectionCount(0) - __state.Gen0,
                 GC.CollectionCount(1) - __state.Gen1,
                 GC.CollectionCount(2) - __state.Gen2);
-        }
-
-        return __exception;
-    }
-
-    private static void SoilMethodPrefix(MethodBase __originalMethod, out SoilMethodSample __state)
-    {
-        __state = default;
-        if (_soilDepth <= 0 || Runtime.IsBenchmarking)
-        {
-            return;
-        }
-
-        __state.Active = true;
-        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.Name =
-            $"{__originalMethod.DeclaringType?.FullName ?? "Unknown"}::{__originalMethod.Name}";
-    }
-
-    private static Exception? SoilMethodFinalizer(
-        Exception? __exception,
-        SoilMethodSample __state)
-    {
-        if (__state.Active && __state.Started != 0 && __state.Name is not null)
-        {
-            FreezeDetector.RecordSoilDetail(
-                __state.Name,
-                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
         }
 
         return __exception;
@@ -511,161 +441,6 @@ internal static class SoilContaminationDeepProfiler
             return Array.Empty<Type>();
         }
     }
-
-    private static IEnumerable<MethodInfo> DiscoverCallees(MethodInfo root, int depth)
-    {
-        var visited = new HashSet<MethodBase>();
-        var queue = new Queue<(MethodInfo Method, int Depth)>();
-        queue.Enqueue((root, 0));
-        visited.Add(root);
-
-        while (queue.Count > 0)
-        {
-            var (method, currentDepth) = queue.Dequeue();
-            if (currentDepth >= depth)
-            {
-                continue;
-            }
-
-            foreach (var callee in ReadCalledMethods(method))
-            {
-                if (!visited.Add(callee))
-                {
-                    continue;
-                }
-
-                yield return callee;
-
-                if (currentDepth + 1 < depth && IsUsefulCallee(callee))
-                {
-                    queue.Enqueue((callee, currentDepth + 1));
-                }
-            }
-        }
-    }
-
-    private static bool IsUsefulCallee(MethodInfo method)
-    {
-        if (method == _soilTick ||
-            method.IsAbstract ||
-            method.ContainsGenericParameters ||
-            method.IsGenericMethodDefinition ||
-            method.DeclaringType is null ||
-            method.DeclaringType.IsInterface)
-        {
-            return false;
-        }
-
-        var ns = method.DeclaringType.Namespace ?? "";
-        return ns.StartsWith("Timberborn", StringComparison.Ordinal) ||
-               method.DeclaringType.Assembly == _soilType?.Assembly;
-    }
-
-    private static readonly Dictionary<short, System.Reflection.Emit.OpCode> OneByteOpCodes =
-        typeof(System.Reflection.Emit.OpCodes)
-            .GetFields(BindingFlags.Public | BindingFlags.Static)
-            .Where(field => field.FieldType == typeof(System.Reflection.Emit.OpCode))
-            .Select(field => (System.Reflection.Emit.OpCode)field.GetValue(null)!)
-            .Where(op => op.Size == 1)
-            .ToDictionary(op => (short)(byte)op.Value);
-
-    private static readonly Dictionary<short, System.Reflection.Emit.OpCode> TwoByteOpCodes =
-        typeof(System.Reflection.Emit.OpCodes)
-            .GetFields(BindingFlags.Public | BindingFlags.Static)
-            .Where(field => field.FieldType == typeof(System.Reflection.Emit.OpCode))
-            .Select(field => (System.Reflection.Emit.OpCode)field.GetValue(null)!)
-            .Where(op => op.Size == 2)
-            .ToDictionary(op => (short)(op.Value & 0xFF));
-
-    private static IEnumerable<MethodInfo> ReadCalledMethods(MethodInfo method)
-    {
-        var body = method.GetMethodBody();
-        var il = body?.GetILAsByteArray();
-        if (il is null)
-        {
-            yield break;
-        }
-
-        var position = 0;
-        while (position < il.Length)
-        {
-            System.Reflection.Emit.OpCode op;
-            var first = il[position++];
-            if (first == 0xFE)
-            {
-                if (position >= il.Length ||
-                    !TwoByteOpCodes.TryGetValue((short)il[position++], out op))
-                {
-                    yield break;
-                }
-            }
-            else if (!OneByteOpCodes.TryGetValue((short)first, out op))
-            {
-                yield break;
-            }
-
-            var operandStart = position;
-            var operandSize = OperandSize(op.OperandType, il, operandStart);
-            if (operandSize < 0 || operandStart + operandSize > il.Length)
-            {
-                yield break;
-            }
-
-            if ((op == System.Reflection.Emit.OpCodes.Call ||
-                 op == System.Reflection.Emit.OpCodes.Callvirt) &&
-                operandSize == 4)
-            {
-                var token = BitConverter.ToInt32(il, operandStart);
-                MethodBase? called = null;
-                try
-                {
-                    called = method.Module.ResolveMethod(
-                        token,
-                        method.DeclaringType?.GetGenericArguments(),
-                        method.GetGenericArguments());
-                }
-                catch
-                {
-                    // Ignore unresolved generic/runtime tokens.
-                }
-
-                if (called is MethodInfo calledInfo)
-                {
-                    yield return calledInfo;
-                }
-            }
-
-            position += operandSize;
-        }
-    }
-
-    private static int OperandSize(
-        System.Reflection.Emit.OperandType operandType,
-        byte[] il,
-        int position) =>
-        operandType switch
-        {
-            System.Reflection.Emit.OperandType.InlineNone => 0,
-            System.Reflection.Emit.OperandType.ShortInlineBrTarget => 1,
-            System.Reflection.Emit.OperandType.ShortInlineI => 1,
-            System.Reflection.Emit.OperandType.ShortInlineVar => 1,
-            System.Reflection.Emit.OperandType.InlineVar => 2,
-            System.Reflection.Emit.OperandType.InlineI => 4,
-            System.Reflection.Emit.OperandType.InlineBrTarget => 4,
-            System.Reflection.Emit.OperandType.InlineField => 4,
-            System.Reflection.Emit.OperandType.InlineMethod => 4,
-            System.Reflection.Emit.OperandType.InlineSig => 4,
-            System.Reflection.Emit.OperandType.InlineString => 4,
-            System.Reflection.Emit.OperandType.InlineTok => 4,
-            System.Reflection.Emit.OperandType.ShortInlineR => 4,
-            System.Reflection.Emit.OperandType.InlineI8 => 8,
-            System.Reflection.Emit.OperandType.InlineR => 8,
-            System.Reflection.Emit.OperandType.InlineSwitch =>
-                position + 4 <= il.Length
-                    ? 4 + (BitConverter.ToInt32(il, position) * 4)
-                    : -1,
-            _ => -1
-        };
 }
 
 internal static class FreezeDetector
@@ -978,7 +753,7 @@ internal static class FreezeDetector
             $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
             $"phase gaps: {phaseGapText}; " +
             $"top tick singletons: {topTickText}; " +
-            $"soil detail: {soilText}; soil GC=[gen0:{_soilGc0}, gen1:{_soilGc1}, gen2:{_soilGc2}]; " +
+            $"soil GC=[gen0:{_soilGc0}, gen1:{_soilGc1}, gen2:{_soilGc2}]; " +
             $"top systems: {topText}";
     }
 
