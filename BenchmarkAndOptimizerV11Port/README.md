@@ -49,3 +49,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.42: fixes the slow-entity component sampler so it is installed during normal play, and adds coarse timing for singleton/entity navmesh listener registries behind NavigationSynchronizer.NotifyAllNavmeshChanges. Keeps BFR sparse-update optimization and terrain batching unchanged.
 
 - v1.1.43: bundles targeted Keystone Tick allocation/GC attribution, adaptive per-entity navmesh-listener profiling for expensive NotifyAll passes, and lightweight major Unity PlayerLoop phase markers. Diagnostic-only; no new throttling or simulation behavior changes.
+
+- v1.1.44: optimizes Extended Builder Reach navmesh notifications by separating ExtendedDemolishableAccessible listeners from the generic registry and fast-filtering by BoundingBox before preserving EBR's normal callback; removes the resolved Keystone allocation profiler; adds child-level PreLateUpdate PlayerLoop timing and targeted InputService/FaunaSpawnDrainer internal timing. No new cadence throttles.
