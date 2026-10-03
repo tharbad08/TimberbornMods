@@ -2109,6 +2109,8 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> EntityComponentTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> BfrDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> NavigationDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, KeystoneProfileRecord> KeystoneProfiles = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> PlayerLoopMarkers = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SoilDetailTicks = new(StringComparer.Ordinal);
 
@@ -2120,6 +2122,19 @@ internal static class FreezeDetector
     private static int _soilGc2;
     private static long _frameStartTicks;
     private static long _frameNumber;
+
+    private sealed class KeystoneProfileRecord
+    {
+        public long TotalTicks;
+        public long MaxTicks;
+        public long TotalAllocatedBytes;
+        public long MaxAllocatedBytes;
+        public int Calls;
+        public int Gc0;
+        public int Gc1;
+        public int Gc2;
+    }
+
     private static int _gc0;
     private static int _gc1;
     private static int _gc2;
@@ -2149,6 +2164,8 @@ internal static class FreezeDetector
             EntityComponentTicks.Clear();
             BfrDetailTicks.Clear();
             NavigationDetailTicks.Clear();
+            KeystoneProfiles.Clear();
+            PlayerLoopMarkers.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             _lastPhaseEndTicks = 0;
@@ -2211,6 +2228,8 @@ internal static class FreezeDetector
             EntityComponentTicks.Clear();
             BfrDetailTicks.Clear();
             NavigationDetailTicks.Clear();
+            KeystoneProfiles.Clear();
+            PlayerLoopMarkers.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             _soilGc0 = 0;
@@ -2342,6 +2361,54 @@ internal static class FreezeDetector
 
     public static void RecordNavigationDetail(string name, long elapsedTicks) =>
         RecordNamedTicks(NavigationDetailTicks, name, elapsedTicks);
+
+    public static void RecordKeystoneProfile(
+        string name,
+        long totalTicks,
+        long maxTicks,
+        long totalAllocatedBytes,
+        long maxAllocatedBytes,
+        int calls,
+        int gc0,
+        int gc1,
+        int gc2)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            if (!KeystoneProfiles.TryGetValue(name, out var record))
+            {
+                record = new KeystoneProfileRecord();
+                KeystoneProfiles[name] = record;
+            }
+
+            record.TotalTicks += Math.Max(0, totalTicks);
+            record.MaxTicks = Math.Max(record.MaxTicks, maxTicks);
+            record.TotalAllocatedBytes += Math.Max(0, totalAllocatedBytes);
+            record.MaxAllocatedBytes = Math.Max(record.MaxAllocatedBytes, maxAllocatedBytes);
+            record.Calls += Math.Max(0, calls);
+            record.Gc0 += gc0;
+            record.Gc1 += gc1;
+            record.Gc2 += gc2;
+        }
+    }
+
+    public static void RecordPlayerLoopMarker(string name, long timestamp)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0 || timestamp <= 0)
+            {
+                return;
+            }
+
+            PlayerLoopMarkers[name] = timestamp;
+        }
+    }
 
     private static void RecordNamedTicks(
         Dictionary<string, long> destination,
@@ -2500,6 +2567,21 @@ internal static class FreezeDetector
             ? "none"
             : string.Join(", ", navigationDetails);
 
+        var keystoneProfiles = KeystoneProfiles
+            .OrderByDescending(pair => pair.Value.MaxTicks)
+            .Take(TopSystemCount)
+            .Select(pair =>
+                $"{ShortName(pair.Key)}:calls={pair.Value.Calls}," +
+                $"total={ToMs(pair.Value.TotalTicks):F1}ms,max={ToMs(pair.Value.MaxTicks):F1}ms," +
+                $"alloc={FormatBytes(pair.Value.TotalAllocatedBytes)},maxAlloc={FormatBytes(pair.Value.MaxAllocatedBytes)}," +
+                $"GC={pair.Value.Gc0}/{pair.Value.Gc1}/{pair.Value.Gc2}")
+            .ToArray();
+        var keystoneProfileText = keystoneProfiles.Length == 0
+            ? "none"
+            : string.Join(", ", keystoneProfiles);
+
+        var playerLoop = BuildPlayerLoopText();
+
         var phaseGaps = PhaseGapTicks
             .OrderByDescending(x => x.Value)
             .Take(TopSystemCount)
@@ -2530,9 +2612,73 @@ internal static class FreezeDetector
             $"sampled entity components: {componentSampleText}; " +
             $"BFR detail: {bfrDetailText}; " +
             $"navigation detail: {navigationDetailText}; " +
+            $"Keystone profile: {keystoneProfileText}; " +
+            $"PlayerLoop: {playerLoop}; " +
             $"top tick singletons: {topTickText}; " +
             $"soil GC=[gen0:{_soilGc0}, gen1:{_soilGc1}, gen2:{_soilGc2}]; " +
             $"top systems: {topText}";
+    }
+
+    private static string BuildPlayerLoopText()
+    {
+        if (PlayerLoopMarkers.Count == 0)
+        {
+            return "none";
+        }
+
+        var ordered = new[]
+        {
+            "EarlyUpdate",
+            "FixedUpdate",
+            "PreUpdate",
+            "Update",
+            "PreLateUpdate",
+            "PostLateUpdate",
+        };
+
+        var parts = new List<string>();
+        foreach (var phase in ordered)
+        {
+            if (PlayerLoopMarkers.TryGetValue(phase + ".Start", out var start) &&
+                PlayerLoopMarkers.TryGetValue(phase + ".End", out var end) &&
+                end >= start)
+            {
+                parts.Add($"{phase}={ToMs(end - start):F1}ms");
+            }
+        }
+
+        for (var i = 0; i < ordered.Length - 1; i++)
+        {
+            var left = ordered[i];
+            var right = ordered[i + 1];
+            if (PlayerLoopMarkers.TryGetValue(left + ".End", out var leftEnd) &&
+                PlayerLoopMarkers.TryGetValue(right + ".Start", out var rightStart) &&
+                rightStart >= leftEnd)
+            {
+                var gap = rightStart - leftEnd;
+                if (ToMs(gap) >= 1.0)
+                {
+                    parts.Add($"{left}->{right}={ToMs(gap):F1}ms");
+                }
+            }
+        }
+
+        return parts.Count == 0 ? "markers present, no complete spans" : string.Join(", ", parts);
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024L)
+        {
+            return $"{bytes / (1024.0 * 1024.0):F1}MB";
+        }
+
+        if (bytes >= 1024L)
+        {
+            return $"{bytes / 1024.0:F1}KB";
+        }
+
+        return $"{bytes}B";
     }
 
     private static string ShortMethodName(string value)
