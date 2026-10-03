@@ -141,6 +141,23 @@ internal static class FreezeDetectorPatcher
         }
 
         PatchTickSingletonMethods();
+        PatchLifecycleSingletonMethods(
+            "Timberborn.SingletonSystem.IUpdatableSingleton",
+            "UpdateSingleton",
+            UpdateSingletonRuntimeTypes,
+            UpdateSingletonMethods,
+            nameof(UpdateSingletonPrefix),
+            nameof(UpdateSingletonFinalizer),
+            "UpdateSingleton");
+        PatchLifecycleSingletonMethods(
+            "Timberborn.SingletonSystem.ILateUpdatableSingleton",
+            "LateUpdateSingleton",
+            LateUpdateSingletonRuntimeTypes,
+            LateUpdateSingletonMethods,
+            nameof(LateUpdateSingletonPrefix),
+            nameof(LateUpdateSingletonFinalizer),
+            "LateUpdateSingleton");
+        EntityTickDispatcherProfiler.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
 
         _patched = true;
@@ -149,6 +166,10 @@ internal static class FreezeDetectorPatcher
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
     private static readonly HashSet<MethodBase> TickSingletonMethods = new();
+    private static readonly HashSet<Type> UpdateSingletonRuntimeTypes = new();
+    private static readonly HashSet<MethodBase> UpdateSingletonMethods = new();
+    private static readonly HashSet<Type> LateUpdateSingletonRuntimeTypes = new();
+    private static readonly HashSet<MethodBase> LateUpdateSingletonMethods = new();
 
     private struct TickSingletonSample
     {
@@ -275,6 +296,187 @@ internal static class FreezeDetectorPatcher
             $"{TickSingletonMethods.Count} effective method(s)");
     }
 
+    private static void PatchLifecycleSingletonMethods(
+        string interfaceTypeName,
+        string methodName,
+        HashSet<Type> runtimeTypes,
+        HashSet<MethodBase> methods,
+        string prefixName,
+        string finalizerName,
+        string label)
+    {
+        var singletonInterface = AccessTools.TypeByName(interfaceTypeName);
+        if (singletonInterface is null)
+        {
+            Runtime.Log($"warning: always-on {label} freeze profiler unavailable: {interfaceTypeName} not found");
+            return;
+        }
+
+        var interfaceMethod = singletonInterface
+            .GetMethods()
+            .FirstOrDefault(method => method.Name == methodName && method.GetParameters().Length == 0);
+
+        if (interfaceMethod is null)
+        {
+            Runtime.Log($"warning: always-on {label} freeze profiler unavailable: {interfaceTypeName}.{methodName} not found");
+            return;
+        }
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type[] types;
+            try
+            {
+                types = assembly.GetTypes();
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                types = ex.Types.Where(type => type is not null).Cast<Type>().ToArray();
+            }
+            catch
+            {
+                continue;
+            }
+
+            foreach (var type in types)
+            {
+                if (type.IsAbstract || type.IsInterface || !singletonInterface.IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                MethodInfo? target = null;
+                try
+                {
+                    var map = type.GetInterfaceMap(singletonInterface);
+                    for (var i = 0; i < map.InterfaceMethods.Length; i++)
+                    {
+                        if (map.InterfaceMethods[i].Name == methodName &&
+                            map.InterfaceMethods[i].GetParameters().Length == 0)
+                        {
+                            target = map.TargetMethods[i];
+                            break;
+                        }
+                    }
+                }
+                catch
+                {
+                    // Some generated/runtime types cannot expose an interface map.
+                }
+
+                target ??= AccessTools.Method(type, methodName, Type.EmptyTypes);
+                if (target is null || target.ReturnType != typeof(void))
+                {
+                    continue;
+                }
+
+                var declaringType = target.DeclaringType;
+                if (declaringType is not null && target.ReflectedType != declaringType)
+                {
+                    target = AccessTools.DeclaredMethod(
+                        declaringType,
+                        target.Name,
+                        target.GetParameters().Select(parameter => parameter.ParameterType).ToArray())
+                        ?? target;
+                }
+
+                runtimeTypes.Add(type);
+                if (!methods.Add(target))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    FreezeHarmony.Patch(
+                        target,
+                        prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(FreezeDetectorPatcher), prefixName))
+                        {
+                            priority = 900
+                        },
+                        finalizer: new HarmonyMethod(
+                            AccessTools.Method(typeof(FreezeDetectorPatcher), finalizerName))
+                        {
+                            priority = Priority.Last
+                        });
+                }
+                catch (Exception ex)
+                {
+                    methods.Remove(target);
+                    Runtime.Log(
+                        $"warning: {label} freeze profiler could not patch " +
+                        $"{declaringType?.FullName ?? type.FullName}.{target.Name}: " +
+                        $"{ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"always-on {label} freeze profiler installed: " +
+            $"{runtimeTypes.Count} concrete type(s), {methods.Count} effective method(s)");
+    }
+
+    private static void UpdateSingletonPrefix(object __instance, out TickSingletonSample __state)
+    {
+        BeginLifecycleSample(__instance, UpdateSingletonRuntimeTypes, out __state);
+    }
+
+    private static Exception? UpdateSingletonFinalizer(
+        Exception? __exception,
+        TickSingletonSample __state)
+    {
+        if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
+        {
+            FreezeDetector.RecordUpdateSingleton(
+                __state.TypeName,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+        }
+
+        return __exception;
+    }
+
+    private static void LateUpdateSingletonPrefix(object __instance, out TickSingletonSample __state)
+    {
+        BeginLifecycleSample(__instance, LateUpdateSingletonRuntimeTypes, out __state);
+    }
+
+    private static Exception? LateUpdateSingletonFinalizer(
+        Exception? __exception,
+        TickSingletonSample __state)
+    {
+        if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
+        {
+            FreezeDetector.RecordLateUpdateSingleton(
+                __state.TypeName,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+        }
+
+        return __exception;
+    }
+
+    private static void BeginLifecycleSample(
+        object __instance,
+        HashSet<Type> runtimeTypes,
+        out TickSingletonSample __state)
+    {
+        __state = default;
+        if (Runtime.IsBenchmarking || __instance is null)
+        {
+            return;
+        }
+
+        var runtimeType = __instance.GetType();
+        if (!runtimeTypes.Contains(runtimeType))
+        {
+            return;
+        }
+
+        __state.Active = true;
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
+    }
+
     private static void TickSingletonPrefix(object __instance, out TickSingletonSample __state)
     {
         __state = default;
@@ -335,6 +537,274 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.RecordSection(section, now - __state);
         FreezeDetector.EndPhase(section, now);
     }
+}
+
+internal static class EntityTickDispatcherProfiler
+{
+    private const int MaxCallers = 32;
+    private static readonly HashSet<MethodBase> PatchedCallers = new();
+
+    private struct Sample
+    {
+        public bool Active;
+        public long Started;
+        public string? Name;
+    }
+
+    public static void Patch(Harmony harmony)
+    {
+        try
+        {
+            var entityType = AccessTools.TypeByName("Timberborn.TickSystem.TickableEntity");
+            var target = entityType is null
+                ? null
+                : AccessTools.Method(entityType, "TickTickableComponents");
+
+            if (target is null)
+            {
+                Runtime.Log("warning: entity tick dispatcher profiler unavailable: TickableEntity.TickTickableComponents not found");
+                return;
+            }
+
+            var callers = FindDirectCallers(target)
+                .Take(MaxCallers)
+                .ToArray();
+
+            foreach (var caller in callers)
+            {
+                try
+                {
+                    harmony.Patch(
+                        caller,
+                        prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(EntityTickDispatcherProfiler), nameof(Prefix)))
+                        {
+                            priority = Priority.First
+                        },
+                        finalizer: new HarmonyMethod(
+                            AccessTools.Method(typeof(EntityTickDispatcherProfiler), nameof(Finalizer)))
+                        {
+                            priority = Priority.Last
+                        });
+
+                    PatchedCallers.Add(caller);
+                    Runtime.Log(
+                        $"entity tick dispatcher profiler patch installed: " +
+                        $"{caller.DeclaringType?.FullName}.{caller.Name}");
+                }
+                catch (Exception ex)
+                {
+                    Runtime.Log(
+                        $"warning: entity tick dispatcher profiler could not patch " +
+                        $"{caller.DeclaringType?.FullName}.{caller.Name}: " +
+                        $"{ex.GetType().Name}: {ex.Message}");
+                }
+            }
+
+            Runtime.Log(
+                $"entity tick dispatcher profiler installed: {PatchedCallers.Count} outer caller(s)");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: entity tick dispatcher profiler installation failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void Prefix(MethodBase __originalMethod, out Sample __state)
+    {
+        __state = default;
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        __state.Active = true;
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.Name =
+            $"{__originalMethod.DeclaringType?.FullName ?? "Unknown"}::{__originalMethod.Name}";
+    }
+
+    private static Exception? Finalizer(Exception? __exception, Sample __state)
+    {
+        if (__state.Active && __state.Started != 0 && __state.Name is not null)
+        {
+            FreezeDetector.RecordEntityDispatcher(
+                __state.Name,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+        }
+
+        return __exception;
+    }
+
+    private static IEnumerable<MethodInfo> FindDirectCallers(MethodInfo target)
+    {
+        var assembly = target.DeclaringType?.Assembly;
+        if (assembly is null)
+        {
+            yield break;
+        }
+
+        foreach (var type in SafeGetTypes(assembly))
+        {
+            const BindingFlags flags =
+                BindingFlags.Instance | BindingFlags.Static |
+                BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.DeclaredOnly;
+
+            foreach (var candidate in type.GetMethods(flags))
+            {
+                if (candidate == target ||
+                    candidate.IsAbstract ||
+                    candidate.ContainsGenericParameters)
+                {
+                    continue;
+                }
+
+                if (CallsTarget(candidate, target))
+                {
+                    yield return candidate;
+                }
+            }
+        }
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch
+        {
+            return Array.Empty<Type>();
+        }
+    }
+
+    private static bool SameMethod(MethodBase left, MethodBase right)
+    {
+        try
+        {
+            return left.Module == right.Module &&
+                   left.MetadataToken == right.MetadataToken;
+        }
+        catch
+        {
+            return ReferenceEquals(left, right);
+        }
+    }
+
+    private static bool CallsTarget(MethodInfo candidate, MethodInfo target)
+    {
+        var body = candidate.GetMethodBody();
+        var il = body?.GetILAsByteArray();
+        if (il is null)
+        {
+            return false;
+        }
+
+        var position = 0;
+        while (position < il.Length)
+        {
+            System.Reflection.Emit.OpCode op;
+            var first = il[position++];
+            if (first == 0xFE)
+            {
+                if (position >= il.Length ||
+                    !TwoByteOpCodes.TryGetValue((short)il[position++], out op))
+                {
+                    return false;
+                }
+            }
+            else if (!OneByteOpCodes.TryGetValue((short)first, out op))
+            {
+                return false;
+            }
+
+            var operandStart = position;
+            var operandSize = OperandSize(op.OperandType, il, operandStart);
+            if (operandSize < 0 || operandStart + operandSize > il.Length)
+            {
+                return false;
+            }
+
+            if ((op == System.Reflection.Emit.OpCodes.Call ||
+                 op == System.Reflection.Emit.OpCodes.Callvirt) &&
+                operandSize == 4)
+            {
+                try
+                {
+                    var token = BitConverter.ToInt32(il, operandStart);
+                    var called = candidate.Module.ResolveMethod(
+                        token,
+                        candidate.DeclaringType?.GetGenericArguments(),
+                        candidate.GetGenericArguments());
+
+                    if (called is not null && SameMethod(called, target))
+                    {
+                        return true;
+                    }
+                }
+                catch
+                {
+                    // Ignore unresolved generic/runtime tokens.
+                }
+            }
+
+            position += operandSize;
+        }
+
+        return false;
+    }
+
+    private static readonly Dictionary<short, System.Reflection.Emit.OpCode> OneByteOpCodes =
+        typeof(System.Reflection.Emit.OpCodes)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(field => field.FieldType == typeof(System.Reflection.Emit.OpCode))
+            .Select(field => (System.Reflection.Emit.OpCode)field.GetValue(null)!)
+            .Where(op => op.Size == 1)
+            .ToDictionary(op => (short)(byte)op.Value);
+
+    private static readonly Dictionary<short, System.Reflection.Emit.OpCode> TwoByteOpCodes =
+        typeof(System.Reflection.Emit.OpCodes)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(field => field.FieldType == typeof(System.Reflection.Emit.OpCode))
+            .Select(field => (System.Reflection.Emit.OpCode)field.GetValue(null)!)
+            .Where(op => op.Size == 2)
+            .ToDictionary(op => (short)(op.Value & 0xFF));
+
+    private static int OperandSize(
+        System.Reflection.Emit.OperandType operandType,
+        byte[] il,
+        int position) =>
+        operandType switch
+        {
+            System.Reflection.Emit.OperandType.InlineNone => 0,
+            System.Reflection.Emit.OperandType.ShortInlineBrTarget => 1,
+            System.Reflection.Emit.OperandType.ShortInlineI => 1,
+            System.Reflection.Emit.OperandType.ShortInlineVar => 1,
+            System.Reflection.Emit.OperandType.InlineVar => 2,
+            System.Reflection.Emit.OperandType.InlineI => 4,
+            System.Reflection.Emit.OperandType.InlineBrTarget => 4,
+            System.Reflection.Emit.OperandType.InlineField => 4,
+            System.Reflection.Emit.OperandType.InlineMethod => 4,
+            System.Reflection.Emit.OperandType.InlineSig => 4,
+            System.Reflection.Emit.OperandType.InlineString => 4,
+            System.Reflection.Emit.OperandType.InlineTok => 4,
+            System.Reflection.Emit.OperandType.ShortInlineR => 4,
+            System.Reflection.Emit.OperandType.InlineI8 => 8,
+            System.Reflection.Emit.OperandType.InlineR => 8,
+            System.Reflection.Emit.OperandType.InlineSwitch =>
+                position + 4 <= il.Length
+                    ? 4 + (BitConverter.ToInt32(il, position) * 4)
+                    : -1,
+            _ => -1
+        };
 }
 
 internal static class SoilContaminationDeepProfiler
@@ -454,6 +924,9 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> SectionTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SystemTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> TickSingletonTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> UpdateSingletonTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> LateUpdateSingletonTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> EntityDispatcherTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SoilDetailTicks = new(StringComparer.Ordinal);
 
@@ -487,6 +960,9 @@ internal static class FreezeDetector
             SectionTicks.Clear();
             SystemTicks.Clear();
             TickSingletonTicks.Clear();
+            UpdateSingletonTicks.Clear();
+            LateUpdateSingletonTicks.Clear();
+            EntityDispatcherTicks.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             _lastPhaseEndTicks = 0;
@@ -542,6 +1018,9 @@ internal static class FreezeDetector
             SectionTicks.Clear();
             SystemTicks.Clear();
             TickSingletonTicks.Clear();
+            UpdateSingletonTicks.Clear();
+            LateUpdateSingletonTicks.Clear();
+            EntityDispatcherTicks.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             _soilGc0 = 0;
@@ -653,6 +1132,37 @@ internal static class FreezeDetector
         }
     }
 
+    public static void RecordUpdateSingleton(string name, long elapsedTicks) =>
+        RecordNamedTicks(UpdateSingletonTicks, name, elapsedTicks);
+
+    public static void RecordLateUpdateSingleton(string name, long elapsedTicks) =>
+        RecordNamedTicks(LateUpdateSingletonTicks, name, elapsedTicks);
+
+    public static void RecordEntityDispatcher(string name, long elapsedTicks) =>
+        RecordNamedTicks(EntityDispatcherTicks, name, elapsedTicks);
+
+    private static void RecordNamedTicks(
+        Dictionary<string, long> destination,
+        string name,
+        long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            destination.TryGetValue(name, out var existing);
+            destination[name] = existing + elapsedTicks;
+        }
+    }
+
     public static void RecordSoilDetail(string name, long elapsedTicks)
     {
         if (elapsedTicks <= 0)
@@ -729,6 +1239,29 @@ internal static class FreezeDetector
             ? "none"
             : string.Join(", ", topTickSingletons);
 
+        var topUpdates = UpdateSingletonTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var topUpdateText = topUpdates.Length == 0 ? "none" : string.Join(", ", topUpdates);
+
+        var topLateUpdates = LateUpdateSingletonTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var topLateUpdateText = topLateUpdates.Length == 0 ? "none" : string.Join(", ", topLateUpdates);
+
+        var entityDispatchers = EntityDispatcherTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortMethodName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var entityDispatcherText = entityDispatchers.Length == 0
+            ? "none"
+            : string.Join(", ", entityDispatchers);
+
         var phaseGaps = PhaseGapTicks
             .OrderByDescending(x => x.Value)
             .Take(TopSystemCount)
@@ -752,6 +1285,9 @@ internal static class FreezeDetector
             $"physics={ToMs(physicsTicks):F1}ms; " +
             $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
             $"phase gaps: {phaseGapText}; " +
+            $"top update singletons: {topUpdateText}; " +
+            $"top late-update singletons: {topLateUpdateText}; " +
+            $"entity tick dispatchers: {entityDispatcherText}; " +
             $"top tick singletons: {topTickText}; " +
             $"soil GC=[gen0:{_soilGc0}, gen1:{_soilGc1}, gen2:{_soilGc2}]; " +
             $"top systems: {topText}";
