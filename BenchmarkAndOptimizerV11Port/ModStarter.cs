@@ -83,8 +83,20 @@ internal static class DispatcherPatcher
     public static bool PrefixTickSingletons(object __instance) =>
         Runtime.TryDispatch(__instance, "_tickableSingletons", "_tickableSingleton", "Tick");
 
-    public static bool PrefixTickableComponents(object __instance) =>
-        Runtime.TryDispatch(__instance, "_tickableComponents", "_tickableComponent", "StartAndTick", "Enabled");
+    public static bool PrefixTickableComponents(object __instance)
+    {
+        if (EntityTickDispatcherProfiler.TryProfileArmedEntityComponents(__instance))
+        {
+            return false;
+        }
+
+        return Runtime.TryDispatch(
+            __instance,
+            "_tickableComponents",
+            "_tickableComponent",
+            "StartAndTick",
+            "Enabled");
+    }
 
     public static bool PrefixUpdateSingletons(object __instance) =>
         Runtime.TryDispatch(__instance, "_updatableSingletons", null, "UpdateSingleton");
@@ -158,6 +170,8 @@ internal static class FreezeDetectorPatcher
             nameof(LateUpdateSingletonFinalizer),
             "LateUpdateSingleton");
         EntityTickDispatcherProfiler.Patch(FreezeHarmony);
+        BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
+        NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
 
         _patched = true;
@@ -544,11 +558,19 @@ internal static class EntityTickDispatcherProfiler
 {
     private const int MaxCallers = 32;
     private const double SlowEntityTickMs = 20.0;
+    private const double DeepSampleArmMs = 40.0;
     private const int MaxComponentTypes = 20;
+    private const double DeepSampleCooldownSeconds = 2.0;
     private static readonly HashSet<MethodBase> PatchedCallers = new();
     private static readonly Dictionary<string, long> SlowEntityTicks = new(StringComparer.Ordinal);
+    private static readonly ConditionalWeakTable<object, DeepSampleMarker> DeepSampleTargets = new();
+    private static long _nextDeepSampleArmTicks;
     private static long _frameTicks;
     private static int _frameCalls;
+
+    private sealed class DeepSampleMarker
+    {
+    }
 
     private struct Sample
     {
@@ -659,9 +681,38 @@ internal static class EntityTickDispatcherProfiler
             var label = DescribeSlowEntity(__instance);
             SlowEntityTicks.TryGetValue(label, out var existing);
             SlowEntityTicks[label] = existing + elapsedTicks;
+
+            if (elapsedMs >= DeepSampleArmMs)
+            {
+                ArmDeepComponentSample(__instance);
+            }
         }
 
         return __exception;
+    }
+
+    private static void ArmDeepComponentSample(object entity)
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now < _nextDeepSampleArmTicks)
+        {
+            return;
+        }
+
+        DeepSampleTargets.Remove(entity);
+        DeepSampleTargets.Add(entity, new DeepSampleMarker());
+        _nextDeepSampleArmTicks =
+            now + (long)(DeepSampleCooldownSeconds * System.Diagnostics.Stopwatch.Frequency);
+    }
+
+    public static bool TryProfileArmedEntityComponents(object entity)
+    {
+        if (Runtime.IsBenchmarking || !DeepSampleTargets.Remove(entity))
+        {
+            return false;
+        }
+
+        return Runtime.TryProfileTickableComponents(entity);
     }
 
     public static void FlushFrame()
@@ -918,6 +969,299 @@ internal static class EntityTickDispatcherProfiler
         };
 }
 
+internal static class BfrLocalizedChangeOptimizerPatcher
+{
+    private const int LocalBucketSize = 8;
+    private const int MinBoundingAreaToSplit = 144;
+    private static MethodInfo? _localizedMethod;
+    private static MemberInfo? _xMember;
+    private static MemberInfo? _yMember;
+    private static Type? _coordinateType;
+    private static Type? _typedListType;
+    private static bool _patched;
+
+    [ThreadStatic]
+    private static bool _bypass;
+
+    public static void Patch(Harmony harmony)
+    {
+        if (_patched)
+        {
+            return;
+        }
+
+        var type = AccessTools.TypeByName("Calloatti.BeaversForReal.BFRManager");
+        _localizedMethod = type is null
+            ? null
+            : type.GetMethods(BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public)
+                .FirstOrDefault(method =>
+                    method.Name == "ProcessLocalizedChange" &&
+                    method.GetParameters().Length == 1);
+
+        if (_localizedMethod is null)
+        {
+            Runtime.Log("BFR localized-change optimizer not installed: BFRManager.ProcessLocalizedChange not found");
+            return;
+        }
+
+        var enumerableType = _localizedMethod.GetParameters()[0].ParameterType;
+        _coordinateType = enumerableType.IsGenericType
+            ? enumerableType.GetGenericArguments().FirstOrDefault()
+            : null;
+
+        if (_coordinateType is null)
+        {
+            Runtime.Log("warning: BFR localized-change optimizer unavailable: coordinate type not resolved");
+            return;
+        }
+
+        _xMember = (MemberInfo?)AccessTools.Field(_coordinateType, "x")
+            ?? AccessTools.Property(_coordinateType, "x");
+        _yMember = (MemberInfo?)AccessTools.Field(_coordinateType, "y")
+            ?? AccessTools.Property(_coordinateType, "y");
+        _typedListType = typeof(List<>).MakeGenericType(_coordinateType);
+
+        if (_xMember is null || _yMember is null)
+        {
+            Runtime.Log("warning: BFR localized-change optimizer unavailable: Vector3Int x/y not resolved");
+            return;
+        }
+
+        harmony.Patch(
+            _localizedMethod,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(BfrLocalizedChangeOptimizerPatcher), nameof(Prefix)))
+            {
+                priority = Priority.First
+            },
+            finalizer: new HarmonyMethod(
+                AccessTools.Method(typeof(BfrLocalizedChangeOptimizerPatcher), nameof(Finalizer)))
+            {
+                priority = Priority.Last
+            });
+
+        _patched = true;
+        Runtime.Log(
+            $"BFR localized-change optimizer installed: split sparse navmesh changes into " +
+            $"{LocalBucketSize}x{LocalBucketSize} local buckets before BFR rescans");
+    }
+
+    private static bool Prefix(
+        object __instance,
+        object __0,
+        out long __state)
+    {
+        __state = 0;
+        if (_bypass || Runtime.IsBenchmarking)
+        {
+            return true;
+        }
+
+        __state = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        if (__0 is not IEnumerable enumerable)
+        {
+            return true;
+        }
+
+        var coordinates = new List<(object Value, int X, int Y)>();
+        foreach (var value in enumerable)
+        {
+            if (value is null)
+            {
+                continue;
+            }
+
+            coordinates.Add((
+                value,
+                Convert.ToInt32(ReadMember(value, _xMember!)),
+                Convert.ToInt32(ReadMember(value, _yMember!))));
+        }
+
+        if (coordinates.Count <= 1)
+        {
+            return true;
+        }
+
+        var minX = coordinates.Min(item => item.X);
+        var maxX = coordinates.Max(item => item.X);
+        var minY = coordinates.Min(item => item.Y);
+        var maxY = coordinates.Max(item => item.Y);
+
+        // BFR itself adds one cell of padding around the rectangle.
+        var originalArea = (maxX - minX + 3L) * (maxY - minY + 3L);
+        if (originalArea < MinBoundingAreaToSplit)
+        {
+            return true;
+        }
+
+        var groups = coordinates
+            .GroupBy(item => (FloorDiv(item.X, LocalBucketSize), FloorDiv(item.Y, LocalBucketSize)))
+            .ToArray();
+
+        if (groups.Length <= 1)
+        {
+            return true;
+        }
+
+        long groupedArea = 0;
+        foreach (var group in groups)
+        {
+            var gx0 = group.Min(item => item.X);
+            var gx1 = group.Max(item => item.X);
+            var gy0 = group.Min(item => item.Y);
+            var gy1 = group.Max(item => item.Y);
+            groupedArea += (gx1 - gx0 + 3L) * (gy1 - gy0 + 3L);
+        }
+
+        // Splitting nearby edits can increase work because BFR's padded rectangles
+        // overlap. Only take over when the total rescanned area is materially lower.
+        if (groupedArea * 4 >= originalArea * 3)
+        {
+            return true;
+        }
+
+        try
+        {
+            _bypass = true;
+            foreach (var group in groups)
+            {
+                var typedList = (IList)Activator.CreateInstance(_typedListType!)!;
+                foreach (var item in group)
+                {
+                    typedList.Add(item.Value);
+                }
+
+                _localizedMethod!.Invoke(__instance, new object?[] { typedList });
+            }
+
+            Runtime.LogOnce(
+                "bfr-sparse-localized-split",
+                $"BFR sparse localized-change batching active: first split reduced a " +
+                $"{originalArea}-cell padded bounding scan to {groupedArea} cells across " +
+                $"{groups.Length} local group(s)");
+            return false;
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            throw;
+        }
+        finally
+        {
+            _bypass = false;
+        }
+    }
+
+    private static Exception? Finalizer(Exception? __exception, long __state)
+    {
+        if (__state != 0)
+        {
+            FreezeDetector.RecordBfrDetail(
+                "ProcessLocalizedChange",
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        return __exception;
+    }
+
+    private static int FloorDiv(int value, int divisor)
+    {
+        var result = value / divisor;
+        var remainder = value % divisor;
+        return remainder < 0 ? result - 1 : result;
+    }
+
+    private static object? ReadMember(object instance, MemberInfo member) =>
+        member switch
+        {
+            FieldInfo field => field.GetValue(instance),
+            PropertyInfo property => property.GetValue(instance),
+            _ => null
+        };
+}
+
+internal static class NavigationSynchronizerDetailProfiler
+{
+    private static readonly HashSet<MethodBase> PatchedMethods = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        var type = AccessTools.TypeByName("Timberborn.Navigation.NavigationSynchronizer");
+        if (type is null)
+        {
+            Runtime.Log("NavigationSynchronizer detail profiler unavailable: type not found");
+            return;
+        }
+
+        const BindingFlags flags =
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+
+        var methods = type.GetMethods(flags)
+            .Where(method =>
+                !method.IsAbstract &&
+                !method.ContainsGenericParameters &&
+                method.ReturnType == typeof(void) &&
+                (method.Name.StartsWith("Process", StringComparison.Ordinal) ||
+                 method.Name.Contains("Change", StringComparison.Ordinal) ||
+                 method.Name.Contains("Synchron", StringComparison.Ordinal)))
+            .ToArray();
+
+        foreach (var method in methods)
+        {
+            try
+            {
+                harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(typeof(NavigationSynchronizerDetailProfiler), nameof(Prefix)))
+                    {
+                        priority = Priority.First
+                    },
+                    finalizer: new HarmonyMethod(
+                        AccessTools.Method(typeof(NavigationSynchronizerDetailProfiler), nameof(Finalizer)))
+                    {
+                        priority = Priority.Last
+                    });
+
+                PatchedMethods.Add(method);
+            }
+            catch (Exception ex)
+            {
+                Runtime.Log(
+                    $"warning: NavigationSynchronizer detail profiler could not patch " +
+                    $"{method.Name}: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        Runtime.Log(
+            $"NavigationSynchronizer detail profiler installed: {PatchedMethods.Count} method(s) " +
+            $"[{string.Join(", ", PatchedMethods.Select(method => method.Name).OrderBy(name => name))}]");
+    }
+
+    private static void Prefix(out long __state)
+    {
+        __state = Runtime.IsBenchmarking
+            ? 0
+            : System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0)
+        {
+            FreezeDetector.RecordNavigationDetail(
+                __originalMethod.Name,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        return __exception;
+    }
+}
+
 internal static class SoilContaminationDeepProfiler
 {
     private static Type? _soilType;
@@ -1039,6 +1383,9 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> LateUpdateSingletonTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> EntityDispatcherTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SlowEntityTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> EntityComponentTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> BfrDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> NavigationDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SoilDetailTicks = new(StringComparer.Ordinal);
 
@@ -1076,6 +1423,9 @@ internal static class FreezeDetector
             LateUpdateSingletonTicks.Clear();
             EntityDispatcherTicks.Clear();
             SlowEntityTicks.Clear();
+            EntityComponentTicks.Clear();
+            BfrDetailTicks.Clear();
+            NavigationDetailTicks.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             _lastPhaseEndTicks = 0;
@@ -1135,6 +1485,9 @@ internal static class FreezeDetector
             LateUpdateSingletonTicks.Clear();
             EntityDispatcherTicks.Clear();
             SlowEntityTicks.Clear();
+            EntityComponentTicks.Clear();
+            BfrDetailTicks.Clear();
+            NavigationDetailTicks.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             _soilGc0 = 0;
@@ -1257,6 +1610,15 @@ internal static class FreezeDetector
 
     public static void RecordSlowEntityTick(string name, long elapsedTicks) =>
         RecordNamedTicks(SlowEntityTicks, name, elapsedTicks);
+
+    public static void RecordEntityComponent(string name, long elapsedTicks) =>
+        RecordNamedTicks(EntityComponentTicks, name, elapsedTicks);
+
+    public static void RecordBfrDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(BfrDetailTicks, name, elapsedTicks);
+
+    public static void RecordNavigationDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(NavigationDetailTicks, name, elapsedTicks);
 
     private static void RecordNamedTicks(
         Dictionary<string, long> destination,
@@ -1388,6 +1750,33 @@ internal static class FreezeDetector
             ? "none >=20ms"
             : string.Join(", ", slowEntities);
 
+        var componentSamples = EntityComponentTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var componentSampleText = componentSamples.Length == 0
+            ? "none"
+            : string.Join(", ", componentSamples);
+
+        var bfrDetails = BfrDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var bfrDetailText = bfrDetails.Length == 0
+            ? "none"
+            : string.Join(", ", bfrDetails);
+
+        var navigationDetails = NavigationDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var navigationDetailText = navigationDetails.Length == 0
+            ? "none"
+            : string.Join(", ", navigationDetails);
+
         var phaseGaps = PhaseGapTicks
             .OrderByDescending(x => x.Value)
             .Take(TopSystemCount)
@@ -1415,6 +1804,9 @@ internal static class FreezeDetector
             $"top late-update singletons: {topLateUpdateText}; " +
             $"entity tick dispatchers: {entityDispatcherText}; " +
             $"slow entity ticks: {slowEntityText}; " +
+            $"sampled entity components: {componentSampleText}; " +
+            $"BFR detail: {bfrDetailText}; " +
+            $"navigation detail: {navigationDetailText}; " +
             $"top tick singletons: {topTickText}; " +
             $"soil GC=[gen0:{_soilGc0}, gen1:{_soilGc1}, gen2:{_soilGc2}]; " +
             $"top systems: {topText}";
@@ -3648,6 +4040,56 @@ internal static class Runtime
                 $"dispatch:{owner.GetType().FullName}:{listFieldName}:{ex.GetType().FullName}:{ex.Message}",
                 $"warning: optimizer dispatch failed before safe completion: {ex.GetType().Name}: {ex.Message}; falling back to vanilla");
             return true;
+        }
+    }
+
+    public static bool TryProfileTickableComponents(object owner)
+    {
+        try
+        {
+            var listField = AccessTools.Field(owner.GetType(), "_tickableComponents");
+            if (listField?.GetValue(owner) is not IList list)
+            {
+                return false;
+            }
+
+            var plan = GetDispatchPlan(
+                owner,
+                list,
+                "_tickableComponents",
+                "_tickableComponent",
+                "StartAndTick",
+                "Enabled");
+
+            if (plan is null)
+            {
+                return false;
+            }
+
+            // Invoke the same wrapper methods Timberborn normally uses. Do not call
+            // ShouldRun() here: any configured direct component throttles remain in
+            // force through their existing Harmony prefixes, so sampling does not
+            // change component cadence.
+            foreach (var entry in plan.Entries)
+            {
+                if (!entry.Adapter.IsEnabled(entry.Item))
+                {
+                    continue;
+                }
+
+                var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                entry.Adapter.Invoke(entry.Item);
+                FreezeDetector.RecordEntityComponent(
+                    entry.ActualType.FullName ?? entry.ActualType.Name,
+                    System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            }
+
+            return true;
+        }
+        catch (TargetInvocationException ex) when (ex.InnerException is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            throw;
         }
     }
 
