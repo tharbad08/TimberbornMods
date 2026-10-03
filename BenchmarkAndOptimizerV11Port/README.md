@@ -45,3 +45,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.40: batches merged TimberPhysics terrain-collider rebuilds by dirty 16x16 chunk and flushes them once immediately before the next physics step, preventing repeated same-chunk rebuilds during dynamite/terrain-edit bursts.
 
 - v1.1.41: bundles sparse BFR localized-update optimization, low-frequency deep component sampling for slow TickableEntity instances, and NavigationSynchronizer sub-method attribution. Keeps the v1.1.40 batched terrain collider rebuilds.
+
+- v1.1.42: fixes the slow-entity component sampler so it is installed during normal play, and adds coarse timing for singleton/entity navmesh listener registries behind NavigationSynchronizer.NotifyAllNavmeshChanges. Keeps BFR sparse-update optimization and terrain batching unchanged.
