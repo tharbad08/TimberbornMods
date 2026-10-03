@@ -83,20 +83,8 @@ internal static class DispatcherPatcher
     public static bool PrefixTickSingletons(object __instance) =>
         Runtime.TryDispatch(__instance, "_tickableSingletons", "_tickableSingleton", "Tick");
 
-    public static bool PrefixTickableComponents(object __instance)
-    {
-        if (EntityTickDispatcherProfiler.TryProfileArmedEntityComponents(__instance))
-        {
-            return false;
-        }
-
-        return Runtime.TryDispatch(
-            __instance,
-            "_tickableComponents",
-            "_tickableComponent",
-            "StartAndTick",
-            "Enabled");
-    }
+    public static bool PrefixTickableComponents(object __instance) =>
+        Runtime.TryDispatch(__instance, "_tickableComponents", "_tickableComponent", "StartAndTick", "Enabled");
 
     public static bool PrefixUpdateSingletons(object __instance) =>
         Runtime.TryDispatch(__instance, "_updatableSingletons", null, "UpdateSingleton");
@@ -593,6 +581,29 @@ internal static class EntityTickDispatcherProfiler
                 return;
             }
 
+            try
+            {
+                harmony.Patch(
+                    target,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(
+                            typeof(EntityTickDispatcherProfiler),
+                            nameof(ArmedComponentSamplePrefix)))
+                    {
+                        priority = Priority.First
+                    });
+
+                Runtime.Log(
+                    "slow-entity component sampler installed persistently on " +
+                    "TickableEntity.TickTickableComponents");
+            }
+            catch (Exception ex)
+            {
+                Runtime.Log(
+                    $"warning: slow-entity component sampler patch failed: " +
+                    $"{ex.GetType().Name}: {ex.Message}");
+            }
+
             var callers = FindDirectCallers(target)
                 .Take(MaxCallers)
                 .ToArray();
@@ -637,6 +648,19 @@ internal static class EntityTickDispatcherProfiler
                 $"warning: entity tick dispatcher profiler installation failed: " +
                 $"{ex.GetType().Name}: {ex.Message}");
         }
+    }
+
+    private static bool ArmedComponentSamplePrefix(object __instance)
+    {
+        if (Runtime.IsBenchmarking)
+        {
+            return true;
+        }
+
+        // Returning false means we already invoked the entity's normal component
+        // wrappers once with per-component timing. Otherwise let Timberborn run
+        // TickTickableComponents normally.
+        return !TryProfileArmedEntityComponents(__instance);
     }
 
     private static void Prefix(out Sample __state)
@@ -1233,9 +1257,69 @@ internal static class NavigationSynchronizerDetailProfiler
             }
         }
 
+        var registryMethodCount = 0;
+        foreach (var registryTypeName in new[]
+        {
+            "Timberborn.Navigation.NavMeshListenerSingletonRegistry",
+            "Timberborn.Navigation.NavMeshListenerEntityRegistry"
+        })
+        {
+            var registryType = AccessTools.TypeByName(registryTypeName);
+            if (registryType is null)
+            {
+                Runtime.Log(
+                    $"warning: navigation listener registry profiler unavailable: " +
+                    $"{registryTypeName} not found");
+                continue;
+            }
+
+            var registryMethods = registryType
+                .GetMethods(flags)
+                .Where(method =>
+                    !method.IsAbstract &&
+                    !method.ContainsGenericParameters &&
+                    method.ReturnType == typeof(void) &&
+                    method.Name.StartsWith("NotifyAll", StringComparison.Ordinal))
+                .ToArray();
+
+            foreach (var method in registryMethods)
+            {
+                try
+                {
+                    harmony.Patch(
+                        method,
+                        prefix: new HarmonyMethod(
+                            AccessTools.Method(
+                                typeof(NavigationSynchronizerDetailProfiler),
+                                nameof(Prefix)))
+                        {
+                            priority = Priority.First
+                        },
+                        finalizer: new HarmonyMethod(
+                            AccessTools.Method(
+                                typeof(NavigationSynchronizerDetailProfiler),
+                                nameof(Finalizer)))
+                        {
+                            priority = Priority.Last
+                        });
+
+                    PatchedMethods.Add(method);
+                    registryMethodCount++;
+                }
+                catch (Exception ex)
+                {
+                    Runtime.Log(
+                        $"warning: navigation listener registry profiler could not patch " +
+                        $"{registryType.Name}.{method.Name}: " +
+                        $"{ex.GetType().Name}: {ex.Message}");
+                }
+            }
+        }
+
         Runtime.Log(
-            $"NavigationSynchronizer detail profiler installed: {PatchedMethods.Count} method(s) " +
-            $"[{string.Join(", ", PatchedMethods.Select(method => method.Name).OrderBy(name => name))}]");
+            $"NavigationSynchronizer detail profiler installed: " +
+            $"{PatchedMethods.Count - registryMethodCount} synchronizer method(s), " +
+            $"{registryMethodCount} listener-registry method(s)");
     }
 
     private static void Prefix(out long __state)
@@ -1252,8 +1336,13 @@ internal static class NavigationSynchronizerDetailProfiler
     {
         if (__state != 0)
         {
+            var declaringName = __originalMethod.DeclaringType?.Name ?? "Unknown";
+            var key = declaringName.Contains("NavMeshListener", StringComparison.Ordinal)
+                ? $"ListenerRegistry.{declaringName}.{__originalMethod.Name}"
+                : __originalMethod.Name;
+
             FreezeDetector.RecordNavigationDetail(
-                __originalMethod.Name,
+                key,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state);
         }
 
