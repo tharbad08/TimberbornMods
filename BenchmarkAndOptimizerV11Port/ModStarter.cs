@@ -686,9 +686,8 @@ internal static class EntityTickDispatcherProfiler
         try
         {
             var id = RuntimeHelpers.GetHashCode(instance).ToString("X8");
-            var componentsMember =
-                (MemberInfo?)AccessTools.Field(instance.GetType(), "_tickableComponents") ??
-                AccessTools.Property(instance.GetType(), "_tickableComponents");
+            MemberInfo? componentsMember = AccessTools.Field(instance.GetType(), "_tickableComponents");
+            componentsMember ??= AccessTools.Property(instance.GetType(), "_tickableComponents");
 
             var raw = ReadMember(instance, componentsMember);
             if (raw is not IEnumerable enumerable)
