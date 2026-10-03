@@ -47,3 +47,5 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.41: bundles sparse BFR localized-update optimization, low-frequency deep component sampling for slow TickableEntity instances, and NavigationSynchronizer sub-method attribution. Keeps the v1.1.40 batched terrain collider rebuilds.
 
 - v1.1.42: fixes the slow-entity component sampler so it is installed during normal play, and adds coarse timing for singleton/entity navmesh listener registries behind NavigationSynchronizer.NotifyAllNavmeshChanges. Keeps BFR sparse-update optimization and terrain batching unchanged.
+
+- v1.1.43: bundles targeted Keystone Tick allocation/GC attribution, adaptive per-entity navmesh-listener profiling for expensive NotifyAll passes, and lightweight major Unity PlayerLoop phase markers. Diagnostic-only; no new throttling or simulation behavior changes.
