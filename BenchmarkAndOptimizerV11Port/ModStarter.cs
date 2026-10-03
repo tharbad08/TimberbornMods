@@ -732,11 +732,10 @@ internal static class EntityTickDispatcherProfiler
     private static object? ExtractTickableComponent(object wrapper)
     {
         var type = wrapper.GetType();
-        var member =
-            (MemberInfo?)AccessTools.Field(type, "_tickableComponent") ??
-            AccessTools.Property(type, "_tickableComponent") ??
-            AccessTools.Field(type, "TickableComponent") ??
-            AccessTools.Property(type, "TickableComponent");
+        MemberInfo? member = AccessTools.Field(type, "_tickableComponent");
+        member ??= AccessTools.Property(type, "_tickableComponent");
+        member ??= AccessTools.Field(type, "TickableComponent");
+        member ??= AccessTools.Property(type, "TickableComponent");
 
         return ReadMember(wrapper, member);
     }
