@@ -159,9 +159,9 @@ internal static class FreezeDetectorPatcher
             "LateUpdateSingleton");
         EntityTickDispatcherProfiler.Patch(FreezeHarmony);
         BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
+        ExtendedBuilderReachNavOptimizer.Patch(FreezeHarmony);
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
-        NavigationEntityListenerProfiler.Patch(FreezeHarmony);
-        KeystoneComponentAllocationProfiler.Patch(FreezeHarmony);
+        InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
 
         _patched = true;
@@ -520,7 +520,6 @@ internal static class FreezeDetectorPatcher
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
         EntityTickDispatcherProfiler.FlushFrame();
-        KeystoneComponentAllocationProfiler.FlushFrame();
         FreezeDetector.FrameBoundary(now, "UpdateSingletons");
         __state = now;
     }
@@ -1515,6 +1514,603 @@ internal static class KeystoneComponentAllocationProfiler
     }
 }
 
+
+internal static class ExtendedBuilderReachNavOptimizer
+{
+    private const string EbrTypeName =
+        "ExtendedBuilderReach.Components.ExtendedDemolishableAccessible";
+    private const string RegistryTypeName =
+        "Timberborn.Navigation.NavMeshListenerEntityRegistry";
+
+    private static Type? _ebrType;
+    private static Type? _updateType;
+    private static FieldInfo? _registryListenersField;
+    private static Func<object, object, bool>? _intersects;
+    private static Action<object, object>? _notify;
+    private static readonly List<object> EbrListeners = new();
+    private static readonly ConditionalWeakTable<object, MigrationMarker> MigratedRegistries = new();
+    private static bool _installed;
+
+    private sealed class MigrationMarker
+    {
+    }
+
+    public static void Patch(Harmony harmony)
+    {
+        if (_installed)
+        {
+            return;
+        }
+
+        var registryType = AccessTools.TypeByName(RegistryTypeName);
+        _ebrType = AccessTools.TypeByName(EbrTypeName);
+        if (registryType is null || _ebrType is null)
+        {
+            Runtime.Log(
+                $"EBR nav optimizer not installed: registry={registryType is not null}, " +
+                $"ExtendedDemolishableAccessible={_ebrType is not null}");
+            return;
+        }
+
+        var register = AccessTools.Method(registryType, "RegisterNavMeshListener");
+        var unregister = AccessTools.Method(registryType, "UnregisterNavMeshListener");
+        var notifyAll = AccessTools.Method(registryType, "NotifyAll");
+        _registryListenersField = AccessTools.Field(registryType, "_navMeshListeners");
+
+        if (register is null ||
+            unregister is null ||
+            notifyAll is null ||
+            _registryListenersField is null)
+        {
+            Runtime.Log(
+                "warning: EBR nav optimizer unavailable: required registry members not found");
+            return;
+        }
+
+        _updateType = notifyAll.GetParameters().FirstOrDefault()?.ParameterType;
+        var ebrBounds = AccessTools.Field(_ebrType, "bounds");
+        var updateBounds = _updateType is null ? null : AccessTools.Property(_updateType, "Bounds");
+        var notifyMethod = _updateType is null
+            ? null
+            : AccessTools.Method(_ebrType, "OnNavMeshUpdated", new[] { _updateType });
+
+        if (_updateType is null ||
+            ebrBounds is null ||
+            updateBounds?.GetGetMethod(true) is null ||
+            notifyMethod is null)
+        {
+            Runtime.Log(
+                "warning: EBR nav optimizer unavailable: EBR/update bounds members not resolved");
+            return;
+        }
+
+        var boundsType = ebrBounds.FieldType;
+        var minX = AccessTools.Field(boundsType, "_minX");
+        var minY = AccessTools.Field(boundsType, "_minY");
+        var minZ = AccessTools.Field(boundsType, "_minZ");
+        var maxX = AccessTools.Field(boundsType, "_maxX");
+        var maxY = AccessTools.Field(boundsType, "_maxY");
+        var maxZ = AccessTools.Field(boundsType, "_maxZ");
+
+        if (minX is null || minY is null || minZ is null ||
+            maxX is null || maxY is null || maxZ is null)
+        {
+            Runtime.Log(
+                "warning: EBR nav optimizer unavailable: BoundingBox fields not resolved");
+            return;
+        }
+
+        try
+        {
+            _intersects = CreateIntersectsDelegate(
+                _ebrType,
+                _updateType,
+                ebrBounds,
+                updateBounds.GetGetMethod(true)!,
+                boundsType,
+                minX,
+                minY,
+                minZ,
+                maxX,
+                maxY,
+                maxZ);
+            _notify = CreateNotifyDelegate(_ebrType, _updateType, notifyMethod);
+
+            harmony.Patch(
+                register,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(ExtendedBuilderReachNavOptimizer),
+                        nameof(RegisterPrefix)))
+                {
+                    priority = Priority.First
+                });
+            harmony.Patch(
+                unregister,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(ExtendedBuilderReachNavOptimizer),
+                        nameof(UnregisterPrefix)))
+                {
+                    priority = Priority.First
+                });
+            harmony.Patch(
+                notifyAll,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(ExtendedBuilderReachNavOptimizer),
+                        nameof(NotifyPrefix)))
+                {
+                    priority = Priority.First
+                },
+                postfix: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(ExtendedBuilderReachNavOptimizer),
+                        nameof(NotifyPostfix)))
+                {
+                    priority = Priority.Last
+                });
+
+            _installed = true;
+            Runtime.Log(
+                "Extended Builder Reach nav optimizer installed: " +
+                "ExtendedDemolishableAccessible listeners are separated from the generic " +
+                "registry and fast-filtered by BoundingBox before callback");
+        }
+        catch (Exception ex)
+        {
+            _intersects = null;
+            _notify = null;
+            Runtime.Log(
+                $"warning: EBR nav optimizer installation failed; vanilla registry retained: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static bool RegisterPrefix(object __0)
+    {
+        if (_installed && IsEbr(__0))
+        {
+            Add(__0);
+            return false;
+        }
+
+        return true;
+    }
+
+    private static bool UnregisterPrefix(object __0)
+    {
+        if (_installed && IsEbr(__0))
+        {
+            Remove(__0);
+            return false;
+        }
+
+        return true;
+    }
+
+    private static void NotifyPrefix(object __instance)
+    {
+        if (!_installed ||
+            _registryListenersField is null ||
+            MigratedRegistries.TryGetValue(__instance, out _))
+        {
+            return;
+        }
+
+        // v1.1.44 normally installs before entities register. This migration is
+        // still required for hot-reload/order variations: move any EBR listeners
+        // already present in the vanilla list into our side list exactly once.
+        if (_registryListenersField.GetValue(__instance) is IList listeners)
+        {
+            var migrated = 0;
+            for (var i = listeners.Count - 1; i >= 0; i--)
+            {
+                var listener = listeners[i];
+                if (listener is not null && IsEbr(listener))
+                {
+                    Add(listener);
+                    listeners.RemoveAt(i);
+                    migrated++;
+                }
+            }
+
+            if (migrated > 0)
+            {
+                Runtime.Log(
+                    $"EBR nav optimizer migrated {migrated} pre-registered " +
+                    "ExtendedDemolishableAccessible listener(s)");
+            }
+        }
+
+        MigratedRegistries.Add(__instance, new MigrationMarker());
+    }
+
+    private static void NotifyPostfix(object __0)
+    {
+        if (!_installed || _intersects is null || _notify is null)
+        {
+            return;
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var candidates = EbrListeners.Count;
+        var notified = 0;
+
+        // Preserve EBR's own OnNavMeshUpdated implementation for candidates:
+        // it still checks the live setting and recalculates accesses exactly as
+        // the mod intended. The optimization only avoids 20k+ interface calls
+        // whose BoundingBox cannot intersect this update.
+        for (var i = 0; i < EbrListeners.Count; i++)
+        {
+            var listener = EbrListeners[i];
+            if (_intersects(listener, __0))
+            {
+                _notify(listener, __0);
+                notified++;
+            }
+        }
+
+        FreezeDetector.RecordNavigationDetail(
+            $"EBR.FastDispatch[{candidates}->{notified}]",
+            System.Diagnostics.Stopwatch.GetTimestamp() - started);
+    }
+
+    private static bool IsEbr(object listener) =>
+        _ebrType is not null && listener.GetType() == _ebrType;
+
+    private static void Add(object listener)
+    {
+        for (var i = 0; i < EbrListeners.Count; i++)
+        {
+            if (ReferenceEquals(EbrListeners[i], listener))
+            {
+                return;
+            }
+        }
+
+        EbrListeners.Add(listener);
+    }
+
+    private static void Remove(object listener)
+    {
+        for (var i = EbrListeners.Count - 1; i >= 0; i--)
+        {
+            if (ReferenceEquals(EbrListeners[i], listener))
+            {
+                EbrListeners.RemoveAt(i);
+                return;
+            }
+        }
+    }
+
+    private static Func<object, object, bool> CreateIntersectsDelegate(
+        Type listenerType,
+        Type updateType,
+        FieldInfo listenerBounds,
+        MethodInfo getUpdateBounds,
+        Type boundsType,
+        FieldInfo minX,
+        FieldInfo minY,
+        FieldInfo minZ,
+        FieldInfo maxX,
+        FieldInfo maxY,
+        FieldInfo maxZ)
+    {
+        var dynamicMethod = new System.Reflection.Emit.DynamicMethod(
+            "BenchmarkOptimizer_EbrBoundsIntersect",
+            typeof(bool),
+            new[] { typeof(object), typeof(object) },
+            typeof(ExtendedBuilderReachNavOptimizer).Module,
+            true);
+
+        var il = dynamicMethod.GetILGenerator();
+        var left = il.DeclareLocal(boundsType);
+        var right = il.DeclareLocal(boundsType);
+
+        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+        il.Emit(System.Reflection.Emit.OpCodes.Castclass, listenerType);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldfld, listenerBounds);
+        il.Emit(System.Reflection.Emit.OpCodes.Stloc, left);
+
+        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+        if (updateType.IsValueType)
+        {
+            il.Emit(System.Reflection.Emit.OpCodes.Unbox_Any, updateType);
+        }
+        else
+        {
+            il.Emit(System.Reflection.Emit.OpCodes.Castclass, updateType);
+        }
+        il.Emit(
+            getUpdateBounds.IsVirtual
+                ? System.Reflection.Emit.OpCodes.Callvirt
+                : System.Reflection.Emit.OpCodes.Call,
+            getUpdateBounds);
+        il.Emit(System.Reflection.Emit.OpCodes.Stloc, right);
+
+        // Same exact BoundingBox.Intersects logic, emitted directly so the
+        // rejected 20k+ listeners do not pay interface-dispatch/Harmony cost.
+        EmitDisconnectedAxisCheck(il, left, right, minX, maxX);
+        EmitDisconnectedAxisCheck(il, left, right, minY, maxY);
+        EmitDisconnectedAxisCheck(il, left, right, minZ, maxZ);
+
+        il.Emit(System.Reflection.Emit.OpCodes.Ldc_I4_1);
+        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+
+        var disconnected = il.DefineLabel();
+        // The axis helpers branch to a common "false" target stored via a
+        // temporary static holder on first use.
+        EbrIlBranchTarget.Target = disconnected;
+
+        // Re-emit with the now-known branch target.
+        il = null!;
+        return CreateIntersectsDelegateWithTarget(
+            listenerType,
+            updateType,
+            listenerBounds,
+            getUpdateBounds,
+            boundsType,
+            minX,
+            minY,
+            minZ,
+            maxX,
+            maxY,
+            maxZ);
+    }
+
+    private static Func<object, object, bool> CreateIntersectsDelegateWithTarget(
+        Type listenerType,
+        Type updateType,
+        FieldInfo listenerBounds,
+        MethodInfo getUpdateBounds,
+        Type boundsType,
+        FieldInfo minX,
+        FieldInfo minY,
+        FieldInfo minZ,
+        FieldInfo maxX,
+        FieldInfo maxY,
+        FieldInfo maxZ)
+    {
+        var dynamicMethod = new System.Reflection.Emit.DynamicMethod(
+            "BenchmarkOptimizer_EbrBoundsIntersectFast",
+            typeof(bool),
+            new[] { typeof(object), typeof(object) },
+            typeof(ExtendedBuilderReachNavOptimizer).Module,
+            true);
+
+        var il = dynamicMethod.GetILGenerator();
+        var left = il.DeclareLocal(boundsType);
+        var right = il.DeclareLocal(boundsType);
+        var noIntersection = il.DefineLabel();
+
+        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+        il.Emit(System.Reflection.Emit.OpCodes.Castclass, listenerType);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldfld, listenerBounds);
+        il.Emit(System.Reflection.Emit.OpCodes.Stloc, left);
+
+        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+        if (updateType.IsValueType)
+        {
+            il.Emit(System.Reflection.Emit.OpCodes.Unbox_Any, updateType);
+        }
+        else
+        {
+            il.Emit(System.Reflection.Emit.OpCodes.Castclass, updateType);
+        }
+        il.Emit(
+            getUpdateBounds.IsVirtual
+                ? System.Reflection.Emit.OpCodes.Callvirt
+                : System.Reflection.Emit.OpCodes.Call,
+            getUpdateBounds);
+        il.Emit(System.Reflection.Emit.OpCodes.Stloc, right);
+
+        EmitAxisIntersection(il, left, right, minX, maxX, noIntersection);
+        EmitAxisIntersection(il, left, right, minY, maxY, noIntersection);
+        EmitAxisIntersection(il, left, right, minZ, maxZ, noIntersection);
+
+        il.Emit(System.Reflection.Emit.OpCodes.Ldc_I4_1);
+        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+
+        il.MarkLabel(noIntersection);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldc_I4_0);
+        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+
+        return (Func<object, object, bool>)dynamicMethod.CreateDelegate(
+            typeof(Func<object, object, bool>));
+    }
+
+    // Kept only to make the intended comparison explicit in source; the actual
+    // delegate is emitted by EmitAxisIntersection once its shared label exists.
+    private static void EmitDisconnectedAxisCheck(
+        System.Reflection.Emit.ILGenerator il,
+        System.Reflection.Emit.LocalBuilder left,
+        System.Reflection.Emit.LocalBuilder right,
+        FieldInfo min,
+        FieldInfo max)
+    {
+    }
+
+    private static class EbrIlBranchTarget
+    {
+        public static System.Reflection.Emit.Label Target;
+    }
+
+    private static void EmitAxisIntersection(
+        System.Reflection.Emit.ILGenerator il,
+        System.Reflection.Emit.LocalBuilder left,
+        System.Reflection.Emit.LocalBuilder right,
+        FieldInfo min,
+        FieldInfo max,
+        System.Reflection.Emit.Label noIntersection)
+    {
+        // left.min <= right.max
+        il.Emit(System.Reflection.Emit.OpCodes.Ldloca, left);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldfld, min);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldloca, right);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldfld, max);
+        il.Emit(System.Reflection.Emit.OpCodes.Bgt, noIntersection);
+
+        // left.max >= right.min
+        il.Emit(System.Reflection.Emit.OpCodes.Ldloca, left);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldfld, max);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldloca, right);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldfld, min);
+        il.Emit(System.Reflection.Emit.OpCodes.Blt, noIntersection);
+    }
+
+    private static Action<object, object> CreateNotifyDelegate(
+        Type listenerType,
+        Type updateType,
+        MethodInfo notifyMethod)
+    {
+        var dynamicMethod = new System.Reflection.Emit.DynamicMethod(
+            "BenchmarkOptimizer_EbrNotify",
+            typeof(void),
+            new[] { typeof(object), typeof(object) },
+            typeof(ExtendedBuilderReachNavOptimizer).Module,
+            true);
+
+        var il = dynamicMethod.GetILGenerator();
+        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_0);
+        il.Emit(System.Reflection.Emit.OpCodes.Castclass, listenerType);
+        il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
+        if (updateType.IsValueType)
+        {
+            il.Emit(System.Reflection.Emit.OpCodes.Unbox_Any, updateType);
+        }
+        else
+        {
+            il.Emit(System.Reflection.Emit.OpCodes.Castclass, updateType);
+        }
+        il.Emit(System.Reflection.Emit.OpCodes.Callvirt, notifyMethod);
+        il.Emit(System.Reflection.Emit.OpCodes.Ret);
+
+        return (Action<object, object>)dynamicMethod.CreateDelegate(
+            typeof(Action<object, object>));
+    }
+}
+
+internal static class InputAndFaunaDetailProfiler
+{
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        PatchMethod(
+            harmony,
+            AccessTools.TypeByName("Timberborn.InputSystem.InputService"),
+            "UpdateSingleton",
+            "Input.Total");
+        PatchMethod(
+            harmony,
+            AccessTools.TypeByName("Timberborn.InputSystem.InputService"),
+            "CallInputProcessors",
+            "Input.Processors");
+        PatchMethod(
+            harmony,
+            AccessTools.TypeByName("Timberborn.InputSystem.InputUpdater"),
+            "Update",
+            "Input.Updater");
+
+        var faunaType = AccessTools.TypeByName("Keystone.Mod.Fauna.FaunaSpawnDrainer");
+        PatchMethod(harmony, faunaType, "UpdateSingleton", "Fauna.Total");
+        PatchMethod(harmony, faunaType, "VisitCluster", "Fauna.VisitCluster");
+        PatchMethod(harmony, faunaType, "Spawn", "Fauna.Spawn");
+
+        Runtime.Log(
+            $"Input/Fauna detail profiler installed: {Labels.Count} method(s)");
+    }
+
+    private static void PatchMethod(
+        Harmony harmony,
+        Type? type,
+        string methodName,
+        string label)
+    {
+        if (type is null)
+        {
+            Runtime.Log(
+                $"warning: detail profiler target type missing for {label}");
+            return;
+        }
+
+        const BindingFlags flags =
+            BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+        var method = type
+            .GetMethods(flags)
+            .FirstOrDefault(candidate => candidate.Name == methodName);
+
+        if (method is null)
+        {
+            Runtime.Log(
+                $"warning: detail profiler method missing: {type.FullName}.{methodName}");
+            return;
+        }
+
+        try
+        {
+            Labels[method] = label;
+            harmony.Patch(
+                method,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(InputAndFaunaDetailProfiler),
+                        nameof(Prefix)))
+                {
+                    priority = Priority.First
+                },
+                finalizer: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(InputAndFaunaDetailProfiler),
+                        nameof(Finalizer)))
+                {
+                    priority = Priority.Last
+                });
+        }
+        catch (Exception ex)
+        {
+            Labels.Remove(method);
+            Runtime.Log(
+                $"warning: detail profiler could not patch {type.FullName}.{methodName}: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void Prefix(out long __state)
+    {
+        __state = Runtime.IsBenchmarking
+            ? 0
+            : System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state == 0 || !Labels.TryGetValue(__originalMethod, out var label))
+        {
+            return __exception;
+        }
+
+        var elapsed =
+            System.Diagnostics.Stopwatch.GetTimestamp() - __state;
+
+        if (label.StartsWith("Input.", StringComparison.Ordinal))
+        {
+            FreezeDetector.RecordInputDetail(label, elapsed);
+        }
+        else
+        {
+            FreezeDetector.RecordFaunaDetail(label, elapsed);
+        }
+
+        return __exception;
+    }
+}
+
 internal static class NavigationEntityListenerProfiler
 {
     private const double SlowNotifyThresholdMs = 50.0;
@@ -1779,6 +2375,19 @@ internal static class PlayerLoopPhaseProfiler
     private static FieldInfo? _subSystemsField;
     private static FieldInfo? _updateDelegateField;
     private static bool _installed;
+    private static int _preLateChildCount;
+
+    private sealed class NamedPlayerLoopMarker
+    {
+        private readonly string _name;
+
+        public NamedPlayerLoopMarker(string name)
+        {
+            _name = name;
+        }
+
+        public void Invoke() => Mark(_name);
+    }
 
     private sealed class EarlyUpdateStartMarker { }
     private sealed class EarlyUpdateEndMarker { }
@@ -1846,6 +2455,7 @@ internal static class PlayerLoopPhaseProfiler
             }
 
             var installedPhases = 0;
+            _preLateChildCount = 0;
             root = Rewrite(root, ref installedPhases);
             if (installedPhases == 0)
             {
@@ -1859,7 +2469,7 @@ internal static class PlayerLoopPhaseProfiler
 
             Runtime.Log(
                 $"PlayerLoop phase profiler installed: {installedPhases}/{PhaseNames.Length} " +
-                "major phases marked at start/end");
+                $"major phases marked at start/end; PreLateUpdate children={_preLateChildCount}");
         }
         catch (Exception ex)
         {
@@ -1908,24 +2518,79 @@ internal static class PlayerLoopPhaseProfiler
     private static object AddMarkers(object phase, string phaseName)
     {
         var original = _subSystemsField!.GetValue(phase) as Array;
-        var originalLength = original?.Length ?? 0;
-        var replacement = Array.CreateInstance(_systemType!, originalLength + 2);
+        var content = original;
+
+        if (phaseName == "UnityEngine.PlayerLoop.PreLateUpdate" && original is not null)
+        {
+            content = AddPreLateChildMarkers(original);
+        }
+
+        var contentLength = content?.Length ?? 0;
+        var replacement = Array.CreateInstance(_systemType!, contentLength + 2);
 
         var start = CreateMarker(phaseName, isStart: true);
         var end = CreateMarker(phaseName, isStart: false);
 
         replacement.SetValue(start, 0);
-        if (original is not null)
+        if (content is not null)
         {
-            for (var i = 0; i < originalLength; i++)
+            for (var i = 0; i < contentLength; i++)
             {
-                replacement.SetValue(original.GetValue(i), i + 1);
+                replacement.SetValue(content.GetValue(i), i + 1);
             }
         }
-        replacement.SetValue(end, originalLength + 1);
+        replacement.SetValue(end, contentLength + 1);
 
         _subSystemsField.SetValue(phase, replacement);
         return phase;
+    }
+
+    private static Array AddPreLateChildMarkers(Array original)
+    {
+        var replacement = Array.CreateInstance(_systemType!, original.Length * 3);
+        var output = 0;
+
+        for (var i = 0; i < original.Length; i++)
+        {
+            var child = original.GetValue(i);
+            if (child is null)
+            {
+                continue;
+            }
+
+            var childType = _typeField!.GetValue(child) as Type;
+            var childName = childType?.FullName ?? $"Child{i}";
+            var key = $"PreLateChild[{i}].{childName}";
+
+            replacement.SetValue(CreateNamedMarker(key + ".Start"), output++);
+            replacement.SetValue(child, output++);
+            replacement.SetValue(CreateNamedMarker(key + ".End"), output++);
+            _preLateChildCount++;
+        }
+
+        if (output == replacement.Length)
+        {
+            return replacement;
+        }
+
+        var trimmed = Array.CreateInstance(_systemType!, output);
+        for (var i = 0; i < output; i++)
+        {
+            trimmed.SetValue(replacement.GetValue(i), i);
+        }
+        return trimmed;
+    }
+
+    private static object CreateNamedMarker(string name)
+    {
+        var marker = Activator.CreateInstance(_systemType!)!;
+        var target = new NamedPlayerLoopMarker(name);
+        var invoke = AccessTools.Method(typeof(NamedPlayerLoopMarker), nameof(NamedPlayerLoopMarker.Invoke))!;
+        var callback = Delegate.CreateDelegate(_updateDelegateField!.FieldType, target, invoke);
+
+        _typeField!.SetValue(marker, typeof(NamedPlayerLoopMarker));
+        _updateDelegateField.SetValue(marker, callback);
+        return marker;
     }
 
     private static object CreateMarker(string phaseName, bool isStart)
@@ -2109,6 +2774,8 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> EntityComponentTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> BfrDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> NavigationDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> InputDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> FaunaDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, KeystoneProfileRecord> KeystoneProfiles = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PlayerLoopMarkers = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
@@ -2164,6 +2831,8 @@ internal static class FreezeDetector
             EntityComponentTicks.Clear();
             BfrDetailTicks.Clear();
             NavigationDetailTicks.Clear();
+            InputDetailTicks.Clear();
+            FaunaDetailTicks.Clear();
             KeystoneProfiles.Clear();
             PlayerLoopMarkers.Clear();
             PhaseGapTicks.Clear();
@@ -2228,6 +2897,8 @@ internal static class FreezeDetector
             EntityComponentTicks.Clear();
             BfrDetailTicks.Clear();
             NavigationDetailTicks.Clear();
+            InputDetailTicks.Clear();
+            FaunaDetailTicks.Clear();
             KeystoneProfiles.Clear();
             PlayerLoopMarkers.Clear();
             PhaseGapTicks.Clear();
@@ -2361,6 +3032,12 @@ internal static class FreezeDetector
 
     public static void RecordNavigationDetail(string name, long elapsedTicks) =>
         RecordNamedTicks(NavigationDetailTicks, name, elapsedTicks);
+
+    public static void RecordInputDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(InputDetailTicks, name, elapsedTicks);
+
+    public static void RecordFaunaDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(FaunaDetailTicks, name, elapsedTicks);
 
     public static void RecordKeystoneProfile(
         string name,
@@ -2567,6 +3244,24 @@ internal static class FreezeDetector
             ? "none"
             : string.Join(", ", navigationDetails);
 
+        var inputDetails = InputDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var inputDetailText = inputDetails.Length == 0
+            ? "none"
+            : string.Join(", ", inputDetails);
+
+        var faunaDetails = FaunaDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var faunaDetailText = faunaDetails.Length == 0
+            ? "none"
+            : string.Join(", ", faunaDetails);
+
         var keystoneProfiles = KeystoneProfiles
             .OrderByDescending(pair => pair.Value.MaxTicks)
             .Take(TopSystemCount)
@@ -2612,6 +3307,8 @@ internal static class FreezeDetector
             $"sampled entity components: {componentSampleText}; " +
             $"BFR detail: {bfrDetailText}; " +
             $"navigation detail: {navigationDetailText}; " +
+            $"input detail: {inputDetailText}; " +
+            $"fauna detail: {faunaDetailText}; " +
             $"Keystone profile: {keystoneProfileText}; " +
             $"PlayerLoop: {playerLoop}; " +
             $"top tick singletons: {topTickText}; " +
@@ -2661,6 +3358,33 @@ internal static class FreezeDetector
                     parts.Add($"{left}->{right}={ToMs(gap):F1}ms");
                 }
             }
+        }
+
+        var childSpans = PlayerLoopMarkers
+            .Where(pair =>
+                pair.Key.StartsWith("PreLateChild[", StringComparison.Ordinal) &&
+                pair.Key.EndsWith(".Start", StringComparison.Ordinal))
+            .Select(pair =>
+            {
+                var baseKey = pair.Key[..^6];
+                return PlayerLoopMarkers.TryGetValue(baseKey + ".End", out var end) && end >= pair.Value
+                    ? (Name: baseKey, Ticks: end - pair.Value)
+                    : (Name: baseKey, Ticks: 0L);
+            })
+            .Where(item => item.Ticks > 0)
+            .OrderByDescending(item => item.Ticks)
+            .Take(8)
+            .ToArray();
+
+        foreach (var child in childSpans)
+        {
+            var name = child.Name;
+            var separator = name.LastIndexOf('.');
+            if (separator >= 0)
+            {
+                name = name[(separator + 1)..];
+            }
+            parts.Add($"PreLate.{name}={ToMs(child.Ticks):F1}ms");
         }
 
         return parts.Count == 0 ? "markers present, no complete spans" : string.Join(", ", parts);
