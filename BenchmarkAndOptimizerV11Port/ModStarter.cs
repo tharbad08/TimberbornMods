@@ -157,20 +157,18 @@ internal static class FreezeDetectorPatcher
             nameof(LateUpdateSingletonPrefix),
             nameof(LateUpdateSingletonFinalizer),
             "LateUpdateSingleton");
-        EntityTickDispatcherProfiler.Patch(FreezeHarmony);
         BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
         ExtendedBuilderReachNavOptimizer.Patch(FreezeHarmony);
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
-        InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
-        InputProcessorProfiler.Patch(FreezeHarmony);
-        MonoBehaviourLateUpdateProfiler.Patch(FreezeHarmony);
-        FaunaSpawnInnerProfiler.Patch(FreezeHarmony);
-        SoilMoistureProfiler.Patch(FreezeHarmony);
+        FaunaSpawnBudgetPatcher.Patch(FreezeHarmony);
+        TerrainRecoveryTickLimiter.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
 
         _patched = true;
         FreezeDetector.Initialize();
-        PlayerLoopPhaseProfiler.Install();
+        Runtime.Log(
+            "performance build: per-entity, per-input, per-LateUpdate, fauna-inner, " +
+            "SoilMoisture and PlayerLoop diagnostic profilers disabled");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -523,9 +521,6 @@ internal static class FreezeDetectorPatcher
     private static void UpdatePhasePrefix(out long __state)
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
-        EntityTickDispatcherProfiler.FlushFrame();
-        InputProcessorProfiler.FlushFrame();
-        MonoBehaviourLateUpdateProfiler.FlushFrame();
         FreezeDetector.FrameBoundary(now, "UpdateSingletons");
         __state = now;
     }
@@ -1527,17 +1522,45 @@ internal static class ExtendedBuilderReachNavOptimizer
         "ExtendedBuilderReach.Components.ExtendedDemolishableAccessible";
     private const string RegistryTypeName =
         "Timberborn.Navigation.NavMeshListenerEntityRegistry";
+    private const int BucketSize = 8;
 
     private static Type? _ebrType;
     private static FieldInfo? _registryListenersField;
+    private static FieldInfo? _listenerBoundsField;
+    private static FieldInfo? _boundsMinX;
+    private static FieldInfo? _boundsMinY;
+    private static FieldInfo? _boundsMaxX;
+    private static FieldInfo? _boundsMaxY;
+    private static PropertyInfo? _terrainCoordinatesProperty;
+    private static PropertyInfo? _updatedRoadsProperty;
+    private static MemberInfo? _coordX;
+    private static MemberInfo? _coordY;
     private static Func<object, object, bool>? _intersects;
     private static Action<object, object>? _notify;
+
     private static readonly List<object> EbrListeners = new();
+    private static readonly Dictionary<long, List<object>> SpatialBuckets = new();
+    private static readonly ConditionalWeakTable<object, BucketMembership> Memberships = new();
     private static readonly ConditionalWeakTable<object, MigrationMarker> MigratedRegistries = new();
+    private static readonly HashSet<object> CandidateSet = new(ReferenceComparer.Instance);
     private static bool _installed;
 
     private sealed class MigrationMarker
     {
+    }
+
+    private sealed class BucketMembership
+    {
+        public List<long> Keys { get; } = new();
+    }
+
+    private sealed class ReferenceComparer : IEqualityComparer<object>
+    {
+        public static readonly ReferenceComparer Instance = new();
+
+        public new bool Equals(object? x, object? y) => ReferenceEquals(x, y);
+
+        public int GetHashCode(object obj) => RuntimeHelpers.GetHashCode(obj);
     }
 
     public static void Patch(Harmony harmony)
@@ -1573,14 +1596,18 @@ internal static class ExtendedBuilderReachNavOptimizer
         }
 
         var updateType = notifyAll.GetParameters().FirstOrDefault()?.ParameterType;
-        var ebrBounds = AccessTools.Field(_ebrType, "bounds");
+        _listenerBoundsField = AccessTools.Field(_ebrType, "bounds");
         var updateBounds = updateType is null ? null : AccessTools.Property(updateType, "Bounds");
+        _terrainCoordinatesProperty =
+            updateType is null ? null : AccessTools.Property(updateType, "TerrainCoordinates");
+        _updatedRoadsProperty =
+            updateType is null ? null : AccessTools.Property(updateType, "UpdatedRoads");
         var notifyMethod = updateType is null
             ? null
             : AccessTools.Method(_ebrType, "OnNavMeshUpdated", new[] { updateType });
 
         if (updateType is null ||
-            ebrBounds is null ||
+            _listenerBoundsField is null ||
             updateBounds?.GetGetMethod(true) is null ||
             notifyMethod is null)
         {
@@ -1589,7 +1616,7 @@ internal static class ExtendedBuilderReachNavOptimizer
             return;
         }
 
-        var boundsType = ebrBounds.FieldType;
+        var boundsType = _listenerBoundsField.FieldType;
         var minX = AccessTools.Field(boundsType, "_minX");
         var minY = AccessTools.Field(boundsType, "_minY");
         var minZ = AccessTools.Field(boundsType, "_minZ");
@@ -1605,12 +1632,29 @@ internal static class ExtendedBuilderReachNavOptimizer
             return;
         }
 
+        _boundsMinX = minX;
+        _boundsMinY = minY;
+        _boundsMaxX = maxX;
+        _boundsMaxY = maxY;
+
+        var terrainCoordinatesType =
+            _terrainCoordinatesProperty?.PropertyType.IsGenericType == true
+                ? _terrainCoordinatesProperty.PropertyType.GetGenericArguments().FirstOrDefault()
+                : null;
+        if (terrainCoordinatesType is not null)
+        {
+            _coordX = (MemberInfo?)AccessTools.Field(terrainCoordinatesType, "x")
+                ?? AccessTools.Property(terrainCoordinatesType, "x");
+            _coordY = (MemberInfo?)AccessTools.Field(terrainCoordinatesType, "y")
+                ?? AccessTools.Property(terrainCoordinatesType, "y");
+        }
+
         try
         {
             _intersects = CreateIntersectsDelegate(
                 _ebrType,
                 updateType,
-                ebrBounds,
+                _listenerBoundsField,
                 updateBounds.GetGetMethod(true)!,
                 boundsType,
                 minX,
@@ -1658,9 +1702,9 @@ internal static class ExtendedBuilderReachNavOptimizer
 
             _installed = true;
             Runtime.Log(
-                "Extended Builder Reach nav optimizer installed: " +
-                "ExtendedDemolishableAccessible listeners separated from generic registry; " +
-                "BoundingBox fast-filter active before EBR callback");
+                $"Extended Builder Reach nav optimizer installed: {BucketSize}x{BucketSize} " +
+                "spatial buckets + exact terrain-change candidate selection; road updates " +
+                "retain conservative full-list fallback");
         }
         catch (Exception ex)
         {
@@ -1721,7 +1765,7 @@ internal static class ExtendedBuilderReachNavOptimizer
             {
                 Runtime.Log(
                     $"EBR nav optimizer migrated {migrated} pre-registered " +
-                    "ExtendedDemolishableAccessible listener(s)");
+                    "ExtendedDemolishableAccessible listener(s) into spatial buckets");
             }
         }
 
@@ -1736,21 +1780,88 @@ internal static class ExtendedBuilderReachNavOptimizer
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
-        var candidates = EbrListeners.Count;
+        var total = EbrListeners.Count;
         var notified = 0;
+        var scanned = 0;
+        var usedSpatial = false;
 
-        for (var i = 0; i < EbrListeners.Count; i++)
+        CandidateSet.Clear();
+
+        var roadsUpdated = false;
+        if (_updatedRoadsProperty is not null)
         {
-            var listener = EbrListeners[i];
-            if (_intersects(listener, __0))
+            try
             {
-                _notify(listener, __0);
-                notified++;
+                roadsUpdated = Convert.ToBoolean(_updatedRoadsProperty.GetValue(__0));
+            }
+            catch
+            {
+                roadsUpdated = true;
+            }
+        }
+
+        if (!roadsUpdated &&
+            _terrainCoordinatesProperty is not null &&
+            _coordX is not null &&
+            _coordY is not null &&
+            _terrainCoordinatesProperty.GetValue(__0) is IEnumerable coordinates)
+        {
+            var coordinateCount = 0;
+            foreach (var coordinate in coordinates)
+            {
+                if (coordinate is null)
+                {
+                    continue;
+                }
+
+                coordinateCount++;
+                var x = Convert.ToInt32(ReadMember(coordinate, _coordX));
+                var y = Convert.ToInt32(ReadMember(coordinate, _coordY));
+                var key = BucketKey(FloorDiv(x, BucketSize), FloorDiv(y, BucketSize));
+                if (!SpatialBuckets.TryGetValue(key, out var bucket))
+                {
+                    continue;
+                }
+
+                foreach (var listener in bucket)
+                {
+                    CandidateSet.Add(listener);
+                }
+            }
+
+            usedSpatial = coordinateCount > 0;
+        }
+
+        if (usedSpatial)
+        {
+            scanned = CandidateSet.Count;
+            foreach (var listener in CandidateSet)
+            {
+                if (_intersects(listener, __0))
+                {
+                    _notify(listener, __0);
+                    notified++;
+                }
+            }
+        }
+        else
+        {
+            scanned = total;
+            for (var i = 0; i < EbrListeners.Count; i++)
+            {
+                var listener = EbrListeners[i];
+                if (_intersects(listener, __0))
+                {
+                    _notify(listener, __0);
+                    notified++;
+                }
             }
         }
 
         FreezeDetector.RecordNavigationDetail(
-            $"EBR.FastDispatch[{candidates}->{notified}]",
+            usedSpatial
+                ? $"EBR.SpatialDispatch[{total}~{scanned}->{notified}]"
+                : $"EBR.FullDispatch[{total}->{notified}]",
             System.Diagnostics.Stopwatch.GetTimestamp() - started);
     }
 
@@ -1768,6 +1879,7 @@ internal static class ExtendedBuilderReachNavOptimizer
         }
 
         EbrListeners.Add(listener);
+        AddToSpatialBuckets(listener);
     }
 
     private static void Remove(object listener)
@@ -1777,10 +1889,100 @@ internal static class ExtendedBuilderReachNavOptimizer
             if (ReferenceEquals(EbrListeners[i], listener))
             {
                 EbrListeners.RemoveAt(i);
-                return;
+                break;
             }
         }
+
+        if (Memberships.TryGetValue(listener, out var membership))
+        {
+            foreach (var key in membership.Keys)
+            {
+                if (!SpatialBuckets.TryGetValue(key, out var bucket))
+                {
+                    continue;
+                }
+
+                for (var i = bucket.Count - 1; i >= 0; i--)
+                {
+                    if (ReferenceEquals(bucket[i], listener))
+                    {
+                        bucket.RemoveAt(i);
+                    }
+                }
+
+                if (bucket.Count == 0)
+                {
+                    SpatialBuckets.Remove(key);
+                }
+            }
+
+            Memberships.Remove(listener);
+        }
     }
+
+    private static void AddToSpatialBuckets(object listener)
+    {
+        if (_listenerBoundsField is null ||
+            _boundsMinX is null ||
+            _boundsMinY is null ||
+            _boundsMaxX is null ||
+            _boundsMaxY is null)
+        {
+            return;
+        }
+
+        var bounds = _listenerBoundsField.GetValue(listener);
+        if (bounds is null)
+        {
+            return;
+        }
+
+        var minX = Convert.ToInt32(_boundsMinX.GetValue(bounds));
+        var minY = Convert.ToInt32(_boundsMinY.GetValue(bounds));
+        var maxX = Convert.ToInt32(_boundsMaxX.GetValue(bounds));
+        var maxY = Convert.ToInt32(_boundsMaxY.GetValue(bounds));
+
+        var membership = new BucketMembership();
+        for (var bucketY = FloorDiv(minY, BucketSize);
+             bucketY <= FloorDiv(maxY, BucketSize);
+             bucketY++)
+        {
+            for (var bucketX = FloorDiv(minX, BucketSize);
+                 bucketX <= FloorDiv(maxX, BucketSize);
+                 bucketX++)
+            {
+                var key = BucketKey(bucketX, bucketY);
+                if (!SpatialBuckets.TryGetValue(key, out var bucket))
+                {
+                    bucket = new List<object>();
+                    SpatialBuckets[key] = bucket;
+                }
+
+                bucket.Add(listener);
+                membership.Keys.Add(key);
+            }
+        }
+
+        Memberships.Add(listener, membership);
+    }
+
+    private static long BucketKey(int x, int y) =>
+        ((long)x << 32) | (uint)y;
+
+    private static int FloorDiv(int value, int divisor)
+    {
+        var result = value / divisor;
+        var remainder = value % divisor;
+        return remainder < 0 ? result - 1 : result;
+    }
+
+    private static object? ReadMember(object instance, MemberInfo member) =>
+        member switch
+        {
+            FieldInfo field => field.GetValue(instance),
+            PropertyInfo property => property.GetValue(instance),
+            _ => null,
+        };
 
     private static Func<object, object, bool> CreateIntersectsDelegate(
         Type listenerType,
@@ -1816,9 +2018,6 @@ internal static class ExtendedBuilderReachNavOptimizer
         il.Emit(System.Reflection.Emit.OpCodes.Ldarg_1);
         if (updateType.IsValueType)
         {
-            // Property getter is an instance method on a value type. The v1.1.44
-            // code unboxed the struct value and called the getter directly, which
-            // produces invalid IL because the getter expects a managed address.
             il.Emit(System.Reflection.Emit.OpCodes.Unbox_Any, updateType);
             il.Emit(System.Reflection.Emit.OpCodes.Stloc, update!);
             il.Emit(System.Reflection.Emit.OpCodes.Ldloca, update!);
@@ -1900,6 +2099,236 @@ internal static class ExtendedBuilderReachNavOptimizer
 
         return (Action<object, object>)dynamicMethod.CreateDelegate(
             typeof(Action<object, object>));
+    }
+}
+
+
+internal static class FaunaSpawnBudgetPatcher
+{
+    private const int MaxActualSpawnsPerUpdate = 1;
+
+    [ThreadStatic]
+    private static int _updateDepth;
+
+    [ThreadStatic]
+    private static int _successfulActualSpawns;
+
+    public static void Patch(Harmony harmony)
+    {
+        var type = AccessTools.TypeByName("Keystone.Mod.Fauna.FaunaSpawnDrainer");
+        if (type is null)
+        {
+            Runtime.Log("fauna spawn budget not installed: FaunaSpawnDrainer not found");
+            return;
+        }
+
+        var update = AccessTools.Method(type, "UpdateSingleton", Type.EmptyTypes);
+        var spawn = type
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(method =>
+                method.Name == "Spawn" &&
+                method.ReturnType == typeof(bool));
+
+        if (update is null || spawn is null)
+        {
+            Runtime.Log(
+                "warning: fauna spawn budget unavailable: UpdateSingleton/Spawn not resolved");
+            return;
+        }
+
+        harmony.Patch(
+            update,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(FaunaSpawnBudgetPatcher), nameof(UpdatePrefix)))
+            {
+                priority = Priority.First
+            },
+            finalizer: new HarmonyMethod(
+                AccessTools.Method(typeof(FaunaSpawnBudgetPatcher), nameof(UpdateFinalizer)))
+            {
+                priority = Priority.Last
+            });
+
+        harmony.Patch(
+            spawn,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(FaunaSpawnBudgetPatcher), nameof(SpawnPrefix)))
+            {
+                priority = Priority.First
+            },
+            postfix: new HarmonyMethod(
+                AccessTools.Method(typeof(FaunaSpawnBudgetPatcher), nameof(SpawnPostfix)))
+            {
+                priority = Priority.Last
+            });
+
+        Runtime.Log(
+            $"Keystone fauna spawn budget installed: max {MaxActualSpawnsPerUpdate} " +
+            "actual EntityService.Instantiate success per UpdateSingleton; additional " +
+            "same-frame spawn requests are re-queued by reporting deferred success");
+    }
+
+    private static void UpdatePrefix()
+    {
+        if (_updateDepth++ == 0)
+        {
+            _successfulActualSpawns = 0;
+        }
+    }
+
+    private static Exception? UpdateFinalizer(Exception? __exception)
+    {
+        if (_updateDepth > 0)
+        {
+            _updateDepth--;
+        }
+
+        if (_updateDepth == 0)
+        {
+            _successfulActualSpawns = 0;
+        }
+
+        return __exception;
+    }
+
+    private static bool SpawnPrefix(ref bool __result, out bool __state)
+    {
+        __state = false;
+
+        if (_updateDepth <= 0 || Runtime.IsBenchmarking)
+        {
+            return true;
+        }
+
+        if (_successfulActualSpawns >= MaxActualSpawnsPerUpdate)
+        {
+            // VisitCluster interprets true as Spawned and re-enqueues the cluster.
+            // This intentionally defers the actual instantiation to a later frame
+            // without dropping the population deficit from the queue.
+            __result = true;
+            return false;
+        }
+
+        __state = true;
+        return true;
+    }
+
+    private static void SpawnPostfix(bool __result, bool __state)
+    {
+        if (__state && __result && _updateDepth > 0)
+        {
+            _successfulActualSpawns++;
+        }
+    }
+}
+
+internal static class TerrainRecoveryTickLimiter
+{
+    private const int MaxBucketsDuringRecovery = 8;
+    private const int DebtDrainPerUpdate = 2;
+    private const double RecoverySeconds = 2.0;
+
+    private static long _recoveryUntil;
+    private static int _deferredBuckets;
+    private static bool _installed;
+    private static bool _loggedActivation;
+
+    public static void Patch(Harmony harmony)
+    {
+        if (_installed)
+        {
+            return;
+        }
+
+        var type = AccessTools.TypeByName("Timberborn.TickSystem.TickableBucketService");
+        var method = type is null
+            ? null
+            : AccessTools.Method(type, "TickBuckets", new[] { typeof(int) });
+
+        if (method is null)
+        {
+            Runtime.Log(
+                "warning: terrain recovery tick limiter unavailable: " +
+                "TickableBucketService.TickBuckets(int) not found");
+            return;
+        }
+
+        harmony.Patch(
+            method,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(TerrainRecoveryTickLimiter), nameof(Prefix)))
+            {
+                priority = Priority.First
+            });
+
+        _installed = true;
+        Runtime.Log(
+            $"terrain recovery tick limiter installed: max {MaxBucketsDuringRecovery} " +
+            $"entity/singleton bucket(s) per TickBuckets call for {RecoverySeconds:F1}s " +
+            $"after terrain edits; deferred debt drains at +{DebtDrainPerUpdate}/update");
+    }
+
+    public static void NotifyTerrainEdit()
+    {
+        if (!_installed || Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        _recoveryUntil =
+            Math.Max(
+                _recoveryUntil,
+                now + (long)(RecoverySeconds * System.Diagnostics.Stopwatch.Frequency));
+    }
+
+    private static void Prefix(ref int numberOfBucketsToTick)
+    {
+        if (!_installed ||
+            Runtime.IsBenchmarking ||
+            numberOfBucketsToTick <= 0)
+        {
+            return;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+
+        if (now < _recoveryUntil)
+        {
+            var total = (long)numberOfBucketsToTick + _deferredBuckets;
+            var run = (int)Math.Min(total, MaxBucketsDuringRecovery);
+            var deferred = total - run;
+            _deferredBuckets = deferred >= int.MaxValue
+                ? int.MaxValue
+                : (int)deferred;
+            numberOfBucketsToTick = run;
+
+            if (_deferredBuckets > 0 && !_loggedActivation)
+            {
+                _loggedActivation = true;
+                Runtime.Log(
+                    $"terrain recovery limiter active: deferred {_deferredBuckets} " +
+                    "tick bucket(s) instead of processing the terrain-change catch-up in one frame");
+            }
+
+            return;
+        }
+
+        _loggedActivation = false;
+
+        if (_deferredBuckets <= 0)
+        {
+            return;
+        }
+
+        var drain = Math.Min(_deferredBuckets, DebtDrainPerUpdate);
+        numberOfBucketsToTick += drain;
+        _deferredBuckets -= drain;
+
+        if (_deferredBuckets == 0)
+        {
+            Runtime.Log("terrain recovery tick debt fully drained");
+        }
     }
 }
 
@@ -4941,6 +5370,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
         var originY = y / ChunkSize * ChunkSize;
 
         state.DirtyChunks.Add(ChunkKey(originX, originY));
+        TerrainRecoveryTickLimiter.NotifyTerrainEdit();
     }
 
     private static void TrackService(object service, TerrainState state)
