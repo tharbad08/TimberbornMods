@@ -162,21 +162,24 @@ internal static class FreezeDetectorPatcher
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
         FaunaSpawnBudgetPatcher.Patch(FreezeHarmony);
         FaunaRecipeLookupCachePatcher.Patch(FreezeHarmony);
-        FaunaSpawnInnerProfiler.Patch(FreezeHarmony);
+        FaunaInstantiationDetailProfiler.Patch(FreezeHarmony);
         TerrainRecoveryTickLimiter.Patch(FreezeHarmony);
         SoilContaminationResetOptimizer.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
-        InputProcessorProfiler.Patch(FreezeHarmony);
-        EbbAndFlowDetailProfiler.Patch(FreezeHarmony);
+        HotInputDetailProfiler.Patch(FreezeHarmony);
+        SuperCursorRefreshSmoother.Patch(FreezeHarmony);
+        LateComponentProfiler.Patch(FreezeHarmony);
+        IncrementalGcSmoother.Initialize();
 
         _patched = true;
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: adaptive terrain-debt repayment enabled; " +
-            "InputProcessor, Fauna-spawn-inner, EbbAndFlow and PreLateUpdate-child diagnostics enabled; " +
-            "main-thread frame allocation deltas enabled; broad per-entity/per-LateUpdate profilers remain disabled");
+            "performance build: v1.1.50 focused pass enabled; adaptive terrain debt retained; " +
+            "incremental-GC smoothing + SuperCursor refresh smoothing enabled; " +
+            "BlockObject/LevelVisibility/SuperCursor, fauna-instantiation and armed late-component diagnostics enabled; " +
+            "broad per-input, EbbAndFlow and broad MonoBehaviour profilers disabled");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -2863,6 +2866,342 @@ internal static class NavigationEntityListenerProfiler
 }
 
 
+internal static class SuperCursorRefreshSmoother
+{
+    private const double NormalRefreshMs = 50.0;
+    private const double ModerateRefreshMs = 100.0;
+    private const double SlowRefreshMs = 250.0;
+
+    private sealed class State
+    {
+        public long NextAllowed;
+    }
+
+    private static readonly ConditionalWeakTable<object, State> States = new();
+    private static bool _installed;
+
+    public static void Patch(Harmony harmony)
+    {
+        var type = AccessTools.TypeByName("SuperCursor.Services.SuperCursorTool");
+        var method = type?
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(candidate =>
+                candidate.Name == "ProcessInfo" &&
+                candidate.ReturnType == typeof(void) &&
+                candidate.GetParameters().Length == 0);
+
+        if (method is null)
+        {
+            Runtime.Log("SuperCursor refresh smoother not installed: ProcessInfo not found");
+            return;
+        }
+
+        harmony.Patch(
+            method,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(SuperCursorRefreshSmoother), nameof(Prefix)))
+            {
+                priority = Priority.First
+            },
+            finalizer: new HarmonyMethod(
+                AccessTools.Method(typeof(SuperCursorRefreshSmoother), nameof(Finalizer)))
+            {
+                priority = Priority.Last
+            });
+
+        _installed = true;
+        Runtime.Log(
+            "SuperCursor refresh smoother installed: info-only refresh capped at 20Hz, " +
+            "with 10Hz/4Hz adaptive backoff after expensive refreshes; input/tool actions unchanged");
+    }
+
+    private static bool Prefix(object __instance, out long __state)
+    {
+        __state = 0;
+        if (!_installed || Runtime.IsBenchmarking || __instance is null)
+        {
+            return true;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var state = States.GetOrCreateValue(__instance);
+        if (now < state.NextAllowed)
+        {
+            return false;
+        }
+
+        __state = now;
+        return true;
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        object __instance,
+        long __state)
+    {
+        if (__state == 0 || __instance is null)
+        {
+            return __exception;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var elapsed = now - __state;
+        var elapsedMs =
+            elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+        FreezeDetector.RecordInputDetail("SuperCursor.ProcessInfo", elapsed);
+
+        var refreshMs = elapsedMs >= 100.0
+            ? SlowRefreshMs
+            : elapsedMs >= 30.0
+                ? ModerateRefreshMs
+                : NormalRefreshMs;
+
+        States.GetOrCreateValue(__instance).NextAllowed =
+            now + (long)(refreshMs / 1000.0 * System.Diagnostics.Stopwatch.Frequency);
+
+        return __exception;
+    }
+}
+
+internal static class HotInputDetailProfiler
+{
+    [ThreadStatic] private static int _blockDepth;
+    [ThreadStatic] private static int _levelDepth;
+
+    private enum Scope
+    {
+        Always,
+        Block,
+        Level,
+    }
+
+    private sealed record DetailTarget(string Label, Scope Scope);
+    private static readonly Dictionary<MethodBase, DetailTarget> Details = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        PatchRoot(
+            harmony,
+            AccessTools.TypeByName("Timberborn.BlockObjectTools.BlockObjectTool"),
+            "ProcessInput",
+            nameof(BlockRootPrefix),
+            nameof(BlockRootFinalizer));
+
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.BlockObjectTool", "PreviewCallback", "Block.PreviewCallback", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.BlockObjectTool", "ActionCallback", "Block.ActionCallback", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.BlockObjectTool", "ShowPreviews", "Block.ShowPreviews", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.BlockObjectTool", "Place", "Block.Place", Scope.Block);
+        PatchDetail(harmony, "Timberborn.AreaSelectionSystem.AreaPicker", "PickBlockObjectArea", "Block.AreaPicker", Scope.Block);
+        PatchDetail(harmony, "Timberborn.AreaSelectionSystem.AreaPicker", "GetBlocks", "Block.GetBlocks", Scope.Block);
+        PatchDetail(harmony, "Timberborn.AreaSelectionSystem.AreaPicker", "GetBlocksForLayout", "Block.GetBlocksForLayout", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.PreviewPlacer", "ShowPreviews", "Block.PreviewPlacer.ShowPreviews", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.PreviewPlacer", "PopulateBuildablePreviewsAndAddToBlockServices", "Block.PreviewPlacer.Populate", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.PreviewPlacer", "GetPositionedPreviews", "Block.PreviewPlacer.Position", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.PreviewPlacer", "ShowBuildablePreviews", "Block.PreviewPlacer.ShowBuildable", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.PreviewPlacer", "UpdateModels", "Block.PreviewPlacer.UpdateModels", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.PreviewPlacer", "RemovePreviewsFromServices", "Block.PreviewPlacer.RemoveServices", Scope.Block);
+        PatchDetail(harmony, "Timberborn.BlockObjectTools.BlockObjectValidationService", "AreValid", "Block.Validation.AreValid", Scope.Block);
+
+        PatchRoot(
+            harmony,
+            AccessTools.TypeByName("Timberborn.LevelVisibilitySystemUI.LevelVisibilitySelector"),
+            "ProcessInput",
+            nameof(LevelRootPrefix),
+            nameof(LevelRootFinalizer));
+        PatchDetail(harmony, "Timberborn.LevelVisibilitySystemUI.LevelVisibilitySelector", "ProcessMouseMovement", "Level.ProcessMouseMovement", Scope.Level);
+        PatchDetail(harmony, "Timberborn.LevelVisibilitySystem.LevelVisibilityService", "SetMaxVisibleLevel", "Level.SetMaxVisibleLevel", Scope.Level);
+        PatchDetail(harmony, "Timberborn.LevelVisibilitySystem.LevelVisibilityService", "InternalSetMaxVisibleLevel", "Level.InternalSetMaxVisibleLevel", Scope.Level);
+
+        PatchDetail(harmony, "SuperCursor.Services.SuperCursorTool", "ProcessInfo", "SuperCursor.ProcessInfo.Detail", Scope.Always);
+        PatchDetail(harmony, "SuperCursor.Services.SuperCursorTool", "ProcessObject", "SuperCursor.ProcessObject", Scope.Always);
+        PatchDetail(harmony, "SuperCursor.Services.SuperCursorTool", "ProcessCoords", "SuperCursor.ProcessCoords", Scope.Always);
+        PatchDetail(harmony, "SuperCursor.Services.SuperCursorTool", "MoveLabel", "SuperCursor.MoveLabel", Scope.Always);
+
+        Runtime.Log(
+            $"focused hot-input profiler installed: {Details.Count} inner method(s); " +
+            "broad 109-method input profiler disabled");
+    }
+
+    private static void PatchRoot(
+        Harmony harmony,
+        Type? type,
+        string methodName,
+        string prefixName,
+        string finalizerName)
+    {
+        var method = type?
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(candidate =>
+                candidate.Name == methodName &&
+                candidate.GetParameters().Length == 0);
+
+        if (method is null)
+        {
+            Runtime.Log($"warning: focused input root missing: {type?.FullName ?? "<type>"}.{methodName}");
+            return;
+        }
+
+        harmony.Patch(
+            method,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(HotInputDetailProfiler), prefixName))
+            {
+                priority = Priority.First
+            },
+            finalizer: new HarmonyMethod(
+                AccessTools.Method(typeof(HotInputDetailProfiler), finalizerName))
+            {
+                priority = Priority.Last
+            });
+    }
+
+    private static void PatchDetail(
+        Harmony harmony,
+        string typeName,
+        string methodName,
+        string label,
+        Scope scope)
+    {
+        var type = AccessTools.TypeByName(typeName);
+        if (type is null)
+        {
+            return;
+        }
+
+        const BindingFlags flags =
+            BindingFlags.Instance | BindingFlags.Static |
+            BindingFlags.Public | BindingFlags.NonPublic |
+            BindingFlags.DeclaredOnly;
+
+        foreach (var method in type.GetMethods(flags).Where(candidate => candidate.Name == methodName))
+        {
+            if (method.IsAbstract || method.ContainsGenericParameters || Details.ContainsKey(method))
+            {
+                continue;
+            }
+
+            try
+            {
+                Details[method] = new DetailTarget(label, scope);
+                harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(typeof(HotInputDetailProfiler), nameof(DetailPrefix)))
+                    {
+                        priority = Priority.First
+                    },
+                    finalizer: new HarmonyMethod(
+                        AccessTools.Method(typeof(HotInputDetailProfiler), nameof(DetailFinalizer)))
+                    {
+                        priority = Priority.Last
+                    });
+            }
+            catch
+            {
+                Details.Remove(method);
+            }
+        }
+    }
+
+    private static void BlockRootPrefix(out long __state)
+    {
+        __state = 0;
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        _blockDepth++;
+        __state = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    private static Exception? BlockRootFinalizer(Exception? __exception, long __state)
+    {
+        if (__state != 0)
+        {
+            FreezeDetector.RecordInputDetail(
+                "Block.ProcessInput",
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        if (_blockDepth > 0)
+        {
+            _blockDepth--;
+        }
+
+        return __exception;
+    }
+
+    private static void LevelRootPrefix(out long __state)
+    {
+        __state = 0;
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        _levelDepth++;
+        __state = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    private static Exception? LevelRootFinalizer(Exception? __exception, long __state)
+    {
+        if (__state != 0)
+        {
+            FreezeDetector.RecordInputDetail(
+                "Level.ProcessInput",
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        if (_levelDepth > 0)
+        {
+            _levelDepth--;
+        }
+
+        return __exception;
+    }
+
+    private static void DetailPrefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = 0;
+        if (Runtime.IsBenchmarking ||
+            !Details.TryGetValue(__originalMethod, out var target))
+        {
+            return;
+        }
+
+        if (target.Scope == Scope.Block && _blockDepth <= 0)
+        {
+            return;
+        }
+
+        if (target.Scope == Scope.Level && _levelDepth <= 0)
+        {
+            return;
+        }
+
+        __state = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    private static Exception? DetailFinalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0 &&
+            Details.TryGetValue(__originalMethod, out var target))
+        {
+            FreezeDetector.RecordInputDetail(
+                target.Label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        return __exception;
+    }
+}
+
+
 internal static class InputProcessorProfiler
 {
     private static readonly HashSet<MethodBase> PatchedMethods = new();
@@ -3051,6 +3390,149 @@ internal static class InputProcessorProfiler
     }
 }
 
+internal static class LateComponentProfiler
+{
+    private const long ArmHeapBytes = 8L * 1024L * 1024L * 1024L;
+    private const double MinimumRecordedMs = 0.25;
+
+    private static readonly HashSet<MethodBase> PatchedMethods = new();
+    private static readonly Dictionary<string, long> FrameTicks = new(StringComparer.Ordinal);
+    private static bool _armed;
+
+    private struct Sample
+    {
+        public long Started;
+        public string? TypeName;
+    }
+
+    public static void Patch(Harmony harmony)
+    {
+        var iface = AccessTools.TypeByName(
+            "Timberborn.BaseComponentSystem.ILateUpdatableComponent");
+        if (iface is null)
+        {
+            Runtime.Log("warning: armed late-component profiler unavailable: interface missing");
+            return;
+        }
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in SafeGetTypes(assembly))
+            {
+                if (type.IsAbstract || type.IsInterface || !iface.IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var map = type.GetInterfaceMap(iface);
+                    for (var i = 0; i < map.InterfaceMethods.Length; i++)
+                    {
+                        if (map.InterfaceMethods[i].Name != "LateUpdate")
+                        {
+                            continue;
+                        }
+
+                        var target = map.TargetMethods[i];
+                        if (target.IsAbstract || !PatchedMethods.Add(target))
+                        {
+                            continue;
+                        }
+
+                        harmony.Patch(
+                            target,
+                            prefix: new HarmonyMethod(
+                                AccessTools.Method(typeof(LateComponentProfiler), nameof(Prefix)))
+                            {
+                                priority = Priority.First
+                            },
+                            finalizer: new HarmonyMethod(
+                                AccessTools.Method(typeof(LateComponentProfiler), nameof(Finalizer)))
+                            {
+                                priority = Priority.Last
+                            });
+                    }
+                }
+                catch
+                {
+                    // Generated/proxy types may not expose a usable interface map.
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"armed late-component profiler installed: {PatchedMethods.Count} effective LateUpdate method(s); " +
+            "timing activates only when managed heap is >=8GiB");
+    }
+
+    public static void ArmForUpcomingFrame(long heapBytes)
+    {
+        _armed = heapBytes >= ArmHeapBytes;
+    }
+
+    private static void Prefix(object __instance, out Sample __state)
+    {
+        __state = default;
+        if (!_armed || Runtime.IsBenchmarking || __instance is null)
+        {
+            return;
+        }
+
+        var type = __instance.GetType();
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.TypeName = type.FullName ?? type.Name;
+    }
+
+    private static Exception? Finalizer(Exception? __exception, Sample __state)
+    {
+        if (__state.Started == 0 || __state.TypeName is null)
+        {
+            return __exception;
+        }
+
+        var elapsed =
+            System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
+        var elapsedMs =
+            elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+        if (elapsedMs >= MinimumRecordedMs)
+        {
+            FrameTicks.TryGetValue(__state.TypeName, out var existing);
+            FrameTicks[__state.TypeName] = existing + elapsed;
+        }
+
+        return __exception;
+    }
+
+    public static void FlushFrame()
+    {
+        foreach (var pair in FrameTicks)
+        {
+            FreezeDetector.RecordLateBehaviour(pair.Key, pair.Value);
+        }
+
+        FrameTicks.Clear();
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch
+        {
+            return Array.Empty<Type>();
+        }
+    }
+}
+
+
 internal static class MonoBehaviourLateUpdateProfiler
 {
     private static readonly HashSet<MethodBase> PatchedMethods = new();
@@ -3188,6 +3670,153 @@ internal static class MonoBehaviourLateUpdateProfiler
         }
     }
 }
+
+internal static class FaunaInstantiationDetailProfiler
+{
+    [ThreadStatic] private static int _spawnDepth;
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        var drainer = AccessTools.TypeByName("Keystone.Mod.Fauna.FaunaSpawnDrainer");
+        var spawn = drainer?
+            .GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(method =>
+                method.Name == "Spawn" &&
+                method.ReturnType == typeof(bool));
+
+        if (spawn is null)
+        {
+            Runtime.Log("fauna instantiation profiler not installed: Spawn not found");
+            return;
+        }
+
+        harmony.Patch(
+            spawn,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(FaunaInstantiationDetailProfiler), nameof(SpawnPrefix)))
+            {
+                priority = Priority.First
+            },
+            finalizer: new HarmonyMethod(
+                AccessTools.Method(typeof(FaunaInstantiationDetailProfiler), nameof(SpawnFinalizer)))
+            {
+                priority = Priority.Last
+            });
+
+        PatchMethods(harmony, "Timberborn.EntitySystem.EntityService", "Instantiate",
+            method => true, method => $"Fauna.EntityService.Instantiate/{method.GetParameters().Length}");
+        PatchMethods(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "Instantiate",
+            method => true, _ => "Fauna.TemplateInstantiator.Instantiate");
+        PatchMethods(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "GetCachedTemplate",
+            method => true, _ => "Fauna.TemplateInstantiator.GetCachedTemplate");
+        PatchMethods(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateInactive",
+            method => true, _ => "Fauna.BaseInstantiator.InstantiateInactive");
+        PatchMethods(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateComponents",
+            method => true, _ => "Fauna.BaseInstantiator.InstantiateComponents");
+        PatchMethods(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateComponent",
+            method => true, _ => "Fauna.BaseInstantiator.InstantiateComponent");
+        PatchMethods(harmony, "Timberborn.BaseComponentSystem.ComponentCache", "Initialize",
+            method => true, _ => "Fauna.ComponentCache.Initialize");
+
+        Runtime.Log(
+            $"fauna instantiation profiler installed: {Labels.Count} nested method(s); " +
+            "separate labels avoid the v1.1.49 overlapping Instantiate total");
+    }
+
+    private static void PatchMethods(
+        Harmony harmony,
+        string typeName,
+        string methodName,
+        Func<MethodInfo, bool> predicate,
+        Func<MethodInfo, string> label)
+    {
+        var type = AccessTools.TypeByName(typeName);
+        if (type is null)
+        {
+            return;
+        }
+
+        const BindingFlags flags =
+            BindingFlags.Instance | BindingFlags.Static |
+            BindingFlags.Public | BindingFlags.NonPublic |
+            BindingFlags.DeclaredOnly;
+
+        foreach (var method in type.GetMethods(flags)
+                     .Where(candidate =>
+                         candidate.Name == methodName &&
+                         !candidate.IsAbstract &&
+                         !candidate.ContainsGenericParameters &&
+                         predicate(candidate)))
+        {
+            try
+            {
+                Labels[method] = label(method);
+                harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(typeof(FaunaInstantiationDetailProfiler), nameof(InnerPrefix)))
+                    {
+                        priority = Priority.First
+                    },
+                    finalizer: new HarmonyMethod(
+                        AccessTools.Method(typeof(FaunaInstantiationDetailProfiler), nameof(InnerFinalizer)))
+                    {
+                        priority = Priority.Last
+                    });
+            }
+            catch
+            {
+                Labels.Remove(method);
+            }
+        }
+    }
+
+    private static void SpawnPrefix()
+    {
+        if (!Runtime.IsBenchmarking)
+        {
+            _spawnDepth++;
+        }
+    }
+
+    private static Exception? SpawnFinalizer(Exception? __exception)
+    {
+        if (!Runtime.IsBenchmarking && _spawnDepth > 0)
+        {
+            _spawnDepth--;
+        }
+
+        return __exception;
+    }
+
+    private static void InnerPrefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = 0;
+        if (!Runtime.IsBenchmarking &&
+            _spawnDepth > 0 &&
+            Labels.ContainsKey(__originalMethod))
+        {
+            __state = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
+    }
+
+    private static Exception? InnerFinalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+        {
+            FreezeDetector.RecordFaunaDetail(
+                label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        return __exception;
+    }
+}
+
 
 internal static class FaunaSpawnInnerProfiler
 {
@@ -4162,6 +4791,132 @@ internal static class SoilContaminationDeepProfiler
     }
 }
 
+internal static class IncrementalGcSmoother
+{
+    private const long StartHeapBytes = 7L * 1024L * 1024L * 1024L;
+    private const long HighHeapBytes = 8500L * 1024L * 1024L;
+    private const long VeryHighHeapBytes = 9500L * 1024L * 1024L;
+    private const ulong NormalBudgetNanoseconds = 1_000_000UL;
+    private const ulong HighBudgetNanoseconds = 2_000_000UL;
+    private const ulong VeryHighBudgetNanoseconds = 3_000_000UL;
+
+    private static Func<ulong, bool>? _collectIncremental;
+    private static Func<bool>? _isIncremental;
+    private static bool _disabled;
+    private static bool _loggedActive;
+    private static bool _loggedUnavailable;
+
+    public static void Initialize()
+    {
+        try
+        {
+            var type = AccessTools.TypeByName("UnityEngine.Scripting.GarbageCollector");
+            if (type is null)
+            {
+                LogUnavailable("Unity incremental GC type not found");
+                return;
+            }
+
+            var collect = type.GetMethod(
+                "CollectIncremental",
+                BindingFlags.Static | BindingFlags.Public,
+                binder: null,
+                types: new[] { typeof(ulong) },
+                modifiers: null);
+            var incrementalProperty = type.GetProperty(
+                "isIncremental",
+                BindingFlags.Static | BindingFlags.Public);
+
+            if (collect is null || collect.ReturnType != typeof(bool))
+            {
+                LogUnavailable("CollectIncremental(ulong) not found");
+                return;
+            }
+
+            _collectIncremental =
+                (Func<ulong, bool>)collect.CreateDelegate(typeof(Func<ulong, bool>));
+
+            var getter = incrementalProperty?.GetGetMethod();
+            if (getter is not null && getter.ReturnType == typeof(bool))
+            {
+                _isIncremental =
+                    (Func<bool>)getter.CreateDelegate(typeof(Func<bool>));
+            }
+
+            Runtime.Log(
+                "incremental GC smoother installed: no forced full collections; " +
+                "when managed heap exceeds 7GiB, request bounded 1/2/3ms incremental slices");
+        }
+        catch (Exception ex)
+        {
+            LogUnavailable($"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    public static void Pulse(long heapBytes)
+    {
+        if (_disabled || _collectIncremental is null || heapBytes < StartHeapBytes)
+        {
+            return;
+        }
+
+        try
+        {
+            if (_isIncremental is not null && !_isIncremental())
+            {
+                _disabled = true;
+                LogUnavailable("Unity reports incremental GC disabled");
+                return;
+            }
+
+            var budget = heapBytes >= VeryHighHeapBytes
+                ? VeryHighBudgetNanoseconds
+                : heapBytes >= HighHeapBytes
+                    ? HighBudgetNanoseconds
+                    : NormalBudgetNanoseconds;
+
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            _collectIncremental(budget);
+            var elapsed =
+                System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            var elapsedMs =
+                elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+
+            if (!_loggedActive)
+            {
+                _loggedActive = true;
+                Runtime.Log(
+                    $"incremental GC smoother active at {heapBytes / 1024.0 / 1024.0:F0}MiB heap; " +
+                    $"requested budget={budget / 1_000_000.0:F1}ms");
+            }
+
+            if (elapsedMs >= 20.0)
+            {
+                Runtime.Log(
+                    $"incremental GC slice exceeded soft budget: " +
+                    $"requested={budget / 1_000_000.0:F1}ms actual={elapsedMs:F1}ms");
+            }
+        }
+        catch (Exception ex)
+        {
+            _disabled = true;
+            LogUnavailable($"runtime call failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static void LogUnavailable(string reason)
+    {
+        if (_loggedUnavailable)
+        {
+            return;
+        }
+
+        _loggedUnavailable = true;
+        Runtime.Log($"incremental GC smoother unavailable; vanilla GC retained: {reason}");
+    }
+}
+
+
 internal static class FreezeDetector
 {
     private const double SlowFrameMs = 250.0;
@@ -4273,7 +5028,7 @@ internal static class FreezeDetector
 
     public static void FrameBoundary(long now, string nextPhase)
     {
-        InputProcessorProfiler.FlushFrame();
+        LateComponentProfiler.FlushFrame();
 
         string? freezeLine = null;
 
@@ -4349,6 +5104,10 @@ internal static class FreezeDetector
         {
             Runtime.LogFreeze(freezeLine);
         }
+
+        var heapBytes = GC.GetTotalMemory(false);
+        LateComponentProfiler.ArmForUpcomingFrame(heapBytes);
+        IncrementalGcSmoother.Pulse(heapBytes);
     }
 
     public static void BeginPhase(string phaseName, long now)
@@ -4775,7 +5534,7 @@ internal static class FreezeDetector
             $"TickSingletons={ToMs(tickTicks):F1}ms, " +
             $"unattributed={ToMs(unattributedTicks):F1}ms; " +
             $"physics={ToMs(physicsTicks):F1}ms; " +
-            $"alloc delta={FormatBytes(allocatedBytesDelta)}, heap={FormatBytes(GC.GetTotalMemory(false))}; " +
+            $"heap={FormatBytes(GC.GetTotalMemory(false))}; " +
             $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
             $"phase gaps: {phaseGapText}; " +
             $"top update singletons: {topUpdateText}; " +
