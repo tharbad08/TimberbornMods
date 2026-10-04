@@ -73,3 +73,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.52: validation follow-up. Keeps preview-navmesh batching, adds per-preview-service member timing to isolate remaining RemoveServices spikes, adds BuildingPlacer/ConstructionFactory/BlockObjectFactory/EntityService/TemplateInstantiator placement timing, tags Keystone fauna cache-miss profiling with the blueprint name when available, changes terrain recovery to a debt-pressure 32/48/64/96 ramp above 4096 deferred buckets, replaces the unsupported per-thread allocation sampler with sampled managed-heap deltas across singleton and PlayerLoop scopes, and records TimberPhysics StepAll versus PhysX simulation time while retaining the 4-substep cap.
+
+
+- v1.1.53: v1.1.52 validation follow-up. Retains preview-navmesh batching and terrain debt-pressure recovery. Expands freeze-log input detail from 8 to 20 entries so preview-service and placement-factory subprobes are not hidden by the outer BlockObjectTool call stack. TimberPhysics keeps up to four 0.02s substeps when cheap but stops catch-up once the current update has spent about 50ms inside Physics.Simulate, then drops remaining backlog as before. Managed-heap sampling now adds nested SoilContamination.UpdateLevels and SoilMoisture.UpdateLevels scopes to separate their inner update work from outer resize/background allocation effects.
