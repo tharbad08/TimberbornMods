@@ -178,11 +178,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.52 focused pass enabled; preview-navmesh batching retained; " +
-            "terrain recovery adds debt-pressure repayment; SuperCursor smoothing retained; " +
-            "preview-service-member + placement-factory + LevelVisibility + fauna-blueprint diagnostics enabled; " +
-            "managed-heap delta sampling replaces the unsupported per-thread allocation sampler; " +
-            "TimberPhysics StepAll vs PhysX timing enabled without changing the 4-substep cap");
+            "performance build: v1.1.53 focused pass enabled; preview-navmesh batching and terrain debt-pressure recovery retained; " +
+            "input detail output expanded so preview-member/placement-factory probes are visible; " +
+            "managed-heap sampling now includes soil contamination/moisture update sub-scopes; " +
+            "TimberPhysics keeps the 4-substep ceiling but stops catch-up after ~50ms of PhysX wall time");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -4507,10 +4506,19 @@ internal static class SoilMoistureProfiler
         public int Gc2;
     }
 
+    private struct UpdateLevelsSample
+    {
+        public long Started;
+        public ManagedHeapSampler.Sample HeapSample;
+    }
+
     public static void Patch(Harmony harmony)
     {
         var type = AccessTools.TypeByName("Timberborn.SoilMoistureSystem.SoilMoistureService");
         var tick = type is null ? null : AccessTools.Method(type, "Tick", Type.EmptyTypes);
+        var updateLevels = type is null
+            ? null
+            : AccessTools.DeclaredMethod(type, "UpdateMoistureLevels", Type.EmptyTypes);
         if (tick is null)
         {
             Runtime.Log("warning: SoilMoisture profiler unavailable: SoilMoistureService.Tick not found");
@@ -4532,8 +4540,24 @@ internal static class SoilMoistureProfiler
                     priority = Priority.Last
                 });
 
+            if (updateLevels is not null)
+            {
+                harmony.Patch(
+                    updateLevels,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(typeof(SoilMoistureProfiler), nameof(UpdateLevelsPrefix)))
+                    {
+                        priority = Priority.First
+                    },
+                    finalizer: new HarmonyMethod(
+                        AccessTools.Method(typeof(SoilMoistureProfiler), nameof(UpdateLevelsFinalizer)))
+                    {
+                        priority = Priority.Last
+                    });
+            }
+
             Runtime.Log(
-                "SoilMoisture allocation/GC profiler installed: outer Tick only");
+                "SoilMoisture allocation/GC profiler installed: outer Tick + sampled UpdateMoistureLevels heap scope");
         }
         catch (Exception ex)
         {
@@ -4579,6 +4603,32 @@ internal static class SoilMoistureProfiler
             GC.CollectionCount(0) - __state.Gc0,
             GC.CollectionCount(1) - __state.Gc1,
             GC.CollectionCount(2) - __state.Gc2);
+
+        return __exception;
+    }
+
+    private static void UpdateLevelsPrefix(out UpdateLevelsSample __state)
+    {
+        __state = default;
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.HeapSample = ManagedHeapSampler.BeginNamedScopeSample();
+    }
+
+    private static Exception? UpdateLevelsFinalizer(
+        Exception? __exception,
+        UpdateLevelsSample __state)
+    {
+        if (__state.Started != 0)
+        {
+            ManagedHeapSampler.EndNamedScopeSample(
+                "SoilMoisture.UpdateLevels",
+                __state.HeapSample);
+        }
 
         return __exception;
     }
@@ -5283,20 +5333,34 @@ internal static class SoilContaminationDeepProfiler
         return __exception;
     }
 
-    private static void BranchPrefix(out long __state)
+    private struct BranchSample
     {
-        __state = Runtime.IsBenchmarking
-            ? 0
-            : System.Diagnostics.Stopwatch.GetTimestamp();
+        public long Started;
+        public ManagedHeapSampler.Sample HeapSample;
     }
 
-    private static Exception? UpdateLevelsFinalizer(Exception? __exception, long __state)
+    private static void BranchPrefix(out BranchSample __state)
     {
-        if (__state != 0)
+        __state = default;
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.HeapSample = ManagedHeapSampler.BeginNamedScopeSample();
+    }
+
+    private static Exception? UpdateLevelsFinalizer(Exception? __exception, BranchSample __state)
+    {
+        if (__state.Started != 0)
         {
             FreezeDetector.RecordSoilDetail(
                 "UpdateContaminationLevels",
-                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+            ManagedHeapSampler.EndNamedScopeSample(
+                "SoilContamination.UpdateLevels",
+                __state.HeapSample);
         }
 
         return __exception;
@@ -5369,6 +5433,34 @@ internal static class ManagedHeapSampler
             GC.CollectionCount(0),
             GC.CollectionCount(1),
             GC.CollectionCount(2));
+    }
+
+    public static Sample BeginNamedScopeSample() => BeginSingletonSample();
+
+    public static void EndNamedScopeSample(string scopeName, Sample sample)
+    {
+        if (!sample.Active)
+        {
+            return;
+        }
+
+        var gc0 = GC.CollectionCount(0);
+        var gc1 = GC.CollectionCount(1);
+        var gc2 = GC.CollectionCount(2);
+        if (gc0 != sample.Gc0 || gc1 != sample.Gc1 || gc2 != sample.Gc2)
+        {
+            return;
+        }
+
+        var delta = GC.GetTotalMemory(false) - sample.HeapBefore;
+        if (delta <= 0)
+        {
+            return;
+        }
+
+        var key = $"Scope.{scopeName}";
+        SingletonGrowth.TryGetValue(key, out var existing);
+        SingletonGrowth[key] = existing + delta;
     }
 
     public static void EndSingletonSample(string phase, string typeName, Sample sample)
@@ -6180,7 +6272,7 @@ internal static class FreezeDetector
 
         var inputDetails = InputDetailTicks
             .OrderByDescending(x => x.Value)
-            .Take(TopSystemCount)
+            .Take(20)
             .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
             .ToArray();
         var inputDetailText = inputDetails.Length == 0
@@ -6547,6 +6639,7 @@ internal static class TimberPhysicsCatchUpLimiterPatcher
     private const string TimeTypeName = "UnityEngine.Time";
     private const float FixedDeltaTime = 0.02f;
     private const int MaxSubstepsPerUpdate = 4;
+    private const double MaxPhysicsWallBudgetMs = 50.0;
 
     private static bool _patched;
     private static bool _loggedDrop;
@@ -6658,7 +6751,8 @@ internal static class TimberPhysicsCatchUpLimiterPatcher
             _patched = true;
             Runtime.Log(
                 $"TimberPhysics catch-up limiter installed: max {MaxSubstepsPerUpdate} x " +
-                $"{FixedDeltaTime:F2}s PhysX substeps per UpdateSingleton");
+                $"{FixedDeltaTime:F2}s PhysX substeps per UpdateSingleton, " +
+                $"adaptive PhysX wall budget ~{MaxPhysicsWallBudgetMs:F0}ms");
         }
         catch (Exception ex)
         {
@@ -6741,6 +6835,12 @@ internal static class TimberPhysicsCatchUpLimiterPatcher
             }
 
             substeps++;
+
+            if (!Runtime.IsBenchmarking &&
+                simulateTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency >= MaxPhysicsWallBudgetMs)
+            {
+                break;
+            }
         }
 
         if (!Runtime.IsBenchmarking && substeps > 0)
