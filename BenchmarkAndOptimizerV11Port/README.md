@@ -67,3 +67,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.50: focused follow-up from the long 2026-10-04 run. Keeps adaptive terrain-debt repayment; adds bounded Unity incremental-GC slices only above 7GiB managed heap (no forced full GC), a UI-only SuperCursor info refresh smoother, focused BlockObject/LevelVisibility/SuperCursor inner timing, deeper fauna EntityService/TemplateInstantiator/BaseInstantiator timing, and an 8GiB-gated Timberborn ILateUpdatableComponent profiler to identify ScriptRunBehaviourLateUpdate freezes. Broad input, EbbAndFlow, old fauna-instantiation and broad MonoBehaviour profilers are disabled.
+
+
+- v1.1.51: long-run follow-up. Replaces immediate BlockObject preview-navmesh apply/remove with queued batching through NavigationSynchronizer; adds continuous-terrain-edit anti-starvation so deferred tick debt can ramp to 32/48/64/96 instead of growing without bound; removes the unavailable incremental-GC helper and non-actionable armed late-component profiler; adds sampled per-singleton allocation diagnostics above 6GiB heap; adds LevelVisibility event-handler timing and deeper Keystone fauna cache-miss profiling through OptimizedPrefabInstantiator/PrefabOptimizationChain/BlueprintPrefabConverter.
