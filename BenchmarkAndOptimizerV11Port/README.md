@@ -58,3 +58,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.47: targets the remaining freeze classes from the 2026-10-04 run in one restart. Adds a semantic-preserving SoilContamination reset fast-path (only contaminated objects are transitioned, the backing array is cleared, then the material map is reset once), outer Soil allocation/GC plus UpdateContaminationLevels timing, a Keystone Fauna blueprint-to-recipe cache, high-level Input/Fauna timing, and major-only Unity PlayerLoop phase markers for unattributed stalls. PreLateUpdate child wrapping and per-input-processor hooks remain disabled.
+
+
+- v1.1.48: bundled follow-up from the 2026-10-04 17:00 run. Fixes terrain-recovery debt starvation by allowing debt-only TickBuckets calls, using backlog-pressure recovery budgets (8/16/24), and bounded post-recovery repayment budgets (16/32/64/96). Adds exact input-processor attribution, PreLateUpdate child timing, Fauna Spawn sub-step timing, EbbAndFlowManager inner-method timing, and whole-frame allocation/heap reporting. Soil normal-update semantics are intentionally unchanged because each multi-second Soil event in the source run coincided with a full GC while Soil itself allocated 0 KiB.
