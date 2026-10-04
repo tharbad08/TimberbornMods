@@ -176,7 +176,7 @@ internal static class FreezeDetectorPatcher
         Runtime.Log(
             "performance build: adaptive terrain-debt repayment enabled; " +
             "InputProcessor, Fauna-spawn-inner, EbbAndFlow and PreLateUpdate-child diagnostics enabled; " +
-            "whole-frame allocation deltas enabled; broad per-entity/per-LateUpdate profilers remain disabled");
+            "main-thread frame allocation deltas enabled; broad per-entity/per-LateUpdate profilers remain disabled");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -4235,7 +4235,7 @@ internal static class FreezeDetector
             _gc0 = GC.CollectionCount(0);
             _gc1 = GC.CollectionCount(1);
             _gc2 = GC.CollectionCount(2);
-            _totalAllocatedBytes = GC.GetTotalAllocatedBytes(false);
+            _totalAllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
             SectionTicks.Clear();
             SystemTicks.Clear();
             TickSingletonTicks.Clear();
@@ -4294,7 +4294,7 @@ internal static class FreezeDetector
                 var nextGc0 = GC.CollectionCount(0);
                 var nextGc1 = GC.CollectionCount(1);
                 var nextGc2 = GC.CollectionCount(2);
-                var nextAllocatedBytes = GC.GetTotalAllocatedBytes(false);
+                var nextAllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
                 var allocatedBytesDelta = Math.Max(0, nextAllocatedBytes - _totalAllocatedBytes);
 
                 if (elapsedMs >= SlowFrameMs)
