@@ -2375,10 +2375,10 @@ internal static class EbbAndFlowDetailProfiler
     }
 
     private static void TickPrefix() { if (!Runtime.IsBenchmarking) _depth++; }
-    private static Exception? TickFinalizer(Exception? ex)
+    private static Exception? TickFinalizer(Exception? __exception)
     {
         if (!Runtime.IsBenchmarking && _depth > 0) _depth--;
-        return ex;
+        return __exception;
     }
     private static void InnerPrefix(MethodBase __originalMethod, out long __state)
     {
@@ -2386,11 +2386,11 @@ internal static class EbbAndFlowDetailProfiler
         if (!Runtime.IsBenchmarking && _depth > 0 && Labels.ContainsKey(__originalMethod))
             __state = System.Diagnostics.Stopwatch.GetTimestamp();
     }
-    private static Exception? InnerFinalizer(Exception? ex, MethodBase __originalMethod, long __state)
+    private static Exception? InnerFinalizer(Exception? __exception, MethodBase __originalMethod, long __state)
     {
         if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
             FreezeDetector.RecordTargetDetail("Ebb."+label, System.Diagnostics.Stopwatch.GetTimestamp()-__state);
-        return ex;
+        return __exception;
     }
     private static IEnumerable<Type> SafeGetTypes(Assembly a)
     {
