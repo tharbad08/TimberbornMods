@@ -169,6 +169,8 @@ internal static class FreezeDetectorPatcher
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
         HotInputDetailProfiler.Patch(FreezeHarmony);
+        PreviewServiceMemberDetailProfiler.Patch(FreezeHarmony);
+        BlockPlacementDetailProfiler.Patch(FreezeHarmony);
         LevelVisibilityHandlerProfiler.Patch(FreezeHarmony);
         SuperCursorRefreshSmoother.Patch(FreezeHarmony);
 
@@ -176,10 +178,11 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.51 focused pass enabled; preview-navmesh add/remove is queued and batched; " +
-            "terrain recovery has continuous-edit anti-starvation repayment; SuperCursor smoothing retained; " +
-            "LevelVisibility handler, deeper fauna cache-miss and sampled singleton-allocation diagnostics enabled; " +
-            "incremental-GC helper and armed late-component profiler disabled after v1.1.50 proved them non-actionable");
+            "performance build: v1.1.52 focused pass enabled; preview-navmesh batching retained; " +
+            "terrain recovery adds debt-pressure repayment; SuperCursor smoothing retained; " +
+            "preview-service-member + placement-factory + LevelVisibility + fauna-blueprint diagnostics enabled; " +
+            "managed-heap delta sampling replaces the unsupported per-thread allocation sampler; " +
+            "TimberPhysics StepAll vs PhysX timing enabled without changing the 4-substep cap");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -193,7 +196,7 @@ internal static class FreezeDetectorPatcher
     {
         public bool Active;
         public long Started;
-        public long AllocatedBefore;
+        public ManagedHeapSampler.Sample HeapSample;
         public string? TypeName;
     }
 
@@ -450,8 +453,8 @@ internal static class FreezeDetectorPatcher
             FreezeDetector.RecordUpdateSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
-            SingletonAllocationSampler.EndSample(
-                "Update", __state.TypeName, __state.AllocatedBefore);
+            ManagedHeapSampler.EndSingletonSample(
+                "Update", __state.TypeName, __state.HeapSample);
         }
 
         return __exception;
@@ -471,8 +474,8 @@ internal static class FreezeDetectorPatcher
             FreezeDetector.RecordLateUpdateSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
-            SingletonAllocationSampler.EndSample(
-                "LateUpdate", __state.TypeName, __state.AllocatedBefore);
+            ManagedHeapSampler.EndSingletonSample(
+                "LateUpdate", __state.TypeName, __state.HeapSample);
         }
 
         return __exception;
@@ -497,7 +500,7 @@ internal static class FreezeDetectorPatcher
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.AllocatedBefore = SingletonAllocationSampler.BeginSample();
+        __state.HeapSample = ManagedHeapSampler.BeginSingletonSample();
         __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
     }
 
@@ -518,7 +521,7 @@ internal static class FreezeDetectorPatcher
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.AllocatedBefore = SingletonAllocationSampler.BeginSample();
+        __state.HeapSample = ManagedHeapSampler.BeginSingletonSample();
         __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
     }
 
@@ -531,8 +534,8 @@ internal static class FreezeDetectorPatcher
             FreezeDetector.RecordTickSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
-            SingletonAllocationSampler.EndSample(
-                "Tick", __state.TypeName, __state.AllocatedBefore);
+            ManagedHeapSampler.EndSingletonSample(
+                "Tick", __state.TypeName, __state.HeapSample);
         }
 
         return __exception;
@@ -2522,7 +2525,7 @@ internal static class TerrainRecoveryTickLimiter
         _installed = true;
         Runtime.Log(
             "terrain recovery tick limiter installed: recovery budgets 8/16/24; " +
-            "continuous-edit anti-starvation ramps to 32/48/64/96 after 4s; " +
+            "debt-pressure ramp uses 32/48/64/96 once deferred debt exceeds 4096; " +
             "post-recovery debt budgets 16/32/64/96; debt-only calls can repay backlog");
     }
 
@@ -2555,25 +2558,20 @@ internal static class TerrainRecoveryTickLimiter
                 : total >= 2048 ? ElevatedRecoveryBudget
                 : BaseRecoveryBudget;
 
-            var continuousRecoveryTicks = _continuousRecoveryStartedAt == 0
-                ? 0
-                : now - _continuousRecoveryStartedAt;
-            var antiStarvation = continuousRecoveryTicks >=
-                (long)(ContinuousRecoveryGraceSeconds * System.Diagnostics.Stopwatch.Frequency);
-
-            if (antiStarvation && total >= 8192)
+            if (total >= 4096)
             {
-                budget = total >= 65536 ? PostRecoveryEmergencyBudget
-                    : total >= 32768 ? PostRecoveryHighBudget
-                    : total >= 16384 ? 48
+                var pressureBudget = total >= 32768 ? PostRecoveryEmergencyBudget
+                    : total >= 16384 ? PostRecoveryHighBudget
+                    : total >= 8192 ? 48
                     : PostRecoveryMediumBudget;
+                budget = Math.Max(budget, pressureBudget);
 
                 if (!_loggedAntiStarvation)
                 {
                     _loggedAntiStarvation = true;
                     Runtime.Log(
-                        $"terrain recovery anti-starvation active after {ContinuousRecoveryGraceSeconds:F0}s " +
-                        $"of continuous edits: debt={_deferredBuckets}, budget={budget}");
+                        $"terrain recovery debt-pressure ramp active: " +
+                        $"debt={_deferredBuckets}, bounded budget={budget}");
                 }
             }
 
@@ -2981,6 +2979,247 @@ internal static class NavigationEntityListenerProfiler
 }
 
 
+internal static class PreviewServiceMemberDetailProfiler
+{
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        var iface = AccessTools.TypeByName("Timberborn.BlockSystem.IPreviewServiceMember");
+        if (iface is null)
+        {
+            Runtime.Log("warning: preview-service-member profiler unavailable: interface missing");
+            return;
+        }
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in SafeGetTypes(assembly))
+            {
+                if (type.IsAbstract || type.IsInterface || !iface.IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                foreach (var methodName in new[] { "AddToPreviewService", "RemoveFromPreviewService" })
+                {
+                    var method = AccessTools.Method(type, methodName, Type.EmptyTypes);
+                    if (method is null || Labels.ContainsKey(method))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        Labels[method] =
+                            $"Block.PreviewMember.{ShortName(type)}.{(methodName.StartsWith("Add") ? "Add" : "Remove")}";
+                        harmony.Patch(
+                            method,
+                            prefix: new HarmonyMethod(
+                                AccessTools.Method(typeof(PreviewServiceMemberDetailProfiler), nameof(Prefix)))
+                            { priority = Priority.First },
+                            finalizer: new HarmonyMethod(
+                                AccessTools.Method(typeof(PreviewServiceMemberDetailProfiler), nameof(Finalizer)))
+                            { priority = Priority.Last });
+                    }
+                    catch
+                    {
+                        Labels.Remove(method);
+                    }
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"preview-service-member profiler installed: {Labels.Count} add/remove method(s)");
+    }
+
+    private static void Prefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = HotInputDetailProfiler.BlockScopeActive &&
+                  Labels.ContainsKey(__originalMethod)
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+        {
+            FreezeDetector.RecordInputDetail(
+                label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        return __exception;
+    }
+
+    private static string ShortName(Type type)
+    {
+        var name = type.FullName ?? type.Name;
+        var index = name.LastIndexOf('.');
+        return index >= 0 ? name[(index + 1)..] : name;
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try { return assembly.GetTypes(); }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch { return Array.Empty<Type>(); }
+    }
+}
+
+internal static class BlockPlacementDetailProfiler
+{
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        PatchInterfaceImplementations(
+            harmony,
+            "Timberborn.BlockObjectTools.IBlockObjectPlacer",
+            "Place",
+            "Block.Placer");
+
+        PatchNamed(harmony, "Timberborn.ConstructionSites.ConstructionFactory", "CreateAsUnfinished", "Block.Construction.CreateUnfinished");
+        PatchNamed(harmony, "Timberborn.ConstructionSites.ConstructionFactory", "CreateAsFinished", "Block.Construction.CreateFinished");
+        PatchNamed(harmony, "Timberborn.BlockSystem.BlockObjectFactory", "CreateUnfinished", "Block.Factory.CreateUnfinished");
+        PatchNamed(harmony, "Timberborn.BlockSystem.BlockObjectFactory", "CreateFinished", "Block.Factory.CreateFinished");
+        PatchNamed(harmony, "Timberborn.EntitySystem.EntityService", "Instantiate", "Block.EntityService.Instantiate");
+        PatchNamed(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "Instantiate", "Block.TemplateInstantiator.Instantiate");
+        PatchNamed(harmony, "Timberborn.BlockSystem.BlockObject", "Reposition", "Block.BlockObject.Reposition");
+        PatchNamed(harmony, "Timberborn.ConstructionSites.ConstructionSite", "FinishNow", "Block.ConstructionSite.FinishNow");
+
+        Runtime.Log(
+            $"block-placement detail profiler installed: {Labels.Count} method(s)");
+    }
+
+    private static void PatchInterfaceImplementations(
+        Harmony harmony,
+        string interfaceName,
+        string methodName,
+        string prefix)
+    {
+        var iface = AccessTools.TypeByName(interfaceName);
+        if (iface is null)
+        {
+            return;
+        }
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in SafeGetTypes(assembly))
+            {
+                if (type.IsAbstract || type.IsInterface || !iface.IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                var method = type.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .FirstOrDefault(candidate => candidate.Name == methodName);
+                if (method is not null)
+                {
+                    PatchMethod(harmony, method, $"{prefix}.{ShortName(type)}");
+                }
+            }
+        }
+    }
+
+    private static void PatchNamed(
+        Harmony harmony,
+        string typeName,
+        string methodName,
+        string label)
+    {
+        var type = AccessTools.TypeByName(typeName);
+        if (type is null)
+        {
+            return;
+        }
+
+        foreach (var method in type.GetMethods(
+                     BindingFlags.Instance | BindingFlags.Static |
+                     BindingFlags.Public | BindingFlags.NonPublic |
+                     BindingFlags.DeclaredOnly)
+                 .Where(candidate => candidate.Name == methodName))
+        {
+            PatchMethod(harmony, method, label);
+        }
+    }
+
+    private static void PatchMethod(Harmony harmony, MethodInfo method, string label)
+    {
+        if (method.IsAbstract || method.ContainsGenericParameters || Labels.ContainsKey(method))
+        {
+            return;
+        }
+
+        try
+        {
+            Labels[method] = label;
+            harmony.Patch(
+                method,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(typeof(BlockPlacementDetailProfiler), nameof(Prefix)))
+                { priority = Priority.First },
+                finalizer: new HarmonyMethod(
+                    AccessTools.Method(typeof(BlockPlacementDetailProfiler), nameof(Finalizer)))
+                { priority = Priority.Last });
+        }
+        catch
+        {
+            Labels.Remove(method);
+        }
+    }
+
+    private static void Prefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = HotInputDetailProfiler.BlockScopeActive &&
+                  Labels.ContainsKey(__originalMethod)
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+        {
+            FreezeDetector.RecordInputDetail(
+                label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        return __exception;
+    }
+
+    private static string ShortName(Type type)
+    {
+        var name = type.FullName ?? type.Name;
+        var index = name.LastIndexOf('.');
+        return index >= 0 ? name[(index + 1)..] : name;
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try { return assembly.GetTypes(); }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch { return Array.Empty<Type>(); }
+    }
+}
+
+
 internal static class LevelVisibilityHandlerProfiler
 {
     private static readonly Dictionary<MethodBase, string> Labels = new();
@@ -3204,6 +3443,7 @@ internal static class HotInputDetailProfiler
     private sealed record DetailTarget(string Label, Scope Scope);
     private static readonly Dictionary<MethodBase, DetailTarget> Details = new();
 
+    public static bool BlockScopeActive => _blockDepth > 0 && !Runtime.IsBenchmarking;
     public static bool LevelScopeActive => _levelDepth > 0 && !Runtime.IsBenchmarking;
 
     public static void Patch(Harmony harmony)
@@ -3901,6 +4141,7 @@ internal static class MonoBehaviourLateUpdateProfiler
 internal static class FaunaInstantiationDetailProfiler
 {
     [ThreadStatic] private static int _spawnDepth;
+    [ThreadStatic] private static string? _currentBlueprint;
     private static readonly Dictionary<MethodBase, string> Labels = new();
 
     public static void Patch(Harmony harmony)
@@ -4007,11 +4248,17 @@ internal static class FaunaInstantiationDetailProfiler
         }
     }
 
-    private static void SpawnPrefix()
+    private static void SpawnPrefix(object[] __args)
     {
-        if (!Runtime.IsBenchmarking)
+        if (Runtime.IsBenchmarking)
         {
-            _spawnDepth++;
+            return;
+        }
+
+        _spawnDepth++;
+        if (_spawnDepth == 1)
+        {
+            _currentBlueprint = TryReadBlueprintName(__args);
         }
     }
 
@@ -4020,9 +4267,49 @@ internal static class FaunaInstantiationDetailProfiler
         if (!Runtime.IsBenchmarking && _spawnDepth > 0)
         {
             _spawnDepth--;
+            if (_spawnDepth == 0)
+            {
+                _currentBlueprint = null;
+            }
         }
 
         return __exception;
+    }
+
+    private static string? TryReadBlueprintName(object[] args)
+    {
+        if (args is null)
+        {
+            return null;
+        }
+
+        foreach (var arg in args)
+        {
+            if (arg is null)
+            {
+                continue;
+            }
+
+            var type = arg.GetType();
+            var member = (MemberInfo?)AccessTools.Property(type, "BlueprintName")
+                ?? AccessTools.Field(type, "BlueprintName");
+            if (member is PropertyInfo property &&
+                property.GetIndexParameters().Length == 0 &&
+                property.GetValue(arg) is string propertyValue &&
+                !string.IsNullOrWhiteSpace(propertyValue))
+            {
+                return propertyValue;
+            }
+
+            if (member is FieldInfo field &&
+                field.GetValue(arg) is string fieldValue &&
+                !string.IsNullOrWhiteSpace(fieldValue))
+            {
+                return fieldValue;
+            }
+        }
+
+        return null;
     }
 
     private static void InnerPrefix(MethodBase __originalMethod, out long __state)
@@ -4043,8 +4330,11 @@ internal static class FaunaInstantiationDetailProfiler
     {
         if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
         {
+            var taggedLabel = string.IsNullOrWhiteSpace(_currentBlueprint)
+                ? label
+                : $"{label}[{_currentBlueprint}]";
             FreezeDetector.RecordFaunaDetail(
-                label,
+                taggedLabel,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state);
         }
 
@@ -4567,10 +4857,13 @@ internal static class PlayerLoopPhaseProfiler
         };
     }
 
-    private static void Mark(string name) =>
+    private static void Mark(string name)
+    {
         FreezeDetector.RecordPlayerLoopMarker(
             name,
             System.Diagnostics.Stopwatch.GetTimestamp());
+        ManagedHeapSampler.MarkPlayerLoop(name);
+    }
 
     private static void EarlyUpdateStart() => Mark("EarlyUpdate.Start");
     private static void EarlyUpdateEnd() => Mark("EarlyUpdate.End");
@@ -5026,46 +5319,115 @@ internal static class SoilContaminationDeepProfiler
     }
 }
 
-internal static class SingletonAllocationSampler
+internal static class ManagedHeapSampler
 {
     private const long ArmHeapBytes = 6L * 1024L * 1024L * 1024L;
-    private const int SampleEveryFrames = 10;
+    private const int SampleEveryFrames = 30;
     private const int ReportEveryFrames = 300;
     private const int TopCount = 10;
 
-    private static readonly Dictionary<string, long> Allocated = new(StringComparer.Ordinal);
+    public readonly struct Sample
+    {
+        public readonly bool Active;
+        public readonly long HeapBefore;
+        public readonly int Gc0;
+        public readonly int Gc1;
+        public readonly int Gc2;
+
+        public Sample(bool active, long heapBefore, int gc0, int gc1, int gc2)
+        {
+            Active = active;
+            HeapBefore = heapBefore;
+            Gc0 = gc0;
+            Gc1 = gc1;
+            Gc2 = gc2;
+        }
+    }
+
+    private static readonly Dictionary<string, long> SingletonGrowth = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> PlayerLoopGrowth = new(StringComparer.Ordinal);
     private static int _frame;
     private static int _sampledFrames;
     private static int _framesSinceReport;
     private static bool _sampleThisFrame;
+    private static string? _lastLoopMarker;
+    private static long _lastLoopHeap;
+    private static int _lastLoopGc0;
+    private static int _lastLoopGc1;
+    private static int _lastLoopGc2;
 
-    public static long BeginSample()
+    public static Sample BeginSingletonSample()
     {
         if (!_sampleThisFrame || Runtime.IsBenchmarking)
         {
-            return 0;
+            return default;
         }
 
-        return GC.GetAllocatedBytesForCurrentThread();
+        return new Sample(
+            true,
+            GC.GetTotalMemory(false),
+            GC.CollectionCount(0),
+            GC.CollectionCount(1),
+            GC.CollectionCount(2));
     }
 
-    public static void EndSample(string phase, string typeName, long allocatedBefore)
+    public static void EndSingletonSample(string phase, string typeName, Sample sample)
     {
-        if (allocatedBefore == 0)
+        if (!sample.Active)
         {
             return;
         }
 
-        var after = GC.GetAllocatedBytesForCurrentThread();
-        var delta = after - allocatedBefore;
+        var gc0 = GC.CollectionCount(0);
+        var gc1 = GC.CollectionCount(1);
+        var gc2 = GC.CollectionCount(2);
+        if (gc0 != sample.Gc0 || gc1 != sample.Gc1 || gc2 != sample.Gc2)
+        {
+            return;
+        }
+
+        var delta = GC.GetTotalMemory(false) - sample.HeapBefore;
         if (delta <= 0)
         {
             return;
         }
 
         var key = $"{phase}.{ShortName(typeName)}";
-        Allocated.TryGetValue(key, out var existing);
-        Allocated[key] = existing + delta;
+        SingletonGrowth.TryGetValue(key, out var existing);
+        SingletonGrowth[key] = existing + delta;
+    }
+
+    public static void MarkPlayerLoop(string marker)
+    {
+        if (!_sampleThisFrame || Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        var heap = GC.GetTotalMemory(false);
+        var gc0 = GC.CollectionCount(0);
+        var gc1 = GC.CollectionCount(1);
+        var gc2 = GC.CollectionCount(2);
+
+        if (_lastLoopMarker is not null &&
+            gc0 == _lastLoopGc0 &&
+            gc1 == _lastLoopGc1 &&
+            gc2 == _lastLoopGc2)
+        {
+            var delta = heap - _lastLoopHeap;
+            if (delta > 0)
+            {
+                var key = $"{_lastLoopMarker}->{marker}";
+                PlayerLoopGrowth.TryGetValue(key, out var existing);
+                PlayerLoopGrowth[key] = existing + delta;
+            }
+        }
+
+        _lastLoopMarker = marker;
+        _lastLoopHeap = heap;
+        _lastLoopGc0 = gc0;
+        _lastLoopGc1 = gc1;
+        _lastLoopGc2 = gc2;
     }
 
     public static void FrameBoundary(long heapBytes)
@@ -5075,6 +5437,9 @@ internal static class SingletonAllocationSampler
             _sampledFrames++;
         }
 
+        _lastLoopMarker = null;
+        _lastLoopHeap = 0;
+
         _frame++;
         _framesSinceReport++;
 
@@ -5083,7 +5448,8 @@ internal static class SingletonAllocationSampler
             Report(heapBytes);
             _framesSinceReport = 0;
             _sampledFrames = 0;
-            Allocated.Clear();
+            SingletonGrowth.Clear();
+            PlayerLoopGrowth.Clear();
         }
 
         _sampleThisFrame =
@@ -5093,19 +5459,27 @@ internal static class SingletonAllocationSampler
 
     private static void Report(long heapBytes)
     {
-        if (Allocated.Count == 0)
+        if (SingletonGrowth.Count == 0 && PlayerLoopGrowth.Count == 0)
         {
+            Runtime.Log(
+                $"managed-heap sampler: heap={FormatBytes(heapBytes)}, sampledFrames={_sampledFrames}; " +
+                "no positive managed-heap deltas captured in sampled singleton/player-loop scopes");
             return;
         }
 
-        var top = Allocated
+        var singletonTop = SingletonGrowth
+            .OrderByDescending(pair => pair.Value)
+            .Take(TopCount)
+            .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}");
+        var loopTop = PlayerLoopGrowth
             .OrderByDescending(pair => pair.Value)
             .Take(TopCount)
             .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}");
 
         Runtime.Log(
-            $"allocation sampler: heap={FormatBytes(heapBytes)}, sampledFrames={_sampledFrames}; " +
-            $"top singleton allocators: {string.Join(", ", top)}");
+            $"managed-heap sampler: heap={FormatBytes(heapBytes)}, sampledFrames={_sampledFrames}; " +
+            $"top singleton growth: {(SingletonGrowth.Count == 0 ? "none" : string.Join(", ", singletonTop))}; " +
+            $"top player-loop growth: {(PlayerLoopGrowth.Count == 0 ? "none" : string.Join(", ", loopTop))}");
     }
 
     private static string ShortName(string name)
@@ -5444,7 +5818,7 @@ internal static class FreezeDetector
         }
 
         var heapBytes = GC.GetTotalMemory(false);
-        SingletonAllocationSampler.FrameBoundary(heapBytes);
+        ManagedHeapSampler.FrameBoundary(heapBytes);
     }
 
     public static void BeginPhase(string phaseName, long now)
@@ -6336,6 +6710,8 @@ internal static class TimberPhysicsCatchUpLimiterPatcher
 
         var registry = _getRegistry(__instance);
         var substeps = 0;
+        long stepAllTicks = 0;
+        long simulateTicks = 0;
 
         while (timer >= FixedDeltaTime && substeps < MaxSubstepsPerUpdate)
         {
@@ -6345,9 +6721,32 @@ internal static class TimberPhysicsCatchUpLimiterPatcher
             // before StepAll/Physics.Simulate. If either throws, no stale backlog is
             // left in the simulator field.
             _setTimer(__instance, timer);
+
+            var stepStarted = !Runtime.IsBenchmarking
+                ? System.Diagnostics.Stopwatch.GetTimestamp()
+                : 0;
             _stepAll(registry, FixedDeltaTime);
+            if (stepStarted != 0)
+            {
+                stepAllTicks += System.Diagnostics.Stopwatch.GetTimestamp() - stepStarted;
+            }
+
+            var simulateStarted = !Runtime.IsBenchmarking
+                ? System.Diagnostics.Stopwatch.GetTimestamp()
+                : 0;
             _simulate(FixedDeltaTime);
+            if (simulateStarted != 0)
+            {
+                simulateTicks += System.Diagnostics.Stopwatch.GetTimestamp() - simulateStarted;
+            }
+
             substeps++;
+        }
+
+        if (!Runtime.IsBenchmarking && substeps > 0)
+        {
+            FreezeDetector.RecordTargetDetail($"TimberPhysics.StepAll[{substeps}]", stepAllTicks);
+            FreezeDetector.RecordTargetDetail($"TimberPhysics.PhysX[{substeps}]", simulateTicks);
         }
 
         if (timer >= FixedDeltaTime)
