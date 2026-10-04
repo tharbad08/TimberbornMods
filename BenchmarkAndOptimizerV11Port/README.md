@@ -61,3 +61,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.48: bundled follow-up from the 2026-10-04 17:00 run. Fixes terrain-recovery debt starvation by allowing debt-only TickBuckets calls, using backlog-pressure recovery budgets (8/16/24), and bounded post-recovery repayment budgets (16/32/64/96). Adds exact input-processor attribution, PreLateUpdate child timing, Fauna Spawn sub-step timing, EbbAndFlowManager inner-method timing, and whole-frame allocation/heap reporting. Soil normal-update semantics are intentionally unchanged because each multi-second Soil event in the source run coincided with a full GC while Soil itself allocated 0 KiB.
+
+
+- v1.1.49: fixes startup failure in the v1.1.48 EbbAndFlow diagnostic Harmony finalizers by using Harmony's required __exception parameter name. No simulation logic changes beyond v1.1.48.
