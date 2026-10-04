@@ -64,3 +64,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.49: fixes startup failure in the v1.1.48 EbbAndFlow diagnostic Harmony finalizers by using Harmony's required __exception parameter name. No simulation logic changes beyond v1.1.48.
+
+
+- v1.1.50: focused follow-up from the long 2026-10-04 run. Keeps adaptive terrain-debt repayment; adds bounded Unity incremental-GC slices only above 7GiB managed heap (no forced full GC), a UI-only SuperCursor info refresh smoother, focused BlockObject/LevelVisibility/SuperCursor inner timing, deeper fauna EntityService/TemplateInstantiator/BaseInstantiator timing, and an 8GiB-gated Timberborn ILateUpdatableComponent profiler to identify ScriptRunBehaviourLateUpdate freezes. Broad input, EbbAndFlow, old fauna-instantiation and broad MonoBehaviour profilers are disabled.
