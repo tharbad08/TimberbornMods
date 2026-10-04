@@ -70,3 +70,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.51: long-run follow-up. Replaces immediate BlockObject preview-navmesh apply/remove with queued batching through NavigationSynchronizer; adds continuous-terrain-edit anti-starvation so deferred tick debt can ramp to 32/48/64/96 instead of growing without bound; removes the unavailable incremental-GC helper and non-actionable armed late-component profiler; adds sampled per-singleton allocation diagnostics above 6GiB heap; adds LevelVisibility event-handler timing and deeper Keystone fauna cache-miss profiling through OptimizedPrefabInstantiator/PrefabOptimizationChain/BlueprintPrefabConverter.
+
+
+- v1.1.52: validation follow-up. Keeps preview-navmesh batching, adds per-preview-service member timing to isolate remaining RemoveServices spikes, adds BuildingPlacer/ConstructionFactory/BlockObjectFactory/EntityService/TemplateInstantiator placement timing, tags Keystone fauna cache-miss profiling with the blueprint name when available, changes terrain recovery to a debt-pressure 32/48/64/96 ramp above 4096 deferred buckets, replaces the unsupported per-thread allocation sampler with sampled managed-heap deltas across singleton and PlayerLoop scopes, and records TimberPhysics StepAll versus PhysX simulation time while retaining the 4-substep cap.
