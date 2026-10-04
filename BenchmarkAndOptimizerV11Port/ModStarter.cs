@@ -162,19 +162,21 @@ internal static class FreezeDetectorPatcher
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
         FaunaSpawnBudgetPatcher.Patch(FreezeHarmony);
         FaunaRecipeLookupCachePatcher.Patch(FreezeHarmony);
+        FaunaSpawnInnerProfiler.Patch(FreezeHarmony);
         TerrainRecoveryTickLimiter.Patch(FreezeHarmony);
         SoilContaminationResetOptimizer.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
+        InputProcessorProfiler.Patch(FreezeHarmony);
+        EbbAndFlowDetailProfiler.Patch(FreezeHarmony);
 
         _patched = true;
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: Soil reset fast-path + fauna recipe cache enabled; " +
-            "high-level Input/Fauna timing and major PlayerLoop phase markers enabled; " +
-            "per-entity, per-input-processor, per-LateUpdate, SoilMoisture and " +
-            "PreLateUpdate-child profilers remain disabled");
+            "performance build: adaptive terrain-debt repayment enabled; " +
+            "InputProcessor, Fauna-spawn-inner, EbbAndFlow and PreLateUpdate-child diagnostics enabled; " +
+            "whole-frame allocation deltas enabled; broad per-entity/per-LateUpdate profilers remain disabled");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -2109,6 +2111,77 @@ internal static class ExtendedBuilderReachNavOptimizer
 }
 
 
+internal static class FaunaSpawnInnerProfiler
+{
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+    [ThreadStatic] private static int _spawnDepth;
+
+    public static void Patch(Harmony harmony)
+    {
+        var drainer = AccessTools.TypeByName("Keystone.Mod.Fauna.FaunaSpawnDrainer");
+        var spawn = drainer?.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+            .FirstOrDefault(m => m.Name == "Spawn" && m.ReturnType == typeof(bool));
+        if (spawn is null)
+        {
+            Runtime.Log("fauna inner profiler not installed: Spawn not found");
+            return;
+        }
+
+        harmony.Patch(spawn,
+            prefix: new HarmonyMethod(AccessTools.Method(typeof(FaunaSpawnInnerProfiler), nameof(SpawnPrefix))) { priority = Priority.First },
+            finalizer: new HarmonyMethod(AccessTools.Method(typeof(FaunaSpawnInnerProfiler), nameof(SpawnFinalizer))) { priority = Priority.Last });
+
+        PatchMethods(harmony, "Timberborn.EntitySystem.EntityService", "Instantiate");
+        PatchMethods(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "Instantiate");
+        PatchMethods(harmony, "Timberborn.EntitySystem.EntityRegistry", "AddEntity");
+        PatchMethods(harmony, "Keystone.Mod.Fauna.BaseFaunaAgent", "ConfigureFromRecipe");
+        PatchMethods(harmony, "Keystone.Mod.Fauna.KeystoneFaunaRegistry", "Add");
+
+        Runtime.Log($"fauna inner profiler installed: {Labels.Count} sub-step method(s)");
+    }
+
+    private static void PatchMethods(Harmony harmony, string typeName, string methodName)
+    {
+        var type = AccessTools.TypeByName(typeName);
+        if (type is null) return;
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+        foreach (var m in type.GetMethods(flags).Where(m => m.Name == methodName && !m.IsAbstract && !m.ContainsGenericParameters))
+        {
+            if (Labels.ContainsKey(m)) continue;
+            try
+            {
+                Labels[m] = $"{type.Name}.{m.Name}/{m.GetParameters().Length}";
+                harmony.Patch(m,
+                    prefix: new HarmonyMethod(AccessTools.Method(typeof(FaunaSpawnInnerProfiler), nameof(InnerPrefix))) { priority = Priority.First },
+                    finalizer: new HarmonyMethod(AccessTools.Method(typeof(FaunaSpawnInnerProfiler), nameof(InnerFinalizer))) { priority = Priority.Last });
+            }
+            catch { Labels.Remove(m); }
+        }
+    }
+
+    private static void SpawnPrefix() { if (!Runtime.IsBenchmarking) _spawnDepth++; }
+    private static Exception? SpawnFinalizer(Exception? ex)
+    {
+        if (!Runtime.IsBenchmarking && _spawnDepth > 0) _spawnDepth--;
+        return ex;
+    }
+
+    private static void InnerPrefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = 0;
+        if (!Runtime.IsBenchmarking && _spawnDepth > 0 && Labels.ContainsKey(__originalMethod))
+            __state = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+
+    private static Exception? InnerFinalizer(Exception? ex, MethodBase __originalMethod, long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+            FreezeDetector.RecordFaunaDetail("Inner." + label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        return ex;
+    }
+}
+
 internal static class FaunaSpawnBudgetPatcher
 {
     private const int MaxActualSpawnsPerUpdate = 1;
@@ -2334,115 +2407,169 @@ internal static class FaunaRecipeLookupCachePatcher
     }
 }
 
+internal static class EbbAndFlowDetailProfiler
+{
+    [ThreadStatic] private static int _depth;
+    private static readonly Dictionary<MethodBase,string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        var type = AppDomain.CurrentDomain.GetAssemblies()
+            .SelectMany(SafeGetTypes)
+            .FirstOrDefault(t => t.Name == "EbbAndFlowManager");
+        var tick = type is null ? null : AccessTools.Method(type, "Tick", Type.EmptyTypes);
+        if (type is null || tick is null)
+        {
+            Runtime.Log("EbbAndFlow detail profiler not installed: manager/Tick not found");
+            return;
+        }
+
+        harmony.Patch(tick,
+            prefix: new HarmonyMethod(AccessTools.Method(typeof(EbbAndFlowDetailProfiler), nameof(TickPrefix))) { priority = Priority.First },
+            finalizer: new HarmonyMethod(AccessTools.Method(typeof(EbbAndFlowDetailProfiler), nameof(TickFinalizer))) { priority = Priority.Last });
+
+        const BindingFlags flags = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+        foreach (var m in type.GetMethods(flags))
+        {
+            if (m == tick || m.IsAbstract || m.IsSpecialName || m.ContainsGenericParameters || m.GetParameters().Any(p => p.ParameterType.IsByRef)) continue;
+            try
+            {
+                Labels[m]=m.Name;
+                harmony.Patch(m,
+                    prefix: new HarmonyMethod(AccessTools.Method(typeof(EbbAndFlowDetailProfiler), nameof(InnerPrefix))) { priority = Priority.First },
+                    finalizer: new HarmonyMethod(AccessTools.Method(typeof(EbbAndFlowDetailProfiler), nameof(InnerFinalizer))) { priority = Priority.Last });
+            }
+            catch { Labels.Remove(m); }
+        }
+        Runtime.Log($"EbbAndFlow detail profiler installed: {Labels.Count} inner method(s)");
+    }
+
+    private static void TickPrefix() { if (!Runtime.IsBenchmarking) _depth++; }
+    private static Exception? TickFinalizer(Exception? ex)
+    {
+        if (!Runtime.IsBenchmarking && _depth > 0) _depth--;
+        return ex;
+    }
+    private static void InnerPrefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = 0;
+        if (!Runtime.IsBenchmarking && _depth > 0 && Labels.ContainsKey(__originalMethod))
+            __state = System.Diagnostics.Stopwatch.GetTimestamp();
+    }
+    private static Exception? InnerFinalizer(Exception? ex, MethodBase __originalMethod, long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+            FreezeDetector.RecordTargetDetail("Ebb."+label, System.Diagnostics.Stopwatch.GetTimestamp()-__state);
+        return ex;
+    }
+    private static IEnumerable<Type> SafeGetTypes(Assembly a)
+    {
+        try { return a.GetTypes(); }
+        catch (ReflectionTypeLoadException ex) { return ex.Types.Where(t=>t is not null).Cast<Type>(); }
+        catch { return Array.Empty<Type>(); }
+    }
+}
+
 internal static class TerrainRecoveryTickLimiter
 {
-    private const int MaxBucketsDuringRecovery = 8;
-    private const int DebtDrainPerUpdate = 2;
+    private const int BaseRecoveryBudget = 8;
+    private const int ElevatedRecoveryBudget = 16;
+    private const int EmergencyRecoveryBudget = 24;
+    private const int PostRecoveryLowBudget = 16;
+    private const int PostRecoveryMediumBudget = 32;
+    private const int PostRecoveryHighBudget = 64;
+    private const int PostRecoveryEmergencyBudget = 96;
     private const double RecoverySeconds = 2.0;
 
     private static long _recoveryUntil;
     private static int _deferredBuckets;
+    private static int _peakDeferredBuckets;
     private static bool _installed;
     private static bool _loggedActivation;
 
     public static void Patch(Harmony harmony)
     {
-        if (_installed)
-        {
-            return;
-        }
+        if (_installed) return;
 
         var type = AccessTools.TypeByName("Timberborn.TickSystem.TickableBucketService");
-        var method = type is null
-            ? null
-            : AccessTools.Method(type, "TickBuckets", new[] { typeof(int) });
-
+        var method = type is null ? null : AccessTools.Method(type, "TickBuckets", new[] { typeof(int) });
         if (method is null)
         {
-            Runtime.Log(
-                "warning: terrain recovery tick limiter unavailable: " +
-                "TickableBucketService.TickBuckets(int) not found");
+            Runtime.Log("warning: terrain recovery tick limiter unavailable: TickableBucketService.TickBuckets(int) not found");
             return;
         }
 
-        harmony.Patch(
-            method,
-            prefix: new HarmonyMethod(
-                AccessTools.Method(typeof(TerrainRecoveryTickLimiter), nameof(Prefix)))
-            {
-                priority = Priority.First
-            });
+        harmony.Patch(method,
+            prefix: new HarmonyMethod(AccessTools.Method(typeof(TerrainRecoveryTickLimiter), nameof(Prefix)))
+            { priority = Priority.First });
 
         _installed = true;
         Runtime.Log(
-            $"terrain recovery tick limiter installed: max {MaxBucketsDuringRecovery} " +
-            $"entity/singleton bucket(s) per TickBuckets call for {RecoverySeconds:F1}s " +
-            $"after terrain edits; deferred debt drains at +{DebtDrainPerUpdate}/update");
+            "terrain recovery tick limiter installed: recovery budgets 8/16/24; " +
+            "post-recovery debt budgets 16/32/64/96; debt-only calls can repay backlog");
     }
 
     public static void NotifyTerrainEdit()
     {
-        if (!_installed || Runtime.IsBenchmarking)
-        {
-            return;
-        }
-
+        if (!_installed || Runtime.IsBenchmarking) return;
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
-        _recoveryUntil =
-            Math.Max(
-                _recoveryUntil,
-                now + (long)(RecoverySeconds * System.Diagnostics.Stopwatch.Frequency));
+        _recoveryUntil = Math.Max(
+            _recoveryUntil,
+            now + (long)(RecoverySeconds * System.Diagnostics.Stopwatch.Frequency));
     }
 
     private static void Prefix(ref int numberOfBucketsToTick)
     {
-        if (!_installed ||
-            Runtime.IsBenchmarking ||
-            numberOfBucketsToTick <= 0)
-        {
-            return;
-        }
+        if (!_installed || Runtime.IsBenchmarking) return;
+        if (numberOfBucketsToTick <= 0 && _deferredBuckets <= 0) return;
 
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
 
         if (now < _recoveryUntil)
         {
-            var total = (long)numberOfBucketsToTick + _deferredBuckets;
-            var run = (int)Math.Min(total, MaxBucketsDuringRecovery);
+            var total = Math.Max(0L, (long)numberOfBucketsToTick) + _deferredBuckets;
+            var budget = total >= 8192 ? EmergencyRecoveryBudget
+                : total >= 2048 ? ElevatedRecoveryBudget
+                : BaseRecoveryBudget;
+            var run = (int)Math.Min(total, budget);
             var deferred = total - run;
-            _deferredBuckets = deferred >= int.MaxValue
-                ? int.MaxValue
-                : (int)deferred;
+            _deferredBuckets = deferred >= int.MaxValue ? int.MaxValue : (int)deferred;
+            _peakDeferredBuckets = Math.Max(_peakDeferredBuckets, _deferredBuckets);
             numberOfBucketsToTick = run;
 
             if (_deferredBuckets > 0 && !_loggedActivation)
             {
                 _loggedActivation = true;
                 Runtime.Log(
-                    $"terrain recovery limiter active: deferred {_deferredBuckets} " +
-                    "tick bucket(s) instead of processing the terrain-change catch-up in one frame");
+                    $"terrain recovery limiter active: deferred {_deferredBuckets} tick bucket(s); bounded budget={budget}");
             }
-
             return;
         }
 
         _loggedActivation = false;
+        if (_deferredBuckets <= 0) return;
 
-        if (_deferredBuckets <= 0)
+        var totalBudget = _deferredBuckets >= 16384 ? PostRecoveryEmergencyBudget
+            : _deferredBuckets >= 4096 ? PostRecoveryHighBudget
+            : _deferredBuckets >= 1024 ? PostRecoveryMediumBudget
+            : PostRecoveryLowBudget;
+
+        var baseRequested = Math.Max(0, numberOfBucketsToTick);
+        var drain = Math.Min(_deferredBuckets, Math.Max(0, totalBudget - baseRequested));
+        if (drain > 0)
         {
-            return;
+            numberOfBucketsToTick = baseRequested + drain;
+            _deferredBuckets -= drain;
         }
-
-        var drain = Math.Min(_deferredBuckets, DebtDrainPerUpdate);
-        numberOfBucketsToTick += drain;
-        _deferredBuckets -= drain;
 
         if (_deferredBuckets == 0)
         {
-            Runtime.Log("terrain recovery tick debt fully drained");
+            Runtime.Log($"terrain recovery tick debt fully drained; peak debt={_peakDeferredBuckets}");
+            _peakDeferredBuckets = 0;
         }
     }
 }
+
 
 internal static class InputAndFaunaDetailProfiler
 {
@@ -3484,7 +3611,7 @@ internal static class PlayerLoopPhaseProfiler
 
             Runtime.Log(
                 $"PlayerLoop phase profiler installed: {installedPhases}/{PhaseNames.Length} " +
-                "major phases marked at start/end; child-level markers disabled");
+                $"major phases marked; PreLateUpdate children={_preLateChildCount} individually timed");
         }
         catch (Exception ex)
         {
@@ -3533,10 +3660,12 @@ internal static class PlayerLoopPhaseProfiler
     private static object AddMarkers(object phase, string phaseName)
     {
         var original = _subSystemsField!.GetValue(phase) as Array;
-        // Major phase boundaries are enough to place long unattributed stalls.
-        // Do not wrap every PreLateUpdate child: that was useful diagnostically,
-        // but it adds callbacks around a hot Unity phase on every frame.
         var content = original;
+
+        if (phaseName == "UnityEngine.PlayerLoop.PreLateUpdate" && original is not null)
+        {
+            content = AddPreLateChildMarkers(original);
+        }
 
         var contentLength = content?.Length ?? 0;
         var replacement = Array.CreateInstance(_systemType!, contentLength + 2);
@@ -4128,6 +4257,7 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> PlayerLoopMarkers = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SoilDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> TargetDetailTicks = new(StringComparer.Ordinal);
 
     private static bool _initialized;
     private static long _lastPhaseEndTicks;
@@ -4158,6 +4288,7 @@ internal static class FreezeDetector
     private static int _gc0;
     private static int _gc1;
     private static int _gc2;
+    private static long _totalAllocatedBytes;
 
     public static void Initialize()
     {
@@ -4174,6 +4305,7 @@ internal static class FreezeDetector
             _gc0 = GC.CollectionCount(0);
             _gc1 = GC.CollectionCount(1);
             _gc2 = GC.CollectionCount(2);
+            _totalAllocatedBytes = GC.GetTotalAllocatedBytes(false);
             SectionTicks.Clear();
             SystemTicks.Clear();
             TickSingletonTicks.Clear();
@@ -4191,6 +4323,7 @@ internal static class FreezeDetector
             PlayerLoopMarkers.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
+            TargetDetailTicks.Clear();
             _lastPhaseEndTicks = 0;
             _lastPhaseName = null;
             _soilGc0 = 0;
@@ -4210,6 +4343,8 @@ internal static class FreezeDetector
 
     public static void FrameBoundary(long now, string nextPhase)
     {
+        InputProcessorProfiler.FlushFrame();
+
         string? freezeLine = null;
 
         lock (Gate)
@@ -4229,6 +4364,8 @@ internal static class FreezeDetector
                 var nextGc0 = GC.CollectionCount(0);
                 var nextGc1 = GC.CollectionCount(1);
                 var nextGc2 = GC.CollectionCount(2);
+                var nextAllocatedBytes = GC.GetTotalAllocatedBytes(false);
+                var allocatedBytesDelta = Math.Max(0, nextAllocatedBytes - _totalAllocatedBytes);
 
                 if (elapsedMs >= SlowFrameMs)
                 {
@@ -4236,12 +4373,14 @@ internal static class FreezeDetector
                         elapsedMs,
                         nextGc0 - _gc0,
                         nextGc1 - _gc1,
-                        nextGc2 - _gc2);
+                        nextGc2 - _gc2,
+                        allocatedBytesDelta);
                 }
 
                 _gc0 = nextGc0;
                 _gc1 = nextGc1;
                 _gc2 = nextGc2;
+                _totalAllocatedBytes = nextAllocatedBytes;
             }
 
             _frameNumber++;
@@ -4263,6 +4402,7 @@ internal static class FreezeDetector
             PlayerLoopMarkers.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
+            TargetDetailTicks.Clear();
             _soilGc0 = 0;
             _soilGc1 = 0;
             _soilGc2 = 0;
@@ -4499,6 +4639,9 @@ internal static class FreezeDetector
         }
     }
 
+    public static void RecordTargetDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(TargetDetailTicks, name, elapsedTicks);
+
     public static void RecordSoilDetail(string name, long elapsedTicks)
     {
         if (elapsedTicks <= 0)
@@ -4537,7 +4680,8 @@ internal static class FreezeDetector
         double elapsedMs,
         int gc0Delta,
         int gc1Delta,
-        int gc2Delta)
+        int gc2Delta,
+        long allocatedBytesDelta)
     {
         var severity = elapsedMs >= FreezeFrameMs
             ? "FREEZE"
@@ -4690,6 +4834,10 @@ internal static class FreezeDetector
             .ToArray();
         var soilText = soilDetails.Length == 0 ? "none" : string.Join(", ", soilDetails);
 
+        var targetDetails = TargetDetailTicks.OrderByDescending(x => x.Value).Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms").ToArray();
+        var targetDetailText = targetDetails.Length == 0 ? "none" : string.Join(", ", targetDetails);
+
         return
             $"{severity} frame={_frameNumber} elapsed={elapsedMs:F1}ms; " +
             $"dispatch: UpdateSingletons={ToMs(updateTicks):F1}ms, " +
@@ -4697,6 +4845,7 @@ internal static class FreezeDetector
             $"TickSingletons={ToMs(tickTicks):F1}ms, " +
             $"unattributed={ToMs(unattributedTicks):F1}ms; " +
             $"physics={ToMs(physicsTicks):F1}ms; " +
+            $"alloc delta={FormatBytes(allocatedBytesDelta)}, heap={FormatBytes(GC.GetTotalMemory(false))}; " +
             $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
             $"phase gaps: {phaseGapText}; " +
             $"top update singletons: {topUpdateText}; " +
@@ -4708,6 +4857,7 @@ internal static class FreezeDetector
             $"navigation detail: {navigationDetailText}; " +
             $"input detail: {inputDetailText}; " +
             $"fauna detail: {faunaDetailText}; " +
+            $"target detail: {targetDetailText}; " +
             $"LateUpdate behaviours: {lateBehaviourText}; " +
             $"Keystone profile: {keystoneProfileText}; " +
             $"PlayerLoop: {playerLoop}; " +
