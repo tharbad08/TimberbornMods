@@ -160,6 +160,7 @@ internal static class FreezeDetectorPatcher
         BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
         ExtendedBuilderReachNavOptimizer.Patch(FreezeHarmony);
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
+        PreviewNavMeshBatcher.Patch(FreezeHarmony);
         FaunaSpawnBudgetPatcher.Patch(FreezeHarmony);
         FaunaRecipeLookupCachePatcher.Patch(FreezeHarmony);
         FaunaInstantiationDetailProfiler.Patch(FreezeHarmony);
@@ -168,18 +169,17 @@ internal static class FreezeDetectorPatcher
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
         HotInputDetailProfiler.Patch(FreezeHarmony);
+        LevelVisibilityHandlerProfiler.Patch(FreezeHarmony);
         SuperCursorRefreshSmoother.Patch(FreezeHarmony);
-        LateComponentProfiler.Patch(FreezeHarmony);
-        IncrementalGcSmoother.Initialize();
 
         _patched = true;
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.50 focused pass enabled; adaptive terrain debt retained; " +
-            "incremental-GC smoothing + SuperCursor refresh smoothing enabled; " +
-            "BlockObject/LevelVisibility/SuperCursor, fauna-instantiation and armed late-component diagnostics enabled; " +
-            "broad per-input, EbbAndFlow and broad MonoBehaviour profilers disabled");
+            "performance build: v1.1.51 focused pass enabled; preview-navmesh add/remove is queued and batched; " +
+            "terrain recovery has continuous-edit anti-starvation repayment; SuperCursor smoothing retained; " +
+            "LevelVisibility handler, deeper fauna cache-miss and sampled singleton-allocation diagnostics enabled; " +
+            "incremental-GC helper and armed late-component profiler disabled after v1.1.50 proved them non-actionable");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -193,6 +193,7 @@ internal static class FreezeDetectorPatcher
     {
         public bool Active;
         public long Started;
+        public long AllocatedBefore;
         public string? TypeName;
     }
 
@@ -449,6 +450,8 @@ internal static class FreezeDetectorPatcher
             FreezeDetector.RecordUpdateSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+            SingletonAllocationSampler.EndSample(
+                "Update", __state.TypeName, __state.AllocatedBefore);
         }
 
         return __exception;
@@ -468,6 +471,8 @@ internal static class FreezeDetectorPatcher
             FreezeDetector.RecordLateUpdateSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+            SingletonAllocationSampler.EndSample(
+                "LateUpdate", __state.TypeName, __state.AllocatedBefore);
         }
 
         return __exception;
@@ -492,6 +497,7 @@ internal static class FreezeDetectorPatcher
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.AllocatedBefore = SingletonAllocationSampler.BeginSample();
         __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
     }
 
@@ -512,6 +518,7 @@ internal static class FreezeDetectorPatcher
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.AllocatedBefore = SingletonAllocationSampler.BeginSample();
         __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
     }
 
@@ -524,6 +531,8 @@ internal static class FreezeDetectorPatcher
             FreezeDetector.RecordTickSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+            SingletonAllocationSampler.EndSample(
+                "Tick", __state.TypeName, __state.AllocatedBefore);
         }
 
         return __exception;
@@ -1218,6 +1227,77 @@ internal static class BfrLocalizedChangeOptimizerPatcher
             _ => null
         };
 }
+
+internal static class PreviewNavMeshBatcher
+{
+    private static Action<object>? _enqueueAdd;
+    private static Action<object>? _enqueueRemove;
+    private static bool _installed;
+
+    public static void Patch(Harmony harmony)
+    {
+        if (_installed)
+        {
+            return;
+        }
+
+        var type = AccessTools.TypeByName("Timberborn.Navigation.NavMeshObject");
+        var add = type is null ? null : AccessTools.Method(type, "AddToPreviewNavMesh", Type.EmptyTypes);
+        var remove = type is null ? null : AccessTools.Method(type, "RemoveFromPreviewNavMesh", Type.EmptyTypes);
+        var enqueueAdd = type is null ? null : AccessTools.Method(type, "EnqueueAddToPreviewNavMesh", Type.EmptyTypes);
+        var enqueueRemove = type is null ? null : AccessTools.Method(type, "EnqueueRemoveFromPreviewNavMesh", Type.EmptyTypes);
+
+        if (type is null || add is null || remove is null || enqueueAdd is null || enqueueRemove is null)
+        {
+            Runtime.Log(
+                "warning: preview-navmesh batching unavailable: NavMeshObject immediate/enqueue methods not resolved");
+            return;
+        }
+
+        _enqueueAdd = CompileInvoker(type, enqueueAdd);
+        _enqueueRemove = CompileInvoker(type, enqueueRemove);
+
+        harmony.Patch(
+            add,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(PreviewNavMeshBatcher), nameof(AddPrefix)))
+            {
+                priority = Priority.First
+            });
+        harmony.Patch(
+            remove,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(PreviewNavMeshBatcher), nameof(RemovePrefix)))
+            {
+                priority = Priority.First
+            });
+
+        _installed = true;
+        Runtime.Log(
+            "preview-navmesh batching installed: BlockObject preview navmesh add/remove now enqueue changes; " +
+            "NavigationSynchronizer applies and notifies the combined preview update once instead of once per preview");
+    }
+
+    private static bool AddPrefix(object __instance)
+    {
+        _enqueueAdd!(__instance);
+        return false;
+    }
+
+    private static bool RemovePrefix(object __instance)
+    {
+        _enqueueRemove!(__instance);
+        return false;
+    }
+
+    private static Action<object> CompileInvoker(Type type, MethodInfo method)
+    {
+        var instance = Expression.Parameter(typeof(object), "instance");
+        var call = Expression.Call(Expression.Convert(instance, type), method);
+        return Expression.Lambda<Action<object>>(call, instance).Compile();
+    }
+}
+
 
 internal static class NavigationSynchronizerDetailProfiler
 {
@@ -2413,12 +2493,15 @@ internal static class TerrainRecoveryTickLimiter
     private const int PostRecoveryHighBudget = 64;
     private const int PostRecoveryEmergencyBudget = 96;
     private const double RecoverySeconds = 2.0;
+    private const double ContinuousRecoveryGraceSeconds = 4.0;
 
     private static long _recoveryUntil;
+    private static long _continuousRecoveryStartedAt;
     private static int _deferredBuckets;
     private static int _peakDeferredBuckets;
     private static bool _installed;
     private static bool _loggedActivation;
+    private static bool _loggedAntiStarvation;
 
     public static void Patch(Harmony harmony)
     {
@@ -2439,6 +2522,7 @@ internal static class TerrainRecoveryTickLimiter
         _installed = true;
         Runtime.Log(
             "terrain recovery tick limiter installed: recovery budgets 8/16/24; " +
+            "continuous-edit anti-starvation ramps to 32/48/64/96 after 4s; " +
             "post-recovery debt budgets 16/32/64/96; debt-only calls can repay backlog");
     }
 
@@ -2446,6 +2530,12 @@ internal static class TerrainRecoveryTickLimiter
     {
         if (!_installed || Runtime.IsBenchmarking) return;
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_continuousRecoveryStartedAt == 0 || now >= _recoveryUntil)
+        {
+            _continuousRecoveryStartedAt = now;
+            _loggedAntiStarvation = false;
+        }
+
         _recoveryUntil = Math.Max(
             _recoveryUntil,
             now + (long)(RecoverySeconds * System.Diagnostics.Stopwatch.Frequency));
@@ -2464,6 +2554,29 @@ internal static class TerrainRecoveryTickLimiter
             var budget = total >= 8192 ? EmergencyRecoveryBudget
                 : total >= 2048 ? ElevatedRecoveryBudget
                 : BaseRecoveryBudget;
+
+            var continuousRecoveryTicks = _continuousRecoveryStartedAt == 0
+                ? 0
+                : now - _continuousRecoveryStartedAt;
+            var antiStarvation = continuousRecoveryTicks >=
+                (long)(ContinuousRecoveryGraceSeconds * System.Diagnostics.Stopwatch.Frequency);
+
+            if (antiStarvation && total >= 8192)
+            {
+                budget = total >= 65536 ? PostRecoveryEmergencyBudget
+                    : total >= 32768 ? PostRecoveryHighBudget
+                    : total >= 16384 ? 48
+                    : PostRecoveryMediumBudget;
+
+                if (!_loggedAntiStarvation)
+                {
+                    _loggedAntiStarvation = true;
+                    Runtime.Log(
+                        $"terrain recovery anti-starvation active after {ContinuousRecoveryGraceSeconds:F0}s " +
+                        $"of continuous edits: debt={_deferredBuckets}, budget={budget}");
+                }
+            }
+
             var run = (int)Math.Min(total, budget);
             var deferred = total - run;
             _deferredBuckets = deferred >= int.MaxValue ? int.MaxValue : (int)deferred;
@@ -2480,6 +2593,8 @@ internal static class TerrainRecoveryTickLimiter
         }
 
         _loggedActivation = false;
+        _loggedAntiStarvation = false;
+        _continuousRecoveryStartedAt = 0;
         if (_deferredBuckets <= 0) return;
 
         var totalBudget = _deferredBuckets >= 16384 ? PostRecoveryEmergencyBudget
@@ -2866,6 +2981,116 @@ internal static class NavigationEntityListenerProfiler
 }
 
 
+internal static class LevelVisibilityHandlerProfiler
+{
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        var eventType = AccessTools.TypeByName(
+            "Timberborn.LevelVisibilitySystem.MaxVisibleLevelChangedEvent");
+        if (eventType is null)
+        {
+            Runtime.Log("warning: LevelVisibility handler profiler unavailable: event type missing");
+            return;
+        }
+
+        const BindingFlags flags =
+            BindingFlags.Instance | BindingFlags.Static |
+            BindingFlags.Public | BindingFlags.NonPublic |
+            BindingFlags.DeclaredOnly;
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in SafeGetTypes(assembly))
+            {
+                foreach (var method in type.GetMethods(flags))
+                {
+                    if (method.IsAbstract ||
+                        method.ContainsGenericParameters ||
+                        method.Name != "OnMaxVisibleLevelChanged")
+                    {
+                        continue;
+                    }
+
+                    var parameters = method.GetParameters();
+                    if (parameters.Length != 1 ||
+                        !parameters[0].ParameterType.IsAssignableFrom(eventType) &&
+                        !eventType.IsAssignableFrom(parameters[0].ParameterType))
+                    {
+                        continue;
+                    }
+
+                    try
+                    {
+                        Labels[method] =
+                            $"Level.Handler.{type.FullName ?? type.Name}";
+                        harmony.Patch(
+                            method,
+                            prefix: new HarmonyMethod(
+                                AccessTools.Method(typeof(LevelVisibilityHandlerProfiler), nameof(Prefix)))
+                            {
+                                priority = Priority.First
+                            },
+                            finalizer: new HarmonyMethod(
+                                AccessTools.Method(typeof(LevelVisibilityHandlerProfiler), nameof(Finalizer)))
+                            {
+                                priority = Priority.Last
+                            });
+                    }
+                    catch
+                    {
+                        Labels.Remove(method);
+                    }
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"LevelVisibility event-handler profiler installed: {Labels.Count} handler(s)");
+    }
+
+    private static void Prefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = HotInputDetailProfiler.LevelScopeActive &&
+                  Labels.ContainsKey(__originalMethod)
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+        {
+            FreezeDetector.RecordInputDetail(
+                label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+
+        return __exception;
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try
+        {
+            return assembly.GetTypes();
+        }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch
+        {
+            return Array.Empty<Type>();
+        }
+    }
+}
+
+
 internal static class SuperCursorRefreshSmoother
 {
     private const double NormalRefreshMs = 50.0;
@@ -2978,6 +3203,8 @@ internal static class HotInputDetailProfiler
 
     private sealed record DetailTarget(string Label, Scope Scope);
     private static readonly Dictionary<MethodBase, DetailTarget> Details = new();
+
+    public static bool LevelScopeActive => _levelDepth > 0 && !Runtime.IsBenchmarking;
 
     public static void Patch(Harmony harmony)
     {
@@ -3704,12 +3931,20 @@ internal static class FaunaInstantiationDetailProfiler
                 priority = Priority.Last
             });
 
-        PatchMethods(harmony, "Timberborn.EntitySystem.EntityService", "Instantiate",
-            method => true, method => $"Fauna.EntityService.Instantiate/{method.GetParameters().Length}");
         PatchMethods(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "Instantiate",
             method => true, _ => "Fauna.TemplateInstantiator.Instantiate");
         PatchMethods(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "GetCachedTemplate",
             method => true, _ => "Fauna.TemplateInstantiator.GetCachedTemplate");
+        PatchMethods(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "GetInstanceComponents",
+            method => true, _ => "Fauna.TemplateInstantiator.GetInstanceComponents");
+        PatchMethods(harmony, "Timberborn.PrefabOptimization.OptimizedPrefabInstantiator", "InstantiateInactive",
+            method => true, _ => "Fauna.OptimizedPrefabInstantiator.InstantiateInactive");
+        PatchMethods(harmony, "Timberborn.PrefabOptimization.PrefabOptimizationChain", "Process",
+            method => true, method => $"Fauna.PrefabOptimizationChain.Process/{method.GetParameters().FirstOrDefault()?.ParameterType.Name ?? "none"}");
+        PatchMethods(harmony, "Timberborn.PrefabOptimization.PrefabOptimizationChain", "ProcessPrefab",
+            method => true, method => $"Fauna.PrefabOptimizationChain.ProcessPrefab/{method.GetParameters().FirstOrDefault()?.ParameterType.Name ?? "none"}");
+        PatchMethods(harmony, "Timberborn.BlueprintPrefabSystem.BlueprintPrefabConverter", "Convert",
+            method => true, _ => "Fauna.BlueprintPrefabConverter.Convert");
         PatchMethods(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateInactive",
             method => true, _ => "Fauna.BaseInstantiator.InstantiateInactive");
         PatchMethods(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateComponents",
@@ -3721,7 +3956,7 @@ internal static class FaunaInstantiationDetailProfiler
 
         Runtime.Log(
             $"fauna instantiation profiler installed: {Labels.Count} nested method(s); " +
-            "separate labels avoid the v1.1.49 overlapping Instantiate total");
+            "cache-miss path now includes prefab optimization/conversion; misleading outer EntityService total removed");
     }
 
     private static void PatchMethods(
@@ -4791,6 +5026,111 @@ internal static class SoilContaminationDeepProfiler
     }
 }
 
+internal static class SingletonAllocationSampler
+{
+    private const long ArmHeapBytes = 6L * 1024L * 1024L * 1024L;
+    private const int SampleEveryFrames = 10;
+    private const int ReportEveryFrames = 300;
+    private const int TopCount = 10;
+
+    private static readonly Dictionary<string, long> Allocated = new(StringComparer.Ordinal);
+    private static int _frame;
+    private static int _sampledFrames;
+    private static int _framesSinceReport;
+    private static bool _sampleThisFrame;
+
+    public static long BeginSample()
+    {
+        if (!_sampleThisFrame || Runtime.IsBenchmarking)
+        {
+            return 0;
+        }
+
+        return GC.GetAllocatedBytesForCurrentThread();
+    }
+
+    public static void EndSample(string phase, string typeName, long allocatedBefore)
+    {
+        if (allocatedBefore == 0)
+        {
+            return;
+        }
+
+        var after = GC.GetAllocatedBytesForCurrentThread();
+        var delta = after - allocatedBefore;
+        if (delta <= 0)
+        {
+            return;
+        }
+
+        var key = $"{phase}.{ShortName(typeName)}";
+        Allocated.TryGetValue(key, out var existing);
+        Allocated[key] = existing + delta;
+    }
+
+    public static void FrameBoundary(long heapBytes)
+    {
+        if (_sampleThisFrame)
+        {
+            _sampledFrames++;
+        }
+
+        _frame++;
+        _framesSinceReport++;
+
+        if (_framesSinceReport >= ReportEveryFrames)
+        {
+            Report(heapBytes);
+            _framesSinceReport = 0;
+            _sampledFrames = 0;
+            Allocated.Clear();
+        }
+
+        _sampleThisFrame =
+            heapBytes >= ArmHeapBytes &&
+            (_frame % SampleEveryFrames) == 0;
+    }
+
+    private static void Report(long heapBytes)
+    {
+        if (Allocated.Count == 0)
+        {
+            return;
+        }
+
+        var top = Allocated
+            .OrderByDescending(pair => pair.Value)
+            .Take(TopCount)
+            .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}");
+
+        Runtime.Log(
+            $"allocation sampler: heap={FormatBytes(heapBytes)}, sampledFrames={_sampledFrames}; " +
+            $"top singleton allocators: {string.Join(", ", top)}");
+    }
+
+    private static string ShortName(string name)
+    {
+        var index = name.LastIndexOf('.');
+        return index >= 0 ? name[(index + 1)..] : name;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024L)
+        {
+            return $"{bytes / 1024.0 / 1024.0:F1}MB";
+        }
+
+        if (bytes >= 1024L)
+        {
+            return $"{bytes / 1024.0:F1}KB";
+        }
+
+        return $"{bytes}B";
+    }
+}
+
+
 internal static class IncrementalGcSmoother
 {
     private const long StartHeapBytes = 7L * 1024L * 1024L * 1024L;
@@ -5028,8 +5368,6 @@ internal static class FreezeDetector
 
     public static void FrameBoundary(long now, string nextPhase)
     {
-        LateComponentProfiler.FlushFrame();
-
         string? freezeLine = null;
 
         lock (Gate)
@@ -5106,8 +5444,7 @@ internal static class FreezeDetector
         }
 
         var heapBytes = GC.GetTotalMemory(false);
-        LateComponentProfiler.ArmForUpcomingFrame(heapBytes);
-        IncrementalGcSmoother.Pulse(heapBytes);
+        SingletonAllocationSampler.FrameBoundary(heapBytes);
     }
 
     public static void BeginPhase(string phaseName, long now)
