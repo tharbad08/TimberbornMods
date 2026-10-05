@@ -85,3 +85,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.56: allocation follow-up based on the long v1.1.55 run. Replaces the ineffective per-thread allocation counter with a runtime-resolved global cumulative allocation counter (falling back to live managed heap when unavailable), so allocation attribution can see worker-thread activity. Adds direct timing/allocation probes to the eight soil contamination/moisture parallel worker tasks. Retains the v1.1.55 32x32 exact-shape terrain collider merge and deep block-preview profiling. No preview-pool behavior change is shipped yet: the new trace proves the first-hover stall is dominated by creating 100/25/40 preview instances, but changing PreviewPlacer storage safely requires a separate targeted implementation rather than a risky pool-size cap.
+
+
+- v1.1.57: prewarms the expensive Keystone terrestrial fauna templates (KeystoneCow, KeystoneBull, KeystoneDeer) during template collection load using Timberborn's own TemplateInstantiator.CacheInstance(). This shifts the one-time 270-415ms prefab optimization misses out of gameplay and into loading. It does not create a second prefab cache; it populates the same vanilla cache those species would occupy after their first spawn. Fast fish templates are intentionally not prewarmed.
