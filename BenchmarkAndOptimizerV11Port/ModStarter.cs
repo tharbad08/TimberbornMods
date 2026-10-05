@@ -182,10 +182,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.55 allocation/physics pass enabled; v1.1.54 diagnostics retained; " +
-            "exact current-thread allocations are attributed across singleton and PlayerLoop scopes; " +
-            "block preview first-use profiling now drills into template/prefab optimization; " +
-            "TimberPhysics terrain merge uses 32x32 exact-shape chunks to reduce collider fragmentation");
+            "performance build: v1.1.56 allocation/preview follow-up enabled; v1.1.55 behavior retained; " +
+            $"allocation source={AllocationCounter.Mode}; singleton/PlayerLoop allocation attribution now uses the global counter; " +
+            "soil parallel worker tasks are profiled directly; block preview drill-down retained; " +
+            "TimberPhysics terrain merge remains 32x32 exact-shape");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
