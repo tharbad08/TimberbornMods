@@ -5753,6 +5753,123 @@ internal static class SoilContaminationDeepProfiler
     }
 }
 
+
+internal static class AllocationTracker
+{
+    private const int ReportEveryFrames = 300;
+    private const int TopCount = 12;
+    private const long SpikeBytes = 1024L * 1024L;
+
+    private static readonly Dictionary<string, long> SingletonAllocations = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> LoopAllocations = new(StringComparer.Ordinal);
+    private static int _frames;
+    private static string? _lastLoopMarker;
+    private static long _lastLoopAllocated;
+
+    public static void Record(string phase, string typeName, long bytes)
+    {
+        if (Runtime.IsBenchmarking || bytes <= 0)
+        {
+            return;
+        }
+
+        var key = $"{phase}.{ShortName(typeName)}";
+        SingletonAllocations.TryGetValue(key, out var existing);
+        SingletonAllocations[key] = existing + bytes;
+
+        if (bytes >= SpikeBytes)
+        {
+            Runtime.Log($"exact allocation spike: {key}={FormatBytes(bytes)} in one call");
+        }
+    }
+
+    public static void MarkPlayerLoop(string marker)
+    {
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        if (_lastLoopMarker is not null)
+        {
+            var delta = allocated - _lastLoopAllocated;
+            if (delta > 0)
+            {
+                var key = $"{_lastLoopMarker}->{marker}";
+                LoopAllocations.TryGetValue(key, out var existing);
+                LoopAllocations[key] = existing + delta;
+            }
+        }
+
+        _lastLoopMarker = marker;
+        _lastLoopAllocated = allocated;
+    }
+
+    public static void FrameBoundary()
+    {
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        _lastLoopMarker = null;
+        _lastLoopAllocated = 0;
+        _frames++;
+        if (_frames < ReportEveryFrames)
+        {
+            return;
+        }
+
+        _frames = 0;
+        Report();
+        SingletonAllocations.Clear();
+        LoopAllocations.Clear();
+    }
+
+    private static void Report()
+    {
+        var singletonTop = SingletonAllocations
+            .OrderByDescending(pair => pair.Value)
+            .Take(TopCount)
+            .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}")
+            .ToArray();
+
+        var loopTop = LoopAllocations
+            .OrderByDescending(pair => pair.Value)
+            .Take(TopCount)
+            .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}")
+            .ToArray();
+
+        Runtime.Log(
+            "exact allocation profiler: top singleton allocators: " +
+            (singletonTop.Length == 0 ? "none" : string.Join(", ", singletonTop)) +
+            "; top PlayerLoop segments: " +
+            (loopTop.Length == 0 ? "none" : string.Join(", ", loopTop)));
+    }
+
+    private static string ShortName(string name)
+    {
+        var index = name.LastIndexOf('.');
+        return index >= 0 ? name[(index + 1)..] : name;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024L)
+        {
+            return $"{bytes / 1024.0 / 1024.0:F1}MB";
+        }
+
+        if (bytes >= 1024L)
+        {
+            return $"{bytes / 1024.0:F1}KB";
+        }
+
+        return $"{bytes}B";
+    }
+}
+
 internal static class ManagedHeapSampler
 {
     private const long ArmHeapBytes = 6L * 1024L * 1024L * 1024L;
