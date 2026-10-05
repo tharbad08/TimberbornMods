@@ -181,10 +181,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.54 diagnostic pass enabled; v1.1.53 behavior retained; " +
-            "actual IInputProcessor implementations are timed during InputService dispatch; " +
-            "soil contamination/moisture now report exact current-thread allocation plus TerrainMaterialMap queue growth; " +
-            "EbbAndFlowManager nested methods are timed when its Tick is active; missing SoilMoisture profiler installation fixed");
+            "performance build: v1.1.55 allocation/physics pass enabled; v1.1.54 diagnostics retained; " +
+            "exact current-thread allocations are attributed across singleton and PlayerLoop scopes; " +
+            "block preview first-use profiling now drills into template/prefab optimization; " +
+            "TimberPhysics terrain merge uses 32x32 exact-shape chunks to reduce collider fragmentation");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -3095,6 +3095,16 @@ internal static class BlockPlacementDetailProfiler
         PatchNamed(harmony, "Timberborn.BlockSystem.BlockObjectFactory", "CreateFinished", "Block.Factory.CreateFinished");
         PatchNamed(harmony, "Timberborn.EntitySystem.EntityService", "Instantiate", "Block.EntityService.Instantiate");
         PatchNamed(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "Instantiate", "Block.TemplateInstantiator.Instantiate");
+        PatchNamed(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "GetCachedTemplate", "Block.TemplateInstantiator.GetCachedTemplate");
+        PatchNamed(harmony, "Timberborn.TemplateInstantiation.TemplateInstantiator", "GetInstanceComponents", "Block.TemplateInstantiator.GetInstanceComponents");
+        PatchNamed(harmony, "Timberborn.PrefabOptimization.OptimizedPrefabInstantiator", "InstantiateInactive", "Block.OptimizedPrefabInstantiator.InstantiateInactive");
+        PatchNamed(harmony, "Timberborn.PrefabOptimization.PrefabOptimizationChain", "Process", "Block.PrefabOptimizationChain.Process");
+        PatchNamed(harmony, "Timberborn.PrefabOptimization.PrefabOptimizationChain", "ProcessPrefab", "Block.PrefabOptimizationChain.ProcessPrefab");
+        PatchNamed(harmony, "Timberborn.BlueprintPrefabSystem.BlueprintPrefabConverter", "Convert", "Block.BlueprintPrefabConverter.Convert");
+        PatchNamed(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateInactive", "Block.BaseInstantiator.InstantiateInactive");
+        PatchNamed(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateComponents", "Block.BaseInstantiator.InstantiateComponents");
+        PatchNamed(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateComponent", "Block.BaseInstantiator.InstantiateComponent");
+        PatchNamed(harmony, "Timberborn.BaseComponentSystem.ComponentCache", "Initialize", "Block.ComponentCache.Initialize");
         PatchNamed(harmony, "Timberborn.BlockSystem.BlockObject", "Reposition", "Block.BlockObject.Reposition");
         PatchNamed(harmony, "Timberborn.ConstructionSites.ConstructionSite", "FinishNow", "Block.ConstructionSite.FinishNow");
 
@@ -7229,7 +7239,7 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
 {
     private const string ServiceTypeName = "TimberPhysics.Terrain.TerrainColliderService";
     private const string CoordinateSystemTypeName = "Timberborn.Coordinates.CoordinateSystem";
-    private const int ChunkSize = 16;
+    private const int ChunkSize = 32;
 
     private static readonly ConditionalWeakTable<object, TerrainState> States = new();
     private static readonly List<WeakReference<object>> TrackedServices = new();
