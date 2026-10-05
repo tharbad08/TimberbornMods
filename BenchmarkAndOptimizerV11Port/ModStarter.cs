@@ -168,6 +168,7 @@ internal static class FreezeDetectorPatcher
         SoilContaminationResetOptimizer.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
         SoilMoistureProfiler.Patch(FreezeHarmony);
+        SoilParallelTaskProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
         InputProcessorDetailProfiler.Patch(FreezeHarmony);
         EbbAndFlowDetailProfiler.Patch(FreezeHarmony);
@@ -2628,6 +2629,116 @@ internal static class TerrainRecoveryTickLimiter
     }
 }
 
+
+
+internal static class SoilParallelTaskProfiler
+{
+    private static readonly string[] TypeNames =
+    {
+        "Timberborn.SoilContaminationSystem.ContaminationDataPreparationTask",
+        "Timberborn.SoilContaminationSystem.ContaminationCandidatesCountingTask",
+        "Timberborn.SoilContaminationSystem.ContaminationsUpdateTask",
+        "Timberborn.SoilMoistureSystem.MoistureDataPreparationTask",
+        "Timberborn.SoilMoistureSystem.WateredNeighborsCountingTask",
+        "Timberborn.SoilMoistureSystem.ClusterSaturationCalculationTask",
+        "Timberborn.SoilMoistureSystem.WaterEvaporationCalculationTask",
+        "Timberborn.SoilMoistureSystem.MoistureCalculationTask",
+    };
+
+    private struct Sample
+    {
+        public long Started;
+        public long AllocationBefore;
+    }
+
+    public static void Patch(Harmony harmony)
+    {
+        var installed = 0;
+        foreach (var typeName in TypeNames)
+        {
+            var type = AccessTools.TypeByName(typeName);
+            var method = type is null ? null : AccessTools.Method(type, "Run");
+            if (method is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(typeof(SoilParallelTaskProfiler), nameof(Prefix)))
+                    {
+                        priority = Priority.First
+                    },
+                    finalizer: new HarmonyMethod(
+                        AccessTools.Method(typeof(SoilParallelTaskProfiler), nameof(Finalizer)))
+                    {
+                        priority = Priority.Last
+                    });
+                installed++;
+            }
+            catch
+            {
+            }
+        }
+
+        Runtime.Log(
+            $"soil parallel-task profiler installed: {installed}/{TypeNames.Length} task Run method(s); " +
+            $"allocation source={AllocationCounter.Mode}");
+    }
+
+    private static void Prefix(out Sample __state)
+    {
+        __state = new Sample
+        {
+            Started = System.Diagnostics.Stopwatch.GetTimestamp(),
+            AllocationBefore = AllocationCounter.Read(),
+        };
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        Sample __state)
+    {
+        if (__state.Started == 0)
+        {
+            return __exception;
+        }
+
+        var elapsedTicks =
+            System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
+        var elapsedMs =
+            elapsedTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        var allocated = Math.Max(
+            0,
+            AllocationCounter.Read() - __state.AllocationBefore);
+
+        if (elapsedMs >= 20.0 || allocated >= 1024L * 1024L)
+        {
+            Runtime.Log(
+                $"soil worker task: {__originalMethod.DeclaringType?.Name ?? "Unknown"}" +
+                $".Run elapsed={elapsedMs:F1}ms, allocationDelta={FormatBytes(allocated)}");
+        }
+
+        return __exception;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024L)
+        {
+            return $"{bytes / 1024.0 / 1024.0:F1}MB";
+        }
+        if (bytes >= 1024L)
+        {
+            return $"{bytes / 1024.0:F1}KB";
+        }
+        return $"{bytes}B";
+    }
+}
 
 internal static class InputAndFaunaDetailProfiler
 {
