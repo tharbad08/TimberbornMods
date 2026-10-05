@@ -454,7 +454,7 @@ internal static class FreezeDetectorPatcher
         if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
         {
             AllocationTracker.Record("Update", __state.TypeName,
-                Math.Max(0, GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore));
+                Math.Max(0, AllocationCounter.Read() - __state.ThreadAllocatedBefore));
             FreezeDetector.RecordUpdateSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
@@ -477,7 +477,7 @@ internal static class FreezeDetectorPatcher
         if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
         {
             AllocationTracker.Record("LateUpdate", __state.TypeName,
-                Math.Max(0, GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore));
+                Math.Max(0, AllocationCounter.Read() - __state.ThreadAllocatedBefore));
             FreezeDetector.RecordLateUpdateSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
@@ -507,7 +507,7 @@ internal static class FreezeDetectorPatcher
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.ThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        __state.ThreadAllocatedBefore = AllocationCounter.Read();
         __state.HeapSample = ManagedHeapSampler.BeginSingletonSample();
         __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
     }
@@ -529,7 +529,7 @@ internal static class FreezeDetectorPatcher
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.ThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        __state.ThreadAllocatedBefore = AllocationCounter.Read();
         __state.HeapSample = ManagedHeapSampler.BeginSingletonSample();
         __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
     }
@@ -541,7 +541,7 @@ internal static class FreezeDetectorPatcher
         if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
         {
             AllocationTracker.Record("Tick", __state.TypeName,
-                Math.Max(0, GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore));
+                Math.Max(0, AllocationCounter.Read() - __state.ThreadAllocatedBefore));
             FreezeDetector.RecordTickSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
@@ -1554,7 +1554,7 @@ internal static class KeystoneComponentAllocationProfiler
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.AllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
+        __state.AllocatedBytes = AllocationCounter.Read();
         __state.Gc0 = GC.CollectionCount(0);
         __state.Gc1 = GC.CollectionCount(1);
         __state.Gc2 = GC.CollectionCount(2);
@@ -1573,7 +1573,7 @@ internal static class KeystoneComponentAllocationProfiler
         var elapsed =
             System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
         var allocated =
-            GC.GetAllocatedBytesForCurrentThread() - __state.AllocatedBytes;
+            AllocationCounter.Read() - __state.AllocatedBytes;
         if (allocated < 0)
         {
             allocated = 0;
@@ -4781,7 +4781,7 @@ internal static class SoilMoistureProfiler
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.AllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
+        __state.AllocatedBytes = AllocationCounter.Read();
         __state.Gc0 = GC.CollectionCount(0);
         __state.Gc1 = GC.CollectionCount(1);
         __state.Gc2 = GC.CollectionCount(2);
@@ -4795,7 +4795,7 @@ internal static class SoilMoistureProfiler
         }
 
         var allocated =
-            GC.GetAllocatedBytesForCurrentThread() - __state.AllocatedBytes;
+            AllocationCounter.Read() - __state.AllocatedBytes;
         if (allocated < 0)
         {
             allocated = 0;
@@ -4820,7 +4820,7 @@ internal static class SoilMoistureProfiler
         }
 
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.ThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        __state.ThreadAllocatedBefore = AllocationCounter.Read();
         __state.Gc0 = GC.CollectionCount(0);
         __state.Gc1 = GC.CollectionCount(1);
         __state.Gc2 = GC.CollectionCount(2);
@@ -4846,7 +4846,7 @@ internal static class SoilMoistureProfiler
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
             var allocated = Math.Max(
                 0,
-                GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore);
+                AllocationCounter.Read() - __state.ThreadAllocatedBefore);
             _updateCalls++;
             _updateAllocatedTotal += allocated;
             _updateAllocatedMax = Math.Max(_updateAllocatedMax, allocated);
@@ -5582,7 +5582,7 @@ internal static class SoilContaminationDeepProfiler
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.AllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
+        __state.AllocatedBytes = AllocationCounter.Read();
         __state.Gen0 = GC.CollectionCount(0);
         __state.Gen1 = GC.CollectionCount(1);
         __state.Gen2 = GC.CollectionCount(2);
@@ -5599,7 +5599,7 @@ internal static class SoilContaminationDeepProfiler
         var elapsed = Math.Max(0, now - __state.Started);
         var allocated = Math.Max(
             0,
-            GC.GetAllocatedBytesForCurrentThread() - __state.AllocatedBytes);
+            AllocationCounter.Read() - __state.AllocatedBytes);
         var gen0 = GC.CollectionCount(0) - __state.Gen0;
         var gen1 = GC.CollectionCount(1) - __state.Gen1;
         var gen2 = GC.CollectionCount(2) - __state.Gen2;
@@ -5644,7 +5644,7 @@ internal static class SoilContaminationDeepProfiler
         }
 
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.ThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        __state.ThreadAllocatedBefore = AllocationCounter.Read();
         __state.Gc0 = GC.CollectionCount(0);
         __state.Gc1 = GC.CollectionCount(1);
         __state.Gc2 = GC.CollectionCount(2);
@@ -5671,7 +5671,7 @@ internal static class SoilContaminationDeepProfiler
 
             var allocated = Math.Max(
                 0,
-                GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore);
+                AllocationCounter.Read() - __state.ThreadAllocatedBefore);
             _updateCalls++;
             _updateAllocatedTotal += allocated;
             _updateAllocatedMax = Math.Max(_updateAllocatedMax, allocated);
@@ -5848,7 +5848,7 @@ internal static class AllocationTracker
             return;
         }
 
-        var allocated = GC.GetAllocatedBytesForCurrentThread();
+        var allocated = AllocationCounter.Read();
         if (_lastLoopMarker is not null)
         {
             var delta = allocated - _lastLoopAllocated;
@@ -6341,7 +6341,7 @@ internal static class FreezeDetector
             _gc0 = GC.CollectionCount(0);
             _gc1 = GC.CollectionCount(1);
             _gc2 = GC.CollectionCount(2);
-            _totalAllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
+            _totalAllocatedBytes = AllocationCounter.Read();
             SectionTicks.Clear();
             SystemTicks.Clear();
             TickSingletonTicks.Clear();
@@ -6398,7 +6398,7 @@ internal static class FreezeDetector
                 var nextGc0 = GC.CollectionCount(0);
                 var nextGc1 = GC.CollectionCount(1);
                 var nextGc2 = GC.CollectionCount(2);
-                var nextAllocatedBytes = GC.GetAllocatedBytesForCurrentThread();
+                var nextAllocatedBytes = AllocationCounter.Read();
                 var allocatedBytesDelta = Math.Max(0, nextAllocatedBytes - _totalAllocatedBytes);
 
                 if (elapsedMs >= SlowFrameMs)
