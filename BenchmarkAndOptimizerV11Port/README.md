@@ -79,3 +79,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.54: diagnostic follow-up to v1.1.53. Keeps the same optimizer behavior while adding exact current-thread allocation and TerrainMaterialMap queue-growth diagnostics for SoilContaminationService.UpdateContaminationLevels and SoilMoistureService.UpdateMoistureLevels; fixes the missing SoilMoisture profiler installation; times actual IInputProcessor/IPriorityInputProcessor implementations during InputService dispatch to identify opaque input stalls; and adds nested EbbAndFlowManager.Tick timing.
+
+
+- v1.1.55: follow-up to the long v1.1.54 run. Exact thread-allocation probes proved SoilContaminationService and SoilMoistureService allocate 0 KiB even during the recurring full-GC pauses, so soil behavior is unchanged. Adds exact allocation attribution across Tick/Update/LateUpdate singletons plus PlayerLoop segments to identify the real allocator. Deepens BlockObject preview first-use profiling into TemplateInstantiator, PrefabOptimizationChain, BlueprintPrefabConverter and BaseInstantiator. Increases the exact-shape TimberPhysics terrain merge chunk from 16x16 to 32x32 to reduce collider fragmentation while preserving floor/ceiling geometry.
