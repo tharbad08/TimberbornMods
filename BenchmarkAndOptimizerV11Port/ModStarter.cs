@@ -198,6 +198,7 @@ internal static class FreezeDetectorPatcher
     {
         public bool Active;
         public long Started;
+        public long ThreadAllocatedBefore;
         public ManagedHeapSampler.Sample HeapSample;
         public string? TypeName;
     }
@@ -502,6 +503,7 @@ internal static class FreezeDetectorPatcher
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.ThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         __state.HeapSample = ManagedHeapSampler.BeginSingletonSample();
         __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
     }
@@ -523,6 +525,7 @@ internal static class FreezeDetectorPatcher
 
         __state.Active = true;
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.ThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
         __state.HeapSample = ManagedHeapSampler.BeginSingletonSample();
         __state.TypeName = runtimeType.FullName ?? runtimeType.Name;
     }
