@@ -76,3 +76,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.53: v1.1.52 validation follow-up. Retains preview-navmesh batching and terrain debt-pressure recovery. Expands freeze-log input detail from 8 to 20 entries so preview-service and placement-factory subprobes are not hidden by the outer BlockObjectTool call stack. TimberPhysics keeps up to four 0.02s substeps when cheap but stops catch-up once the current update has spent about 50ms inside Physics.Simulate, then drops remaining backlog as before. Managed-heap sampling now adds nested SoilContamination.UpdateLevels and SoilMoisture.UpdateLevels scopes to separate their inner update work from outer resize/background allocation effects.
+
+
+- v1.1.54: diagnostic follow-up to v1.1.53. Keeps the same optimizer behavior while adding exact current-thread allocation and TerrainMaterialMap queue-growth diagnostics for SoilContaminationService.UpdateContaminationLevels and SoilMoistureService.UpdateMoistureLevels; fixes the missing SoilMoisture profiler installation; times actual IInputProcessor/IPriorityInputProcessor implementations during InputService dispatch to identify opaque input stalls; and adds nested EbbAndFlowManager.Tick timing.
