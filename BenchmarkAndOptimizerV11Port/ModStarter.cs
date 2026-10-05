@@ -167,7 +167,10 @@ internal static class FreezeDetectorPatcher
         TerrainRecoveryTickLimiter.Patch(FreezeHarmony);
         SoilContaminationResetOptimizer.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
+        SoilMoistureProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
+        InputProcessorDetailProfiler.Patch(FreezeHarmony);
+        EbbAndFlowDetailProfiler.Patch(FreezeHarmony);
         HotInputDetailProfiler.Patch(FreezeHarmony);
         PreviewServiceMemberDetailProfiler.Patch(FreezeHarmony);
         BlockPlacementDetailProfiler.Patch(FreezeHarmony);
@@ -178,10 +181,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.53 focused pass enabled; preview-navmesh batching and terrain debt-pressure recovery retained; " +
-            "input detail output expanded so preview-member/placement-factory probes are visible; " +
-            "managed-heap sampling now includes soil contamination/moisture update sub-scopes; " +
-            "TimberPhysics keeps the 4-substep ceiling but stops catch-up after ~50ms of PhysX wall time");
+            "performance build: v1.1.54 diagnostic pass enabled; v1.1.53 behavior retained; " +
+            "actual IInputProcessor implementations are timed during InputService dispatch; " +
+            "soil contamination/moisture now report exact current-thread allocation plus TerrainMaterialMap queue growth; " +
+            "EbbAndFlowManager nested methods are timed when its Tick is active; missing SoilMoisture profiler installation fixed");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -3427,6 +3430,290 @@ internal static class SuperCursorRefreshSmoother
     }
 }
 
+
+internal static class InputProcessorDetailProfiler
+{
+    [ThreadStatic] private static int _dispatchDepth;
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        var inputService = AccessTools.TypeByName("Timberborn.InputSystem.InputService");
+        var root = inputService is null
+            ? null
+            : AccessTools.DeclaredMethod(inputService, "CallInputProcessors", Type.EmptyTypes);
+
+        if (root is not null)
+        {
+            harmony.Patch(
+                root,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(typeof(InputProcessorDetailProfiler), nameof(RootPrefix)))
+                { priority = Priority.First },
+                finalizer: new HarmonyMethod(
+                    AccessTools.Method(typeof(InputProcessorDetailProfiler), nameof(RootFinalizer)))
+                { priority = Priority.Last });
+        }
+
+        PatchInterface(harmony, "Timberborn.InputSystem.IPriorityInputProcessor", "Priority");
+        PatchInterface(harmony, "Timberborn.InputSystem.IInputProcessor", "Normal");
+
+        Runtime.Log(
+            $"input-processor detail profiler installed: {Labels.Count} effective ProcessInput method(s)");
+    }
+
+    private static void PatchInterface(Harmony harmony, string interfaceName, string kind)
+    {
+        var iface = AccessTools.TypeByName(interfaceName);
+        if (iface is null)
+        {
+            return;
+        }
+
+        var ifaceMethod = iface.GetMethods()
+            .FirstOrDefault(method =>
+                method.Name == "ProcessInput" &&
+                method.GetParameters().Length == 0);
+        if (ifaceMethod is null)
+        {
+            return;
+        }
+
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            foreach (var type in SafeGetTypes(assembly))
+            {
+                if (type.IsAbstract || type.IsInterface || !iface.IsAssignableFrom(type))
+                {
+                    continue;
+                }
+
+                MethodInfo? target = null;
+                try
+                {
+                    var map = type.GetInterfaceMap(iface);
+                    for (var i = 0; i < map.InterfaceMethods.Length; i++)
+                    {
+                        if (map.InterfaceMethods[i].Name == ifaceMethod.Name &&
+                            map.InterfaceMethods[i].GetParameters().Length == 0)
+                        {
+                            target = map.TargetMethods[i];
+                            break;
+                        }
+                    }
+                }
+                catch
+                {
+                    // Some generated runtime types cannot expose an interface map.
+                }
+
+                target ??= AccessTools.Method(type, "ProcessInput", Type.EmptyTypes);
+                if (target is null || target.IsAbstract || target.ContainsGenericParameters ||
+                    Labels.ContainsKey(target))
+                {
+                    continue;
+                }
+
+                var owner = target.DeclaringType ?? type;
+                Labels[target] = $"InputProcessor.{kind}.{ShortName(owner)}";
+                try
+                {
+                    harmony.Patch(
+                        target,
+                        prefix: new HarmonyMethod(
+                            AccessTools.Method(typeof(InputProcessorDetailProfiler), nameof(Prefix)))
+                        { priority = Priority.First },
+                        finalizer: new HarmonyMethod(
+                            AccessTools.Method(typeof(InputProcessorDetailProfiler), nameof(Finalizer)))
+                        { priority = Priority.Last });
+                }
+                catch
+                {
+                    Labels.Remove(target);
+                }
+            }
+        }
+    }
+
+    private static void RootPrefix()
+    {
+        if (!Runtime.IsBenchmarking)
+        {
+            _dispatchDepth++;
+        }
+    }
+
+    private static Exception? RootFinalizer(Exception? __exception)
+    {
+        if (_dispatchDepth > 0)
+        {
+            _dispatchDepth--;
+        }
+        return __exception;
+    }
+
+    private static void Prefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = _dispatchDepth > 0 &&
+                  !Runtime.IsBenchmarking &&
+                  Labels.ContainsKey(__originalMethod)
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+        {
+            FreezeDetector.RecordInputDetail(
+                label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+        return __exception;
+    }
+
+    private static string ShortName(Type type)
+    {
+        var name = type.FullName ?? type.Name;
+        var index = name.LastIndexOf('.');
+        return index >= 0 ? name[(index + 1)..] : name;
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try { return assembly.GetTypes(); }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch { return Array.Empty<Type>(); }
+    }
+}
+
+internal static class EbbAndFlowDetailProfiler
+{
+    [ThreadStatic] private static int _tickDepth;
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    public static void Patch(Harmony harmony)
+    {
+        Type? manager = null;
+        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            manager = SafeGetTypes(assembly)
+                .FirstOrDefault(type => type.Name == "EbbAndFlowManager");
+            if (manager is not null)
+            {
+                break;
+            }
+        }
+
+        var tick = manager is null
+            ? null
+            : AccessTools.Method(manager, "Tick", Type.EmptyTypes);
+        if (manager is null || tick is null)
+        {
+            Runtime.Log("EbbAndFlow detail profiler not installed: EbbAndFlowManager.Tick not found");
+            return;
+        }
+
+        harmony.Patch(
+            tick,
+            prefix: new HarmonyMethod(
+                AccessTools.Method(typeof(EbbAndFlowDetailProfiler), nameof(RootPrefix)))
+            { priority = Priority.First },
+            finalizer: new HarmonyMethod(
+                AccessTools.Method(typeof(EbbAndFlowDetailProfiler), nameof(RootFinalizer)))
+            { priority = Priority.Last });
+
+        foreach (var method in manager.GetMethods(
+                     BindingFlags.Instance | BindingFlags.Static |
+                     BindingFlags.Public | BindingFlags.NonPublic |
+                     BindingFlags.DeclaredOnly))
+        {
+            if (method == tick || method.IsAbstract || method.ContainsGenericParameters ||
+                method.IsSpecialName)
+            {
+                continue;
+            }
+
+            var label = $"Ebb.{method.Name}";
+            try
+            {
+                Labels[method] = label;
+                harmony.Patch(
+                    method,
+                    prefix: new HarmonyMethod(
+                        AccessTools.Method(typeof(EbbAndFlowDetailProfiler), nameof(Prefix)))
+                    { priority = Priority.First },
+                    finalizer: new HarmonyMethod(
+                        AccessTools.Method(typeof(EbbAndFlowDetailProfiler), nameof(Finalizer)))
+                    { priority = Priority.Last });
+            }
+            catch
+            {
+                Labels.Remove(method);
+            }
+        }
+
+        Runtime.Log(
+            $"EbbAndFlow detail profiler installed: {Labels.Count} nested manager method(s)");
+    }
+
+    private static void RootPrefix()
+    {
+        if (!Runtime.IsBenchmarking)
+        {
+            _tickDepth++;
+        }
+    }
+
+    private static Exception? RootFinalizer(Exception? __exception)
+    {
+        if (_tickDepth > 0)
+        {
+            _tickDepth--;
+        }
+        return __exception;
+    }
+
+    private static void Prefix(MethodBase __originalMethod, out long __state)
+    {
+        __state = _tickDepth > 0 &&
+                  !Runtime.IsBenchmarking &&
+                  Labels.ContainsKey(__originalMethod)
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception,
+        MethodBase __originalMethod,
+        long __state)
+    {
+        if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+        {
+            FreezeDetector.RecordTargetDetail(
+                label,
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state);
+        }
+        return __exception;
+    }
+
+    private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
+    {
+        try { return assembly.GetTypes(); }
+        catch (ReflectionTypeLoadException ex)
+        {
+            return ex.Types.Where(type => type is not null).Cast<Type>();
+        }
+        catch { return Array.Empty<Type>(); }
+    }
+}
+
 internal static class HotInputDetailProfiler
 {
     [ThreadStatic] private static int _blockDepth;
@@ -4496,6 +4783,13 @@ internal static class FaunaSpawnInnerProfiler
 
 internal static class SoilMoistureProfiler
 {
+    private static FieldInfo? _terrainMaterialMapField;
+    private static FieldInfo? _desertQueueField;
+    private static FieldInfo? _desertQueueArrayField;
+    private static long _updateCalls;
+    private static long _updateAllocatedTotal;
+    private static long _updateAllocatedMax;
+
     private struct Sample
     {
         public bool Active;
@@ -4509,6 +4803,12 @@ internal static class SoilMoistureProfiler
     private struct UpdateLevelsSample
     {
         public long Started;
+        public long ThreadAllocatedBefore;
+        public int Gc0;
+        public int Gc1;
+        public int Gc2;
+        public int QueueCountBefore;
+        public int QueueCapacityBefore;
         public ManagedHeapSampler.Sample HeapSample;
     }
 
@@ -4519,6 +4819,11 @@ internal static class SoilMoistureProfiler
         var updateLevels = type is null
             ? null
             : AccessTools.DeclaredMethod(type, "UpdateMoistureLevels", Type.EmptyTypes);
+        _terrainMaterialMapField = type is null ? null : AccessTools.Field(type, "_terrainMaterialMap");
+        var terrainMaterialMapType = _terrainMaterialMapField?.FieldType;
+        _desertQueueField = terrainMaterialMapType is null
+            ? null
+            : AccessTools.Field(terrainMaterialMapType, "_desertMapChanges");
         if (tick is null)
         {
             Runtime.Log("warning: SoilMoisture profiler unavailable: SoilMoistureService.Tick not found");
@@ -4607,7 +4912,7 @@ internal static class SoilMoistureProfiler
         return __exception;
     }
 
-    private static void UpdateLevelsPrefix(out UpdateLevelsSample __state)
+    private static void UpdateLevelsPrefix(object __instance, out UpdateLevelsSample __state)
     {
         __state = default;
         if (Runtime.IsBenchmarking)
@@ -4616,11 +4921,20 @@ internal static class SoilMoistureProfiler
         }
 
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.ThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        __state.Gc0 = GC.CollectionCount(0);
+        __state.Gc1 = GC.CollectionCount(1);
+        __state.Gc2 = GC.CollectionCount(2);
+        ReadQueueStats(
+            __instance,
+            out __state.QueueCountBefore,
+            out __state.QueueCapacityBefore);
         __state.HeapSample = ManagedHeapSampler.BeginNamedScopeSample();
     }
 
     private static Exception? UpdateLevelsFinalizer(
         Exception? __exception,
+        object __instance,
         UpdateLevelsSample __state)
     {
         if (__state.Started != 0)
@@ -4628,9 +4942,74 @@ internal static class SoilMoistureProfiler
             ManagedHeapSampler.EndNamedScopeSample(
                 "SoilMoisture.UpdateLevels",
                 __state.HeapSample);
+
+            var elapsed =
+                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
+            var allocated = Math.Max(
+                0,
+                GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore);
+            _updateCalls++;
+            _updateAllocatedTotal += allocated;
+            _updateAllocatedMax = Math.Max(_updateAllocatedMax, allocated);
+
+            ReadQueueStats(__instance, out var queueCountAfter, out var queueCapacityAfter);
+            var gcChanged =
+                GC.CollectionCount(0) != __state.Gc0 ||
+                GC.CollectionCount(1) != __state.Gc1 ||
+                GC.CollectionCount(2) != __state.Gc2;
+            var capacityGrew = queueCapacityAfter > __state.QueueCapacityBefore;
+
+            if ((_updateCalls % 300) == 0 ||
+                allocated >= 8L * 1024L * 1024L ||
+                gcChanged ||
+                capacityGrew)
+            {
+                Runtime.Log(
+                    $"SoilMoisture exact allocation: calls={_updateCalls}, " +
+                    $"last={allocated / 1024.0:F1}KiB, " +
+                    $"avg={(_updateAllocatedTotal / Math.Max(1.0, _updateCalls)) / 1024.0:F1}KiB, " +
+                    $"max={_updateAllocatedMax / 1024.0:F1}KiB, " +
+                    $"queue={__state.QueueCountBefore}->{queueCountAfter}, " +
+                    $"capacity={__state.QueueCapacityBefore}->{queueCapacityAfter}, " +
+                    $"elapsed={elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms, " +
+                    $"GC={(gcChanged ? "yes" : "no")}");
+            }
         }
 
         return __exception;
+    }
+
+    private static void ReadQueueStats(object instance, out int count, out int capacity)
+    {
+        count = -1;
+        capacity = -1;
+        try
+        {
+            var materialMap = _terrainMaterialMapField?.GetValue(instance);
+            var queue = materialMap is null
+                ? null
+                : _desertQueueField?.GetValue(materialMap);
+            if (queue is null)
+            {
+                return;
+            }
+
+            if (queue is ICollection collection)
+            {
+                count = collection.Count;
+            }
+
+            _desertQueueArrayField ??=
+                queue.GetType().GetField("_array", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (_desertQueueArrayField?.GetValue(queue) is Array array)
+            {
+                capacity = array.Length;
+            }
+        }
+        catch
+        {
+            // Diagnostics only.
+        }
     }
 }
 
@@ -5204,6 +5583,12 @@ internal static class SoilContaminationDeepProfiler
     private static Type? _soilType;
     private static MethodInfo? _soilTick;
     private static MethodInfo? _updateLevels;
+    private static FieldInfo? _terrainMaterialMapField;
+    private static FieldInfo? _contaminationQueueField;
+    private static FieldInfo? _contaminationQueueArrayField;
+    private static long _updateCalls;
+    private static long _updateAllocatedTotal;
+    private static long _updateAllocatedMax;
 
     private struct SoilTickSample
     {
@@ -5234,6 +5619,11 @@ internal static class SoilContaminationDeepProfiler
                 _soilType,
                 "UpdateContaminationLevels",
                 Type.EmptyTypes);
+            _terrainMaterialMapField = AccessTools.Field(_soilType, "_terrainMaterialMap");
+            var terrainMaterialMapType = _terrainMaterialMapField?.FieldType;
+            _contaminationQueueField = terrainMaterialMapType is null
+                ? null
+                : AccessTools.Field(terrainMaterialMapType, "_contaminationMapChanges");
 
             if (_soilTick is null)
             {
@@ -5336,10 +5726,16 @@ internal static class SoilContaminationDeepProfiler
     private struct BranchSample
     {
         public long Started;
+        public long ThreadAllocatedBefore;
+        public int Gc0;
+        public int Gc1;
+        public int Gc2;
+        public int QueueCountBefore;
+        public int QueueCapacityBefore;
         public ManagedHeapSampler.Sample HeapSample;
     }
 
-    private static void BranchPrefix(out BranchSample __state)
+    private static void BranchPrefix(object __instance, out BranchSample __state)
     {
         __state = default;
         if (Runtime.IsBenchmarking)
@@ -5348,22 +5744,96 @@ internal static class SoilContaminationDeepProfiler
         }
 
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
+        __state.ThreadAllocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        __state.Gc0 = GC.CollectionCount(0);
+        __state.Gc1 = GC.CollectionCount(1);
+        __state.Gc2 = GC.CollectionCount(2);
+        ReadQueueStats(
+            __instance,
+            out __state.QueueCountBefore,
+            out __state.QueueCapacityBefore);
         __state.HeapSample = ManagedHeapSampler.BeginNamedScopeSample();
     }
 
-    private static Exception? UpdateLevelsFinalizer(Exception? __exception, BranchSample __state)
+    private static Exception? UpdateLevelsFinalizer(
+        Exception? __exception,
+        object __instance,
+        BranchSample __state)
     {
         if (__state.Started != 0)
         {
-            FreezeDetector.RecordSoilDetail(
-                "UpdateContaminationLevels",
-                System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            var elapsed = now - __state.Started;
+            FreezeDetector.RecordSoilDetail("UpdateContaminationLevels", elapsed);
             ManagedHeapSampler.EndNamedScopeSample(
                 "SoilContamination.UpdateLevels",
                 __state.HeapSample);
+
+            var allocated = Math.Max(
+                0,
+                GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore);
+            _updateCalls++;
+            _updateAllocatedTotal += allocated;
+            _updateAllocatedMax = Math.Max(_updateAllocatedMax, allocated);
+
+            ReadQueueStats(__instance, out var queueCountAfter, out var queueCapacityAfter);
+            var gcChanged =
+                GC.CollectionCount(0) != __state.Gc0 ||
+                GC.CollectionCount(1) != __state.Gc1 ||
+                GC.CollectionCount(2) != __state.Gc2;
+            var capacityGrew = queueCapacityAfter > __state.QueueCapacityBefore;
+
+            if ((_updateCalls % 300) == 0 ||
+                allocated >= 8L * 1024L * 1024L ||
+                gcChanged ||
+                capacityGrew)
+            {
+                Runtime.Log(
+                    $"SoilContamination exact allocation: calls={_updateCalls}, " +
+                    $"last={allocated / 1024.0:F1}KiB, " +
+                    $"avg={(_updateAllocatedTotal / Math.Max(1.0, _updateCalls)) / 1024.0:F1}KiB, " +
+                    $"max={_updateAllocatedMax / 1024.0:F1}KiB, " +
+                    $"queue={__state.QueueCountBefore}->{queueCountAfter}, " +
+                    $"capacity={__state.QueueCapacityBefore}->{queueCapacityAfter}, " +
+                    $"elapsed={elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms, " +
+                    $"GC={(gcChanged ? "yes" : "no")}");
+            }
         }
 
         return __exception;
+    }
+
+    private static void ReadQueueStats(object instance, out int count, out int capacity)
+    {
+        count = -1;
+        capacity = -1;
+        try
+        {
+            var materialMap = _terrainMaterialMapField?.GetValue(instance);
+            var queue = materialMap is null
+                ? null
+                : _contaminationQueueField?.GetValue(materialMap);
+            if (queue is null)
+            {
+                return;
+            }
+
+            if (queue is ICollection collection)
+            {
+                count = collection.Count;
+            }
+
+            _contaminationQueueArrayField ??=
+                queue.GetType().GetField("_array", BindingFlags.Instance | BindingFlags.NonPublic);
+            if (_contaminationQueueArrayField?.GetValue(queue) is Array array)
+            {
+                capacity = array.Length;
+            }
+        }
+        catch
+        {
+            // Diagnostics only.
+        }
     }
 
     private static IEnumerable<Type> SafeGetTypes(Assembly assembly)
