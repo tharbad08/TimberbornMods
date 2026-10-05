@@ -5754,6 +5754,64 @@ internal static class SoilContaminationDeepProfiler
 }
 
 
+internal static class AllocationCounter
+{
+    private static string _mode = "uninitialized";
+    private static bool _cumulative;
+    private static readonly Func<long> Reader = Resolve();
+
+    public static string Mode => _mode;
+    public static bool IsCumulative => _cumulative;
+
+    public static long Read()
+    {
+        try { return Reader(); }
+        catch { return GC.GetTotalMemory(false); }
+    }
+
+    private static Func<long> Resolve()
+    {
+        const BindingFlags flags = BindingFlags.Static | BindingFlags.Public;
+        try
+        {
+            var method = typeof(GC).GetMethod(
+                "GetTotalAllocatedBytes",
+                flags,
+                binder: null,
+                types: new[] { typeof(bool) },
+                modifiers: null);
+            if (method is not null && method.ReturnType == typeof(long))
+            {
+                var del = (Func<bool, long>)Delegate.CreateDelegate(typeof(Func<bool, long>), method);
+                _mode = "GC.GetTotalAllocatedBytes(false) global cumulative";
+                _cumulative = true;
+                return () => del(false);
+            }
+
+            method = typeof(GC).GetMethod(
+                "GetTotalAllocatedBytes",
+                flags,
+                binder: null,
+                types: Type.EmptyTypes,
+                modifiers: null);
+            if (method is not null && method.ReturnType == typeof(long))
+            {
+                var del = (Func<long>)Delegate.CreateDelegate(typeof(Func<long>), method);
+                _mode = "GC.GetTotalAllocatedBytes() global cumulative";
+                _cumulative = true;
+                return del;
+            }
+        }
+        catch
+        {
+        }
+
+        _mode = "GC.GetTotalMemory(false) live-heap fallback";
+        _cumulative = false;
+        return () => GC.GetTotalMemory(false);
+    }
+}
+
 internal static class AllocationTracker
 {
     private const int ReportEveryFrames = 300;
