@@ -453,6 +453,8 @@ internal static class FreezeDetectorPatcher
     {
         if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
         {
+            AllocationTracker.Record("Update", __state.TypeName,
+                Math.Max(0, GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore));
             FreezeDetector.RecordUpdateSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
@@ -474,6 +476,8 @@ internal static class FreezeDetectorPatcher
     {
         if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
         {
+            AllocationTracker.Record("LateUpdate", __state.TypeName,
+                Math.Max(0, GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore));
             FreezeDetector.RecordLateUpdateSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
@@ -536,6 +540,8 @@ internal static class FreezeDetectorPatcher
     {
         if (__state.Active && __state.Started != 0 && __state.TypeName is not null)
         {
+            AllocationTracker.Record("Tick", __state.TypeName,
+                Math.Max(0, GC.GetAllocatedBytesForCurrentThread() - __state.ThreadAllocatedBefore));
             FreezeDetector.RecordTickSingleton(
                 __state.TypeName,
                 System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started);
@@ -550,6 +556,7 @@ internal static class FreezeDetectorPatcher
     {
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
         FreezeDetector.FrameBoundary(now, "UpdateSingletons");
+        AllocationTracker.FrameBoundary();
         __state = now;
     }
 
@@ -5184,6 +5191,7 @@ internal static class PlayerLoopPhaseProfiler
             name,
             System.Diagnostics.Stopwatch.GetTimestamp());
         ManagedHeapSampler.MarkPlayerLoop(name);
+        AllocationTracker.MarkPlayerLoop(name);
     }
 
     private static void EarlyUpdateStart() => Mark("EarlyUpdate.Start");
