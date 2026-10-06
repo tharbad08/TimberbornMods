@@ -88,3 +88,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.57: prewarms the expensive Keystone terrestrial fauna templates (KeystoneCow, KeystoneBull, KeystoneDeer) during template collection load using Timberborn's own TemplateInstantiator.CacheInstance(). This shifts the one-time 270-415ms prefab optimization misses out of gameplay and into loading. It does not create a second prefab cache; it populates the same vanilla cache those species would occupy after their first spawn. Fast fish templates are intentionally not prewarmed.
+
+
+- v1.1.58: fixes the failed Keystone fauna prewarm by deferring Cow/Bull/Deer CacheInstance calls until GameInitializer.ShowPrimaryUI, after scene/game initialization instead of during TemplateCollectionService.Load. Retains vanilla cache ownership and retries remain possible on failure. Adds aggregated soil parallel-worker timing/allocation-metric reports every 512 worker completions, clarifies that GC.GetTotalMemory fallback is heap growth rather than exact allocation, and suppresses obviously external/load gaps over 30 seconds when dispatcher work is under 1 second so menu/load pauses do not pollute freeze diagnostics.
