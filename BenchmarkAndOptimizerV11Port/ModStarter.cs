@@ -2634,6 +2634,19 @@ internal static class TerrainRecoveryTickLimiter
 
 internal static class SoilParallelTaskProfiler
 {
+    private sealed class Aggregate
+    {
+        public long Calls;
+        public long TotalTicks;
+        public long MaxTicks;
+        public long TotalMetricBytes;
+        public long MaxMetricBytes;
+    }
+
+    private static readonly object AggregateGate = new();
+    private static readonly Dictionary<string, Aggregate> Aggregates = new(StringComparer.Ordinal);
+    private static long _completedCalls;
+
     private static readonly string[] TypeNames =
     {
         "Timberborn.SoilContaminationSystem.ContaminationDataPreparationTask",
@@ -2687,7 +2700,7 @@ internal static class SoilParallelTaskProfiler
 
         Runtime.Log(
             $"soil parallel-task profiler installed: {installed}/{TypeNames.Length} task Run method(s); " +
-            $"allocation source={AllocationCounter.Mode}");
+            $"metric source={AllocationCounter.Mode}; fallback mode is heap growth, not exact allocation");
     }
 
     private static void Prefix(out Sample __state)
@@ -2717,11 +2730,49 @@ internal static class SoilParallelTaskProfiler
             0,
             AllocationCounter.Read() - __state.AllocationBefore);
 
+        var name = __originalMethod.DeclaringType?.Name ?? "Unknown";
+        lock (AggregateGate)
+        {
+            if (!Aggregates.TryGetValue(name, out var aggregate))
+            {
+                aggregate = new Aggregate();
+                Aggregates[name] = aggregate;
+            }
+
+            aggregate.Calls++;
+            aggregate.TotalTicks += elapsedTicks;
+            aggregate.MaxTicks = Math.Max(aggregate.MaxTicks, elapsedTicks);
+            aggregate.TotalMetricBytes += allocated;
+            aggregate.MaxMetricBytes = Math.Max(aggregate.MaxMetricBytes, allocated);
+            _completedCalls++;
+
+            if ((_completedCalls % 512) == 0)
+            {
+                var top = Aggregates
+                    .OrderByDescending(pair => pair.Value.TotalMetricBytes)
+                    .ThenByDescending(pair => pair.Value.TotalTicks)
+                    .Take(8)
+                    .Select(pair =>
+                        $"{pair.Key}:calls={pair.Value.Calls}," +
+                        $"total={pair.Value.TotalTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms," +
+                        $"max={pair.Value.MaxTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1}ms," +
+                        $"metricTotal={FormatBytes(pair.Value.TotalMetricBytes)}," +
+                        $"metricMax={FormatBytes(pair.Value.MaxMetricBytes)}")
+                    .ToArray();
+
+                Runtime.Log(
+                    $"soil worker aggregate ({AllocationCounter.Mode}): " +
+                    $"{string.Join(", ", top)}");
+
+                Aggregates.Clear();
+            }
+        }
+
         if (elapsedMs >= 20.0 || allocated >= 1024L * 1024L)
         {
             Runtime.Log(
-                $"soil worker task: {__originalMethod.DeclaringType?.Name ?? "Unknown"}" +
-                $".Run elapsed={elapsedMs:F1}ms, allocationDelta={FormatBytes(allocated)}");
+                $"soil worker task: {name}.Run elapsed={elapsedMs:F1}ms, " +
+                $"metricDelta={FormatBytes(allocated)} ({AllocationCounter.Mode})");
         }
 
         return __exception;
@@ -6780,12 +6831,29 @@ internal static class FreezeDetector
 
                 if (elapsedMs >= SlowFrameMs)
                 {
-                    freezeLine = BuildFreezeLine(
-                        elapsedMs,
-                        nextGc0 - _gc0,
-                        nextGc1 - _gc1,
-                        nextGc2 - _gc2,
-                        allocatedBytesDelta);
+                    var dispatcherTicks =
+                        SectionTicks.GetValueOrDefault("UpdateSingletons") +
+                        SectionTicks.GetValueOrDefault("LateUpdateSingletons") +
+                        SectionTicks.GetValueOrDefault("TickSingletons");
+                    var externalOrLoadGap =
+                        elapsedMs >= 30000.0 &&
+                        ToMs(dispatcherTicks) < 1000.0;
+
+                    if (!externalOrLoadGap)
+                    {
+                        freezeLine = BuildFreezeLine(
+                            elapsedMs,
+                            nextGc0 - _gc0,
+                            nextGc1 - _gc1,
+                            nextGc2 - _gc2,
+                            allocatedBytesDelta);
+                    }
+                    else
+                    {
+                        Runtime.Log(
+                            $"freeze detector skipped external/load gap: " +
+                            $"elapsed={elapsedMs:F1}ms, dispatcher={ToMs(dispatcherTicks):F1}ms");
+                    }
                 }
 
                 _gc0 = nextGc0;
