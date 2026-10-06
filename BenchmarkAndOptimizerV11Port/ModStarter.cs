@@ -183,10 +183,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.56 allocation/preview follow-up enabled; v1.1.55 behavior retained; " +
-            $"allocation source={AllocationCounter.Mode}; singleton/PlayerLoop allocation attribution now uses the global counter; " +
-            "soil parallel worker tasks are profiled directly; block preview drill-down retained; " +
-            "TimberPhysics terrain merge remains 32x32 exact-shape");
+            "performance build: v1.1.58 validation/fix pass enabled; v1.1.57 behavior retained; " +
+            $"allocation metric source={AllocationCounter.Mode}; fallback mode is reported as heap growth, not exact allocation; " +
+            "Keystone Cow/Bull/Deer prewarm moved to end-of-game initialization before primary UI; " +
+            "soil worker observations are aggregated; long external/load gaps are excluded from freeze reports");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -4493,11 +4493,16 @@ internal static class KeystoneFaunaTemplatePrewarmer
             }
 
             var load = AccessTools.Method(collectionType, "Load", Type.EmptyTypes);
-            if (load is null)
+            var gameInitializerType = AccessTools.TypeByName("Timberborn.GameStartup.GameInitializer");
+            var showPrimaryUi = gameInitializerType is null
+                ? null
+                : AccessTools.DeclaredMethod(gameInitializerType, "ShowPrimaryUI", Type.EmptyTypes);
+
+            if (load is null || showPrimaryUi is null)
             {
                 Runtime.Log(
                     "Keystone fauna template prewarm not installed: " +
-                    "TemplateCollectionService.Load unavailable");
+                    "TemplateCollectionService.Load/GameInitializer.ShowPrimaryUI unavailable");
                 return;
             }
 
@@ -4511,10 +4516,21 @@ internal static class KeystoneFaunaTemplatePrewarmer
                     priority = Priority.Last
                 });
 
+            harmony.Patch(
+                showPrimaryUi,
+                prefix: new HarmonyMethod(
+                    AccessTools.Method(
+                        typeof(KeystoneFaunaTemplatePrewarmer),
+                        nameof(BeforePrimaryUi)))
+                {
+                    priority = Priority.First
+                });
+
             _installed = true;
             Runtime.Log(
                 "Keystone fauna template prewarm installed: " +
-                "Cow/Bull/Deer use Timberborn TemplateInstantiator.CacheInstance during load");
+                "Cow/Bull/Deer are deferred until GameInitializer.ShowPrimaryUI, " +
+                "then cached through vanilla TemplateInstantiator.CacheInstance");
         }
         catch (Exception ex)
         {
@@ -4532,7 +4548,6 @@ internal static class KeystoneFaunaTemplatePrewarmer
         }
 
         _templateInstantiator = new WeakReference<object>(__instance);
-        TryPrewarm();
     }
 
     private static void TemplateCollectionLoaded(object __instance)
@@ -4543,6 +4558,12 @@ internal static class KeystoneFaunaTemplatePrewarmer
         }
 
         _templateCollectionService = new WeakReference<object>(__instance);
+    }
+
+    private static void BeforePrimaryUi()
+    {
+        Runtime.Log(
+            "Keystone fauna template prewarm starting at end of game initialization, before primary UI");
         TryPrewarm();
     }
 
@@ -4646,7 +4667,8 @@ internal static class KeystoneFaunaTemplatePrewarmer
         catch (TargetInvocationException ex)
         {
             Runtime.Log(
-                $"warning: Keystone fauna template prewarm failed: " +
+                $"warning: Keystone fauna template prewarm failed at deferred game-init stage; " +
+                $"cache remains retryable: " +
                 $"{ex.InnerException?.GetType().Name ?? ex.GetType().Name}: " +
                 $"{ex.InnerException?.Message ?? ex.Message}");
         }
