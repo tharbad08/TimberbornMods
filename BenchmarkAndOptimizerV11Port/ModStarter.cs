@@ -169,7 +169,6 @@ internal static class FreezeDetectorPatcher
         SoilContaminationResetOptimizer.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
         SoilMoistureProfiler.Patch(FreezeHarmony);
-        SoilTaskConstructionProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
         InputProcessorDetailProfiler.Patch(FreezeHarmony);
         EbbAndFlowDetailProfiler.Patch(FreezeHarmony);
@@ -183,10 +182,11 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.61 soil-GC diagnostic cleanup; based directly on v1.1.59 (temporary v1.1.60 startup gate discarded); " +
+            "performance build: v1.1.62 soil-GC relief; based directly on v1.1.59 behavior; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode is reported strictly as heap growth, not allocation; " +
             "Keystone Cow/Bull/Deer prewarm retained; EBR road updates keep NavMeshUpdate.Bounds spatial filtering; " +
-            "per-worker soil Run profiling removed after diagnosis; lightweight soil task-construction counts added; " +
+            "soil construction diagnostics removed after confirming low construction counts; " +
+            "one-time SoilContaminationService interval=2 migration reduces contamination recomputation/GC pressure while leaving moisture/water cadence unchanged; " +
             "bounded incremental-GC slices retain v1.1.59 behavior above 5.5GiB when Unity supports them; long external/load gaps are excluded from freeze reports");
     }
 
@@ -6204,7 +6204,6 @@ internal static class SoilContaminationDeepProfiler
 
         FreezeDetector.RecordSoilDetail("Tick", elapsed);
         FreezeDetector.RecordSoilGc(gen0, gen1, gen2);
-        SoilTaskConstructionProfiler.MaybeLogSummary();
 
         var elapsedMs =
             elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -10581,15 +10580,24 @@ internal static class Runtime
             }
 
             loaded.Normalize();
+            var soilGcReliefApplied = ApplySoilContaminationGcReliefMigration(loaded);
             var protectedValuesCorrected = NormalizeProtectedIntervals(loaded);
             _settings = loaded;
             _settingsGeneration++;
             _configWriteUtc = writeUtc;
 
-            if (protectedValuesCorrected)
+            if (protectedValuesCorrected || soilGcReliefApplied)
             {
                 SaveSettings(_settings);
-                Log("protected optimizer intervals found in config and reset to 1");
+                if (protectedValuesCorrected)
+                {
+                    Log("protected optimizer intervals found in config and reset to 1");
+                }
+                if (soilGcReliefApplied)
+                {
+                    Log("v1.1.62 soil-GC relief applied once: SoilContaminationService interval=2; " +
+                        "user can change it normally in optimizer settings and it will not be forced again");
+                }
             }
 
             if (!BenchmarkActive)
@@ -10602,6 +10610,34 @@ internal static class Runtime
         {
             Log($"warning: config reload failed: {ex.GetType().Name}: {ex.Message}; keeping previous settings");
         }
+    }
+
+    private static bool ApplySoilContaminationGcReliefMigration(Settings settings)
+    {
+        if (settings.SoilContaminationGcReliefApplied)
+        {
+            return false;
+        }
+
+        const string fullName = "Timberborn.SoilContaminationSystem.SoilContaminationService";
+        const string shortName = "SoilContaminationService";
+
+        var existingKey = settings.Intervals.Keys.FirstOrDefault(key =>
+            string.Equals(key, fullName, StringComparison.Ordinal) ||
+            string.Equals(key, shortName, StringComparison.Ordinal) ||
+            key.EndsWith("." + shortName, StringComparison.Ordinal));
+
+        if (existingKey is null)
+        {
+            settings.Intervals[fullName] = 2;
+        }
+        else if (settings.Intervals[existingKey] <= 1)
+        {
+            settings.Intervals[existingKey] = 2;
+        }
+
+        settings.SoilContaminationGcReliefApplied = true;
+        return true;
     }
 
     private static void SaveSettings(Settings settings)
@@ -10727,6 +10763,9 @@ internal sealed class Settings
     public int ReloadSeconds { get; set; } = 2;
     public bool WriteDiscoveredTypes { get; set; } = true;
 
+    // One-time v1.1.62 migration. Once true, user changes to the contamination interval are never overridden.
+    public bool SoilContaminationGcReliefApplied { get; set; } = false;
+
     // 0 = disabled. Set e.g. 30 to benchmark the first 30 real seconds after loading a game.
     public int BenchmarkSeconds { get; set; } = 0;
 
@@ -10740,9 +10779,11 @@ internal sealed class Settings
         DefaultInterval = 1,
         ReloadSeconds = 2,
         WriteDiscoveredTypes = true,
+        SoilContaminationGcReliefApplied = true,
         BenchmarkSeconds = 0,
         Intervals = new Dictionary<string, int>(StringComparer.Ordinal)
         {
+            ["Timberborn.SoilContaminationSystem.SoilContaminationService"] = 2,
             ["ConstructionSite"] = 1,
             ["ResourceCountingService"] = 1,
             ["BehaviorManager"] = 1,
