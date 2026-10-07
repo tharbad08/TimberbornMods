@@ -169,7 +169,7 @@ internal static class FreezeDetectorPatcher
         SoilContaminationResetOptimizer.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
         SoilMoistureProfiler.Patch(FreezeHarmony);
-        SoilParallelTaskProfiler.Patch(FreezeHarmony);
+        SoilTaskConstructionProfiler.Patch(FreezeHarmony);
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
         InputProcessorDetailProfiler.Patch(FreezeHarmony);
         EbbAndFlowDetailProfiler.Patch(FreezeHarmony);
@@ -183,11 +183,11 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.60 safe-GC startup gate enabled; v1.1.59 nav/logging behavior retained; " +
-            $"allocation metric source={AllocationCounter.Mode}; fallback mode is reported as heap growth, not exact allocation; " +
-            "Keystone Cow/Bull/Deer prewarm retained; EBR road updates now use NavMeshUpdate.Bounds spatial filtering; " +
-            "soil worker summaries are rate-limited to 10s; bounded incremental-GC slices are armed only after game initialization and enabled above 5.5GiB; " +
-            "long external/load gaps are excluded from freeze reports");
+            "performance build: v1.1.61 soil-GC diagnostic cleanup; based directly on v1.1.59 (temporary v1.1.60 startup gate discarded); " +
+            $"allocation metric source={AllocationCounter.Mode}; fallback mode is reported strictly as heap growth, not allocation; " +
+            "Keystone Cow/Bull/Deer prewarm retained; EBR road updates keep NavMeshUpdate.Bounds spatial filtering; " +
+            "per-worker soil Run profiling removed after diagnosis; lightweight soil task-construction counts added; " +
+            "bounded incremental-GC slices retain v1.1.59 behavior above 5.5GiB when Unity supports them; long external/load gaps are excluded from freeze reports");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -2690,6 +2690,107 @@ internal static class TerrainRecoveryTickLimiter
 
 
 
+internal static class SoilTaskConstructionProfiler
+{
+    private static readonly string[] TypeNames =
+    {
+        "Timberborn.SoilContaminationSystem.ContaminationDataPreparationTask",
+        "Timberborn.SoilContaminationSystem.ContaminationCandidatesCountingTask",
+        "Timberborn.SoilContaminationSystem.ContaminationsUpdateTask",
+        "Timberborn.SoilMoistureSystem.MoistureDataPreparationTask",
+        "Timberborn.SoilMoistureSystem.WateredNeighborsCountingTask",
+        "Timberborn.SoilMoistureSystem.ClusterSaturationCalculationTask",
+        "Timberborn.SoilMoistureSystem.WaterEvaporationCalculationTask",
+        "Timberborn.SoilMoistureSystem.MoistureCalculationTask",
+    };
+
+    private static readonly Dictionary<MethodBase, int> ConstructorToIndex = new();
+    private static readonly long[] Counts = new long[TypeNames.Length];
+    private static long _lastSummaryTicks;
+    private static readonly long SummaryIntervalTicks =
+        10L * System.Diagnostics.Stopwatch.Frequency;
+
+    public static void Patch(Harmony harmony)
+    {
+        var constructors = 0;
+        for (var i = 0; i < TypeNames.Length; i++)
+        {
+            var type = AccessTools.TypeByName(TypeNames[i]);
+            if (type is null)
+            {
+                continue;
+            }
+
+            foreach (var ctor in type.GetConstructors(
+                         BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+            {
+                try
+                {
+                    ConstructorToIndex[ctor] = i;
+                    harmony.Patch(
+                        ctor,
+                        postfix: new HarmonyMethod(
+                            AccessTools.Method(
+                                typeof(SoilTaskConstructionProfiler),
+                                nameof(Constructed)))
+                        {
+                            priority = Priority.Last
+                        });
+                    constructors++;
+                }
+                catch
+                {
+                    ConstructorToIndex.Remove(ctor);
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"soil task-construction profiler installed: {constructors} constructor(s); " +
+            "per-worker Run hooks are disabled to avoid contaminating soil timing");
+    }
+
+    private static void Constructed(MethodBase __originalMethod)
+    {
+        if (ConstructorToIndex.TryGetValue(__originalMethod, out var index))
+        {
+            System.Threading.Interlocked.Increment(ref Counts[index]);
+        }
+    }
+
+    public static void MaybeLogSummary()
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var last = System.Threading.Interlocked.Read(ref _lastSummaryTicks);
+        if (last == 0)
+        {
+            System.Threading.Interlocked.CompareExchange(ref _lastSummaryTicks, now, 0);
+            return;
+        }
+
+        if (now - last < SummaryIntervalTicks ||
+            System.Threading.Interlocked.CompareExchange(ref _lastSummaryTicks, now, last) != last)
+        {
+            return;
+        }
+
+        var parts = new List<string>(TypeNames.Length);
+        for (var i = 0; i < TypeNames.Length; i++)
+        {
+            var count = System.Threading.Interlocked.Exchange(ref Counts[i], 0);
+            if (count != 0)
+            {
+                var shortName = TypeNames[i].Substring(TypeNames[i].LastIndexOf('.') + 1);
+                parts.Add($"{shortName}={count}");
+            }
+        }
+
+        Runtime.Log(
+            "soil task constructions over last ~10s: " +
+            (parts.Count == 0 ? "none" : string.Join(", ", parts)));
+    }
+}
+
 internal static class SoilParallelTaskProfiler
 {
     private sealed class Aggregate
@@ -4685,10 +4786,6 @@ internal static class KeystoneFaunaTemplatePrewarmer
             "Keystone fauna template prewarm starting at end of game initialization, before primary UI");
         TryPrewarm();
 
-        // The game-scene container and SpecTypeCache are fully constructed by this
-        // point. Never request incremental GC slices while Bindito/SpecTypeCache are
-        // reflecting over runtime types during scene creation.
-        IncrementalGcSmoother.EnableAfterGameInitialization();
     }
 
     private static void TryPrewarm()
@@ -5360,12 +5457,12 @@ internal static class SoilMoistureProfiler
             var capacityGrew = queueCapacityAfter > __state.QueueCapacityBefore;
 
             if ((_updateCalls % 300) == 0 ||
-                allocated >= 8L * 1024L * 1024L ||
+                (AllocationCounter.IsCumulative && allocated >= 8L * 1024L * 1024L) ||
                 gcChanged ||
                 capacityGrew)
             {
                 Runtime.Log(
-                    $"SoilMoisture exact allocation: calls={_updateCalls}, " +
+                    $"SoilMoisture {AllocationCounter.MetricLabel}: calls={_updateCalls}, " +
                     $"last={allocated / 1024.0:F1}KiB, " +
                     $"avg={(_updateAllocatedTotal / Math.Max(1.0, _updateCalls)) / 1024.0:F1}KiB, " +
                     $"max={_updateAllocatedMax / 1024.0:F1}KiB, " +
@@ -6107,18 +6204,19 @@ internal static class SoilContaminationDeepProfiler
 
         FreezeDetector.RecordSoilDetail("Tick", elapsed);
         FreezeDetector.RecordSoilGc(gen0, gen1, gen2);
+        SoilTaskConstructionProfiler.MaybeLogSummary();
 
         var elapsedMs =
             elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
         if (elapsedMs >= SlowSoilLogMs ||
-            allocated >= LargeAllocationBytes ||
+            (AllocationCounter.IsCumulative && allocated >= LargeAllocationBytes) ||
             gen0 != 0 ||
             gen1 != 0 ||
             gen2 != 0)
         {
             Runtime.Log(
                 $"SoilContamination tick profile: elapsed={elapsedMs:F1}ms, " +
-                $"allocated={allocated / 1024.0:F1}KiB, GC={gen0}/{gen1}/{gen2}");
+                $"metricDelta={allocated / 1024.0:F1}KiB ({AllocationCounter.MetricLabel}), GC={gen0}/{gen1}/{gen2}");
         }
 
         return __exception;
@@ -6185,12 +6283,12 @@ internal static class SoilContaminationDeepProfiler
             var capacityGrew = queueCapacityAfter > __state.QueueCapacityBefore;
 
             if ((_updateCalls % 300) == 0 ||
-                allocated >= 8L * 1024L * 1024L ||
+                (AllocationCounter.IsCumulative && allocated >= 8L * 1024L * 1024L) ||
                 gcChanged ||
                 capacityGrew)
             {
                 Runtime.Log(
-                    $"SoilContamination exact allocation: calls={_updateCalls}, " +
+                    $"SoilContamination {AllocationCounter.MetricLabel}: calls={_updateCalls}, " +
                     $"last={allocated / 1024.0:F1}KiB, " +
                     $"avg={(_updateAllocatedTotal / Math.Max(1.0, _updateCalls)) / 1024.0:F1}KiB, " +
                     $"max={_updateAllocatedMax / 1024.0:F1}KiB, " +
@@ -6263,6 +6361,7 @@ internal static class AllocationCounter
 
     public static string Mode => _mode;
     public static bool IsCumulative => _cumulative;
+    public static string MetricLabel => _cumulative ? "allocation" : "heap-growth";
 
     public static long Read()
     {
@@ -6338,7 +6437,7 @@ internal static class AllocationTracker
 
         if (bytes >= SpikeBytes)
         {
-            Runtime.Log($"exact allocation spike: {key}={FormatBytes(bytes)} in one call");
+            Runtime.Log($"{AllocationCounter.MetricLabel} spike: {key}={FormatBytes(bytes)} in one call");
         }
     }
 
@@ -6401,9 +6500,9 @@ internal static class AllocationTracker
             .ToArray();
 
         Runtime.Log(
-            "exact allocation profiler: top singleton allocators: " +
+            $"{AllocationCounter.MetricLabel} profiler: top singleton metrics: " +
             (singletonTop.Length == 0 ? "none" : string.Join(", ", singletonTop)) +
-            "; top PlayerLoop segments: " +
+            "; top PlayerLoop metrics: " +
             (loopTop.Length == 0 ? "none" : string.Join(", ", loopTop)));
     }
 
@@ -6655,7 +6754,6 @@ internal static class IncrementalGcSmoother
     private static Func<ulong, bool>? _collectIncremental;
     private static Func<bool>? _isIncremental;
     private static bool _disabled;
-    private static bool _gameplayEnabled;
     private static bool _loggedActive;
     private static bool _loggedUnavailable;
 
@@ -6706,22 +6804,9 @@ internal static class IncrementalGcSmoother
         }
     }
 
-    public static void EnableAfterGameInitialization()
-    {
-        if (_disabled || _collectIncremental is null || _gameplayEnabled)
-        {
-            return;
-        }
-
-        _gameplayEnabled = true;
-        Runtime.Log(
-            "incremental GC smoother armed after GameInitializer.ShowPrimaryUI; " +
-            "scene/container construction is explicitly excluded");
-    }
-
     public static void Pulse(long heapBytes)
     {
-        if (!_gameplayEnabled || _disabled || _collectIncremental is null || heapBytes < StartHeapBytes)
+        if (_disabled || _collectIncremental is null || heapBytes < StartHeapBytes)
         {
             return;
         }
