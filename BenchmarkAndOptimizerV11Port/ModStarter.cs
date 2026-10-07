@@ -183,10 +183,11 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.58 validation/fix pass enabled; v1.1.57 behavior retained; " +
+            "performance build: v1.1.59 GC/nav/logging pass enabled; v1.1.58 behavior retained; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode is reported as heap growth, not exact allocation; " +
-            "Keystone Cow/Bull/Deer prewarm moved to end-of-game initialization before primary UI; " +
-            "soil worker observations are aggregated; long external/load gaps are excluded from freeze reports");
+            "Keystone Cow/Bull/Deer prewarm retained; EBR road updates now use NavMeshUpdate.Bounds spatial filtering; " +
+            "soil worker summaries are rate-limited to 10s; bounded incremental-GC slices are enabled above 5.5GiB; " +
+            "long external/load gaps are excluded from freeze reports");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -1641,6 +1642,7 @@ internal static class ExtendedBuilderReachNavOptimizer
     private static FieldInfo? _boundsMaxY;
     private static PropertyInfo? _terrainCoordinatesProperty;
     private static PropertyInfo? _updatedRoadsProperty;
+    private static PropertyInfo? _updateBoundsProperty;
     private static MemberInfo? _coordX;
     private static MemberInfo? _coordY;
     private static Func<object, object, bool>? _intersects;
@@ -1706,6 +1708,7 @@ internal static class ExtendedBuilderReachNavOptimizer
         var updateType = notifyAll.GetParameters().FirstOrDefault()?.ParameterType;
         _listenerBoundsField = AccessTools.Field(_ebrType, "bounds");
         var updateBounds = updateType is null ? null : AccessTools.Property(updateType, "Bounds");
+        _updateBoundsProperty = updateBounds;
         _terrainCoordinatesProperty =
             updateType is null ? null : AccessTools.Property(updateType, "TerrainCoordinates");
         _updatedRoadsProperty =
@@ -1811,8 +1814,8 @@ internal static class ExtendedBuilderReachNavOptimizer
             _installed = true;
             Runtime.Log(
                 $"Extended Builder Reach nav optimizer installed: {BucketSize}x{BucketSize} " +
-                "spatial buckets + exact terrain-change candidate selection; road updates " +
-                "retain conservative full-list fallback");
+                "spatial buckets + exact terrain/road-bounds candidate selection; " +
+                "exact intersection check retained before notifying listeners");
         }
         catch (Exception ex)
         {
@@ -1908,7 +1911,25 @@ internal static class ExtendedBuilderReachNavOptimizer
             }
         }
 
-        if (!roadsUpdated &&
+        if (roadsUpdated && _updateBoundsProperty is not null)
+        {
+            try
+            {
+                var updateBounds = _updateBoundsProperty.GetValue(__0);
+                if (updateBounds is not null)
+                {
+                    AddCandidatesForBounds(updateBounds);
+                    usedSpatial = true;
+                }
+            }
+            catch
+            {
+                // If a modded update object exposes an unexpected Bounds shape,
+                // preserve correctness by falling back to the full EBR list below.
+            }
+        }
+
+        if (!usedSpatial &&
             _terrainCoordinatesProperty is not null &&
             _coordX is not null &&
             _coordY is not null &&
@@ -2072,6 +2093,43 @@ internal static class ExtendedBuilderReachNavOptimizer
         }
 
         Memberships.Add(listener, membership);
+    }
+
+    private static void AddCandidatesForBounds(object bounds)
+    {
+        if (_boundsMinX is null ||
+            _boundsMinY is null ||
+            _boundsMaxX is null ||
+            _boundsMaxY is null)
+        {
+            return;
+        }
+
+        var minX = Convert.ToInt32(_boundsMinX.GetValue(bounds));
+        var minY = Convert.ToInt32(_boundsMinY.GetValue(bounds));
+        var maxX = Convert.ToInt32(_boundsMaxX.GetValue(bounds));
+        var maxY = Convert.ToInt32(_boundsMaxY.GetValue(bounds));
+
+        for (var bucketY = FloorDiv(minY, BucketSize);
+             bucketY <= FloorDiv(maxY, BucketSize);
+             bucketY++)
+        {
+            for (var bucketX = FloorDiv(minX, BucketSize);
+                 bucketX <= FloorDiv(maxX, BucketSize);
+                 bucketX++)
+            {
+                var key = BucketKey(bucketX, bucketY);
+                if (!SpatialBuckets.TryGetValue(key, out var bucket))
+                {
+                    continue;
+                }
+
+                foreach (var listener in bucket)
+                {
+                    CandidateSet.Add(listener);
+                }
+            }
+        }
     }
 
     private static long BucketKey(int x, int y) =>
@@ -2646,6 +2704,9 @@ internal static class SoilParallelTaskProfiler
     private static readonly object AggregateGate = new();
     private static readonly Dictionary<string, Aggregate> Aggregates = new(StringComparer.Ordinal);
     private static long _completedCalls;
+    private static long _lastSummaryTicks;
+    private static readonly long SummaryIntervalTicks =
+        10L * System.Diagnostics.Stopwatch.Frequency;
 
     private static readonly string[] TypeNames =
     {
@@ -2746,7 +2807,13 @@ internal static class SoilParallelTaskProfiler
             aggregate.MaxMetricBytes = Math.Max(aggregate.MaxMetricBytes, allocated);
             _completedCalls++;
 
-            if ((_completedCalls % 512) == 0)
+            var now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (_lastSummaryTicks == 0)
+            {
+                _lastSummaryTicks = now;
+            }
+
+            if (now - _lastSummaryTicks >= SummaryIntervalTicks)
             {
                 var top = Aggregates
                     .OrderByDescending(pair => pair.Value.TotalMetricBytes)
@@ -2765,10 +2832,11 @@ internal static class SoilParallelTaskProfiler
                     $"{string.Join(", ", top)}");
 
                 Aggregates.Clear();
+                _lastSummaryTicks = now;
             }
         }
 
-        if (elapsedMs >= 20.0 || allocated >= 1024L * 1024L)
+        if (elapsedMs >= 100.0 || allocated >= 8L * 1024L * 1024L)
         {
             Runtime.Log(
                 $"soil worker task: {name}.Run elapsed={elapsedMs:F1}ms, " +
@@ -6572,12 +6640,12 @@ internal static class ManagedHeapSampler
 
 internal static class IncrementalGcSmoother
 {
-    private const long StartHeapBytes = 7L * 1024L * 1024L * 1024L;
-    private const long HighHeapBytes = 8500L * 1024L * 1024L;
-    private const long VeryHighHeapBytes = 9500L * 1024L * 1024L;
-    private const ulong NormalBudgetNanoseconds = 1_000_000UL;
-    private const ulong HighBudgetNanoseconds = 2_000_000UL;
-    private const ulong VeryHighBudgetNanoseconds = 3_000_000UL;
+    private const long StartHeapBytes = 5632L * 1024L * 1024L;
+    private const long HighHeapBytes = 6144L * 1024L * 1024L;
+    private const long VeryHighHeapBytes = 6656L * 1024L * 1024L;
+    private const ulong NormalBudgetNanoseconds = 500_000UL;
+    private const ulong HighBudgetNanoseconds = 1_000_000UL;
+    private const ulong VeryHighBudgetNanoseconds = 2_000_000UL;
 
     private static Func<ulong, bool>? _collectIncremental;
     private static Func<bool>? _isIncremental;
@@ -6624,7 +6692,7 @@ internal static class IncrementalGcSmoother
 
             Runtime.Log(
                 "incremental GC smoother installed: no forced full collections; " +
-                "when managed heap exceeds 7GiB, request bounded 1/2/3ms incremental slices");
+                "when managed heap exceeds 5.5GiB, request bounded 0.5/1/2ms incremental slices");
         }
         catch (Exception ex)
         {
@@ -6901,6 +6969,7 @@ internal static class FreezeDetector
 
         var heapBytes = GC.GetTotalMemory(false);
         ManagedHeapSampler.FrameBoundary(heapBytes);
+        IncrementalGcSmoother.Pulse(heapBytes);
     }
 
     public static void BeginPhase(string phaseName, long now)
@@ -9409,6 +9478,7 @@ internal static class Runtime
         _benchmarkCompleted = true;
         _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
+        IncrementalGcSmoother.Initialize();
         FreezeDetectorPatcher.Patch();
         TimberPhysicsCatchUpLimiterPatcher.Patch(harmony);
         TimberPhysicsTerrainColliderMergerPatcher.Patch(harmony);
