@@ -182,11 +182,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.62 soil-GC relief; based directly on v1.1.59 behavior; " +
+            "performance build: v1.1.63 large-EBR/soil-GC relief; based directly on v1.1.62; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode is reported strictly as heap growth, not allocation; " +
-            "Keystone Cow/Bull/Deer prewarm retained; EBR road updates keep NavMeshUpdate.Bounds spatial filtering; " +
-            "soil construction diagnostics removed after confirming low construction counts; " +
-            "one-time SoilContaminationService interval=2 migration reduces contamination recomputation/GC pressure while leaving moisture/water cadence unchanged; " +
+            "Keystone Cow/Bull/Deer prewarm retained; EBR small updates stay synchronous while >=1024-candidate updates are budgeted across frames; " +
+            "SoilContaminationService interval=4 migration halves v1.1.62 contamination cadence again while moisture/water cadence remains unchanged; " +
             "bounded incremental-GC slices retain v1.1.59 behavior above 5.5GiB when Unity supports them; long external/load gaps are excluded from freeze reports");
     }
 
@@ -1632,6 +1631,9 @@ internal static class ExtendedBuilderReachNavOptimizer
     private const string RegistryTypeName =
         "Timberborn.Navigation.NavMeshListenerEntityRegistry";
     private const int BucketSize = 8;
+    private const int LargeUpdateCandidateThreshold = 1024;
+    private const int DeferredDrainMaxListenersPerFrame = 256;
+    private const double DeferredDrainBudgetMs = 8.0;
 
     private static Type? _ebrType;
     private static FieldInfo? _registryListenersField;
@@ -1649,10 +1651,14 @@ internal static class ExtendedBuilderReachNavOptimizer
     private static Action<object, object>? _notify;
 
     private static readonly List<object> EbrListeners = new();
+    private static readonly HashSet<object> ActiveListeners = new(ReferenceComparer.Instance);
     private static readonly Dictionary<long, List<object>> SpatialBuckets = new();
     private static readonly ConditionalWeakTable<object, BucketMembership> Memberships = new();
     private static readonly ConditionalWeakTable<object, MigrationMarker> MigratedRegistries = new();
     private static readonly HashSet<object> CandidateSet = new(ReferenceComparer.Instance);
+    private static readonly Queue<PendingBatch> DeferredBatches = new();
+    private static int _deferredCandidates;
+    private static bool _deferredModeLogged;
     private static bool _installed;
 
     private sealed class MigrationMarker
@@ -1662,6 +1668,26 @@ internal static class ExtendedBuilderReachNavOptimizer
     private sealed class BucketMembership
     {
         public List<long> Keys { get; } = new();
+    }
+
+    private sealed class PendingBatch
+    {
+        public PendingBatch(object update, object[] candidates, int total, int scanned, bool usedSpatial)
+        {
+            Update = update;
+            Candidates = candidates;
+            Total = total;
+            Scanned = scanned;
+            UsedSpatial = usedSpatial;
+        }
+
+        public object Update { get; }
+        public object[] Candidates { get; }
+        public int Total { get; }
+        public int Scanned { get; }
+        public bool UsedSpatial { get; }
+        public int Index { get; set; }
+        public int Notified { get; set; }
     }
 
     private sealed class ReferenceComparer : IEqualityComparer<object>
@@ -1815,6 +1841,8 @@ internal static class ExtendedBuilderReachNavOptimizer
             Runtime.Log(
                 $"Extended Builder Reach nav optimizer installed: {BucketSize}x{BucketSize} " +
                 "spatial buckets + exact terrain/road-bounds candidate selection; " +
+                $"updates with >= {LargeUpdateCandidateThreshold} EBR candidates are deferred " +
+                $"and drained at <= {DeferredDrainMaxListenersPerFrame} listeners / {DeferredDrainBudgetMs:F0}ms per frame; " +
                 "exact intersection check retained before notifying listeners");
         }
         catch (Exception ex)
@@ -1961,30 +1989,72 @@ internal static class ExtendedBuilderReachNavOptimizer
             usedSpatial = coordinateCount > 0;
         }
 
+        object[]? deferredCandidates = null;
+
         if (usedSpatial)
         {
             scanned = CandidateSet.Count;
-            foreach (var listener in CandidateSet)
+            if (scanned >= LargeUpdateCandidateThreshold)
             {
-                if (_intersects(listener, __0))
+                deferredCandidates = CandidateSet.ToArray();
+            }
+            else
+            {
+                foreach (var listener in CandidateSet)
                 {
-                    _notify(listener, __0);
-                    notified++;
+                    if (_intersects(listener, __0))
+                    {
+                        _notify(listener, __0);
+                        notified++;
+                    }
                 }
             }
         }
         else
         {
             scanned = total;
-            for (var i = 0; i < EbrListeners.Count; i++)
+            if (scanned >= LargeUpdateCandidateThreshold)
             {
-                var listener = EbrListeners[i];
-                if (_intersects(listener, __0))
+                deferredCandidates = EbrListeners.ToArray();
+            }
+            else
+            {
+                for (var i = 0; i < EbrListeners.Count; i++)
                 {
-                    _notify(listener, __0);
-                    notified++;
+                    var listener = EbrListeners[i];
+                    if (_intersects(listener, __0))
+                    {
+                        _notify(listener, __0);
+                        notified++;
+                    }
                 }
             }
+        }
+
+        if (deferredCandidates is not null)
+        {
+            DeferredBatches.Enqueue(
+                new PendingBatch(__0, deferredCandidates, total, scanned, usedSpatial));
+            _deferredCandidates += deferredCandidates.Length;
+
+            if (!_deferredModeLogged)
+            {
+                _deferredModeLogged = true;
+                Runtime.Log(
+                    $"EBR large-update deferral activated: threshold={LargeUpdateCandidateThreshold}, " +
+                    $"per-frame budget={DeferredDrainMaxListenersPerFrame} listeners/{DeferredDrainBudgetMs:F0}ms");
+            }
+
+            Runtime.Log(
+                $"EBR large nav update queued: registered={total}, candidates={scanned}, " +
+                $"pendingBatches={DeferredBatches.Count}, pendingCandidates={_deferredCandidates}");
+
+            FreezeDetector.RecordNavigationDetail(
+                usedSpatial
+                    ? $"EBR.DeferredQueue[{total}~{scanned}]"
+                    : $"EBR.DeferredFullQueue[{total}]",
+                System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            return;
         }
 
         FreezeDetector.RecordNavigationDetail(
@@ -1994,17 +2064,80 @@ internal static class ExtendedBuilderReachNavOptimizer
             System.Diagnostics.Stopwatch.GetTimestamp() - started);
     }
 
+    public static void DrainDeferred()
+    {
+        if (!_installed ||
+            _intersects is null ||
+            _notify is null ||
+            DeferredBatches.Count == 0)
+        {
+            return;
+        }
+
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var budgetTicks = (long)Math.Ceiling(
+            DeferredDrainBudgetMs * System.Diagnostics.Stopwatch.Frequency / 1000.0);
+        var processed = 0;
+        var notified = 0;
+        var failed = 0;
+
+        while (DeferredBatches.Count > 0 &&
+               processed < DeferredDrainMaxListenersPerFrame &&
+               System.Diagnostics.Stopwatch.GetTimestamp() - started < budgetTicks)
+        {
+            var batch = DeferredBatches.Peek();
+
+            if (batch.Index >= batch.Candidates.Length)
+            {
+                DeferredBatches.Dequeue();
+                Runtime.Log(
+                    $"EBR deferred batch complete: registered={batch.Total}, scanned={batch.Scanned}, " +
+                    $"notified={batch.Notified}, remainingBatches={DeferredBatches.Count}, " +
+                    $"remainingCandidates={_deferredCandidates}");
+                continue;
+            }
+
+            var listener = batch.Candidates[batch.Index++];
+            processed++;
+            _deferredCandidates = Math.Max(0, _deferredCandidates - 1);
+
+            if (!ActiveListeners.Contains(listener))
+            {
+                continue;
+            }
+
+            try
+            {
+                if (_intersects(listener, batch.Update))
+                {
+                    _notify(listener, batch.Update);
+                    batch.Notified++;
+                    notified++;
+                }
+            }
+            catch (Exception ex)
+            {
+                failed++;
+                Runtime.Log(
+                    $"warning: deferred EBR notification failed for {listener.GetType().FullName}: " +
+                    $"{ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        var elapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+        FreezeDetector.RecordNavigationDetail(
+            $"EBR.DeferredDrain[{processed}->{notified};fail={failed};pending={_deferredCandidates}]",
+            elapsedTicks);
+    }
+
     private static bool IsEbr(object listener) =>
         _ebrType is not null && listener.GetType() == _ebrType;
 
     private static void Add(object listener)
     {
-        for (var i = 0; i < EbrListeners.Count; i++)
+        if (!ActiveListeners.Add(listener))
         {
-            if (ReferenceEquals(EbrListeners[i], listener))
-            {
-                return;
-            }
+            return;
         }
 
         EbrListeners.Add(listener);
@@ -2013,6 +2146,8 @@ internal static class ExtendedBuilderReachNavOptimizer
 
     private static void Remove(object listener)
     {
+        ActiveListeners.Remove(listener);
+
         for (var i = EbrListeners.Count - 1; i >= 0; i--)
         {
             if (ReferenceEquals(EbrListeners[i], listener))
@@ -7073,6 +7208,7 @@ internal static class FreezeDetector
         var heapBytes = GC.GetTotalMemory(false);
         ManagedHeapSampler.FrameBoundary(heapBytes);
         IncrementalGcSmoother.Pulse(heapBytes);
+        ExtendedBuilderReachNavOptimizer.DrainDeferred();
     }
 
     public static void BeginPhase(string phaseName, long now)
@@ -10581,12 +10717,13 @@ internal static class Runtime
 
             loaded.Normalize();
             var soilGcReliefApplied = ApplySoilContaminationGcReliefMigration(loaded);
+            var soilGcReliefV2Applied = ApplySoilContaminationGcReliefV2Migration(loaded);
             var protectedValuesCorrected = NormalizeProtectedIntervals(loaded);
             _settings = loaded;
             _settingsGeneration++;
             _configWriteUtc = writeUtc;
 
-            if (protectedValuesCorrected || soilGcReliefApplied)
+            if (protectedValuesCorrected || soilGcReliefApplied || soilGcReliefV2Applied)
             {
                 SaveSettings(_settings);
                 if (protectedValuesCorrected)
@@ -10595,8 +10732,14 @@ internal static class Runtime
                 }
                 if (soilGcReliefApplied)
                 {
-                    Log("v1.1.62 soil-GC relief applied once: SoilContaminationService interval=2; " +
-                        "user can change it normally in optimizer settings and it will not be forced again");
+                    Log("v1.1.62 soil-GC relief migration applied as compatibility step");
+                }
+                if (soilGcReliefV2Applied)
+                {
+                    var interval = GetInterval("Timberborn.SoilContaminationSystem.SoilContaminationService");
+                    Log(
+                        $"v1.1.63 soil-GC relief migration finalized: SoilContaminationService interval={interval}; " +
+                        "only the v1.1.62 default value of 2 is upgraded to 4; other user-selected values are preserved");
                 }
             }
 
@@ -10637,6 +10780,36 @@ internal static class Runtime
         }
 
         settings.SoilContaminationGcReliefApplied = true;
+        return true;
+    }
+
+    private static bool ApplySoilContaminationGcReliefV2Migration(Settings settings)
+    {
+        if (settings.SoilContaminationGcReliefV2Applied)
+        {
+            return false;
+        }
+
+        const string fullName = "Timberborn.SoilContaminationSystem.SoilContaminationService";
+        const string shortName = "SoilContaminationService";
+
+        var existingKey = settings.Intervals.Keys.FirstOrDefault(key =>
+            string.Equals(key, fullName, StringComparison.Ordinal) ||
+            string.Equals(key, shortName, StringComparison.Ordinal) ||
+            key.EndsWith("." + shortName, StringComparison.Ordinal));
+
+        // Upgrade only the v1.1.62 default. A user who already changed the value
+        // explicitly keeps that value.
+        if (existingKey is not null && settings.Intervals[existingKey] == 2)
+        {
+            settings.Intervals[existingKey] = 4;
+        }
+        else if (existingKey is null && !settings.SoilContaminationGcReliefApplied)
+        {
+            settings.Intervals[fullName] = 4;
+        }
+
+        settings.SoilContaminationGcReliefV2Applied = true;
         return true;
     }
 
@@ -10763,8 +10936,11 @@ internal sealed class Settings
     public int ReloadSeconds { get; set; } = 2;
     public bool WriteDiscoveredTypes { get; set; } = true;
 
-    // One-time v1.1.62 migration. Once true, user changes to the contamination interval are never overridden.
+    // One-time v1.1.62 migration.
     public bool SoilContaminationGcReliefApplied { get; set; } = false;
+
+    // One-time v1.1.63 migration. Only upgrades the previous default of 2 -> 4.
+    public bool SoilContaminationGcReliefV2Applied { get; set; } = false;
 
     // 0 = disabled. Set e.g. 30 to benchmark the first 30 real seconds after loading a game.
     public int BenchmarkSeconds { get; set; } = 0;
@@ -10780,10 +10956,11 @@ internal sealed class Settings
         ReloadSeconds = 2,
         WriteDiscoveredTypes = true,
         SoilContaminationGcReliefApplied = true,
+        SoilContaminationGcReliefV2Applied = true,
         BenchmarkSeconds = 0,
         Intervals = new Dictionary<string, int>(StringComparer.Ordinal)
         {
-            ["Timberborn.SoilContaminationSystem.SoilContaminationService"] = 2,
+            ["Timberborn.SoilContaminationSystem.SoilContaminationService"] = 4,
             ["ConstructionSite"] = 1,
             ["ResourceCountingService"] = 1,
             ["BehaviorManager"] = 1,
