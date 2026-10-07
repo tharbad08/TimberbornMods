@@ -183,10 +183,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.59 GC/nav/logging pass enabled; v1.1.58 behavior retained; " +
+            "performance build: v1.1.60 safe-GC startup gate enabled; v1.1.59 nav/logging behavior retained; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode is reported as heap growth, not exact allocation; " +
             "Keystone Cow/Bull/Deer prewarm retained; EBR road updates now use NavMeshUpdate.Bounds spatial filtering; " +
-            "soil worker summaries are rate-limited to 10s; bounded incremental-GC slices are enabled above 5.5GiB; " +
+            "soil worker summaries are rate-limited to 10s; bounded incremental-GC slices are armed only after game initialization and enabled above 5.5GiB; " +
             "long external/load gaps are excluded from freeze reports");
     }
 
@@ -4684,6 +4684,11 @@ internal static class KeystoneFaunaTemplatePrewarmer
         Runtime.Log(
             "Keystone fauna template prewarm starting at end of game initialization, before primary UI");
         TryPrewarm();
+
+        // The game-scene container and SpecTypeCache are fully constructed by this
+        // point. Never request incremental GC slices while Bindito/SpecTypeCache are
+        // reflecting over runtime types during scene creation.
+        IncrementalGcSmoother.EnableAfterGameInitialization();
     }
 
     private static void TryPrewarm()
@@ -6650,6 +6655,7 @@ internal static class IncrementalGcSmoother
     private static Func<ulong, bool>? _collectIncremental;
     private static Func<bool>? _isIncremental;
     private static bool _disabled;
+    private static bool _gameplayEnabled;
     private static bool _loggedActive;
     private static bool _loggedUnavailable;
 
@@ -6700,9 +6706,22 @@ internal static class IncrementalGcSmoother
         }
     }
 
+    public static void EnableAfterGameInitialization()
+    {
+        if (_disabled || _collectIncremental is null || _gameplayEnabled)
+        {
+            return;
+        }
+
+        _gameplayEnabled = true;
+        Runtime.Log(
+            "incremental GC smoother armed after GameInitializer.ShowPrimaryUI; " +
+            "scene/container construction is explicitly excluded");
+    }
+
     public static void Pulse(long heapBytes)
     {
-        if (_disabled || _collectIncremental is null || heapBytes < StartHeapBytes)
+        if (!_gameplayEnabled || _disabled || _collectIncremental is null || heapBytes < StartHeapBytes)
         {
             return;
         }
