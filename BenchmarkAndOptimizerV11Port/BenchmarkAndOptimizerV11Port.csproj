@@ -6,8 +6,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <AssemblyName>BenchmarkAndOptimizerV11</AssemblyName>
     <RootNamespace>BenchmarkAndOptimizerV11</RootNamespace>
-    <AssemblyVersion>1.1.65.0</AssemblyVersion>
-    <FileVersion>1.1.65.0</FileVersion>
+    <AssemblyVersion>1.1.66.0</AssemblyVersion>
+    <FileVersion>1.1.66.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="References/**/*.cs" />
