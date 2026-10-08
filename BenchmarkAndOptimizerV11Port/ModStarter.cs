@@ -177,15 +177,16 @@ internal static class FreezeDetectorPatcher
         BlockPlacementDetailProfiler.Patch(FreezeHarmony);
         LevelVisibilityHandlerProfiler.Patch(FreezeHarmony);
         SuperCursorRefreshSmoother.Patch(FreezeHarmony);
+        MonoBehaviourLateUpdateProfiler.Patch(FreezeHarmony);
 
         _patched = true;
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.64 low-overhead GC diagnostics; v1.1.63 gameplay behavior retained; " +
+            "performance build: v1.1.65 sampled late-update / GC-phase diagnostics; v1.1.64 gameplay behavior retained; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines now include pre/post-frame heap in fallback mode; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; MonoBehaviour LateUpdate sampled 1/8 frames above 5GiB; " +
             "Keystone prewarm, EBR large-update budgeting, SoilContaminationService interval=4, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
@@ -4654,6 +4655,12 @@ internal static class LateComponentProfiler
 
 internal static class MonoBehaviourLateUpdateProfiler
 {
+    private const long ArmHeapBytes = 5L * 1024L * 1024L * 1024L;
+    private static bool _armed;
+    private static int _frameIndex;
+    public static void ArmForUpcomingFrame(long heapBytes) =>
+        _armed = heapBytes >= ArmHeapBytes && ((++_frameIndex & 7) == 0);
+
     private static readonly HashSet<MethodBase> PatchedMethods = new();
     private static readonly Dictionary<string, long> FrameTicks = new(StringComparer.Ordinal);
 
@@ -4730,20 +4737,20 @@ internal static class MonoBehaviourLateUpdateProfiler
         }
 
         Runtime.Log(
-            $"MonoBehaviour LateUpdate profiler installed: {PatchedMethods.Count} managed LateUpdate method(s)");
+            $"sampled MonoBehaviour LateUpdate profiler installed: {PatchedMethods.Count} managed LateUpdate method(s)");
     }
 
     private static void Prefix(object __instance, out Sample __state)
     {
         __state = default;
-        if (Runtime.IsBenchmarking || __instance is null)
+        if (!_armed || Runtime.IsBenchmarking || __instance is null)
         {
             return;
         }
 
         var type = __instance.GetType();
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
-        __state.TypeName = type.FullName ?? type.Name;
+        __state.TypeName = "MonoLate." + (type.FullName ?? type.Name);
     }
 
     private static Exception? Finalizer(Exception? __exception, Sample __state)
@@ -4754,7 +4761,7 @@ internal static class MonoBehaviourLateUpdateProfiler
         }
 
         var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
-        if (elapsed > 0)
+        if (elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency >= 0.25)
         {
             FrameTicks.TryGetValue(__state.TypeName, out var existing);
             FrameTicks[__state.TypeName] = existing + elapsed;
@@ -7046,6 +7053,7 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> LateBehaviourTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, KeystoneProfileRecord> KeystoneProfiles = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PlayerLoopMarkers = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, int> PlayerLoopGen2Counts = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> SoilDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> TargetDetailTicks = new(StringComparer.Ordinal);
@@ -7112,6 +7120,7 @@ internal static class FreezeDetector
             LateBehaviourTicks.Clear();
             KeystoneProfiles.Clear();
             PlayerLoopMarkers.Clear();
+            PlayerLoopGen2Counts.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             TargetDetailTicks.Clear();
@@ -7134,6 +7143,7 @@ internal static class FreezeDetector
 
     public static void FrameBoundary(long now, string nextPhase)
     {
+        MonoBehaviourLateUpdateProfiler.FlushFrame();
         string? freezeLine = null;
 
         lock (Gate)
@@ -7208,6 +7218,7 @@ internal static class FreezeDetector
             LateBehaviourTicks.Clear();
             KeystoneProfiles.Clear();
             PlayerLoopMarkers.Clear();
+            PlayerLoopGen2Counts.Clear();
             PhaseGapTicks.Clear();
             SoilDetailTicks.Clear();
             TargetDetailTicks.Clear();
@@ -7229,6 +7240,7 @@ internal static class FreezeDetector
         }
 
         var heapBytes = GC.GetTotalMemory(false);
+        MonoBehaviourLateUpdateProfiler.ArmForUpcomingFrame(heapBytes);
         ManagedHeapSampler.FrameBoundary(heapBytes);
         IncrementalGcSmoother.Pulse(heapBytes);
         ExtendedBuilderReachNavOptimizer.DrainDeferred();
@@ -7419,6 +7431,7 @@ internal static class FreezeDetector
 
     public static void RecordPlayerLoopMarker(string name, long timestamp)
     {
+        var gen2Count = GC.CollectionCount(2);
         lock (Gate)
         {
             if (!_initialized || _frameStartTicks == 0 || timestamp <= 0)
@@ -7427,6 +7440,7 @@ internal static class FreezeDetector
             }
 
             PlayerLoopMarkers[name] = timestamp;
+            PlayerLoopGen2Counts[name] = gen2Count;
         }
     }
 
@@ -7635,6 +7649,27 @@ internal static class FreezeDetector
 
         var playerLoop = BuildPlayerLoopText();
 
+        var gcMarkerText = "outside instrumented markers";
+        if (gc2Delta > 0 && PlayerLoopGen2Counts.Count > 1)
+        {
+            var orderedGcMarkers = PlayerLoopMarkers
+                .OrderBy(pair => pair.Value)
+                .Where(pair => PlayerLoopGen2Counts.ContainsKey(pair.Key))
+                .ToArray();
+            var changed = new List<string>();
+            for (var index = 1; index < orderedGcMarkers.Length; index++)
+            {
+                var prior = orderedGcMarkers[index - 1].Key;
+                var current = orderedGcMarkers[index].Key;
+                var delta = PlayerLoopGen2Counts[current] - PlayerLoopGen2Counts[prior];
+                if (delta > 0)
+                    changed.Add($"{prior}->{current}:+{delta}");
+            }
+
+            if (changed.Count != 0)
+                gcMarkerText = string.Join(", ", changed.Take(4));
+        }
+
         var phaseGaps = PhaseGapTicks
             .OrderByDescending(x => x.Value)
             .Take(TopSystemCount)
@@ -7668,6 +7703,7 @@ internal static class FreezeDetector
             $"heap={FormatBytes(GC.GetTotalMemory(false))}; " +
             heapTransitionText +
             $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
+            (gc2Delta > 0 ? $"gen2 PlayerLoop transition: {gcMarkerText}; " : string.Empty) +
             $"phase gaps: {phaseGapText}; " +
             $"top update singletons: {topUpdateText}; " +
             $"top late-update singletons: {topLateUpdateText}; " +
