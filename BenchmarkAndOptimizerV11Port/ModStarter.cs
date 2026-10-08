@@ -182,11 +182,11 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.63 large-EBR/soil-GC relief; based directly on v1.1.62; " +
-            $"allocation metric source={AllocationCounter.Mode}; fallback mode is reported strictly as heap growth, not allocation; " +
-            "Keystone Cow/Bull/Deer prewarm retained; EBR small updates stay synchronous while >=1024-candidate updates are budgeted across frames; " +
-            "SoilContaminationService interval=4 migration halves v1.1.62 contamination cadence again while moisture/water cadence remains unchanged; " +
-            "bounded incremental-GC slices retain v1.1.59 behavior above 5.5GiB when Unity supports them; long external/load gaps are excluded from freeze reports");
+            "performance build: v1.1.64 low-overhead GC diagnostics; v1.1.63 gameplay behavior retained; " +
+            $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
+            "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
+            "GC freeze lines now include pre/post-frame heap in fallback mode; " +
+            "Keystone prewarm, EBR large-update budgeting, SoilContaminationService interval=4, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -6548,13 +6548,15 @@ internal static class AllocationCounter
 
 internal static class AllocationTracker
 {
-    private const int ReportEveryFrames = 300;
     private const int TopCount = 12;
     private const long SpikeBytes = 1024L * 1024L;
+    private const long FallbackSpikeBytes = 32L * 1024L * 1024L;
+    private static readonly long ReportIntervalTicks =
+        10L * System.Diagnostics.Stopwatch.Frequency;
 
     private static readonly Dictionary<string, long> SingletonAllocations = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> LoopAllocations = new(StringComparer.Ordinal);
-    private static int _frames;
+    private static long _lastReportTicks;
     private static string? _lastLoopMarker;
     private static long _lastLoopAllocated;
 
@@ -6569,7 +6571,8 @@ internal static class AllocationTracker
         SingletonAllocations.TryGetValue(key, out var existing);
         SingletonAllocations[key] = existing + bytes;
 
-        if (bytes >= SpikeBytes)
+        if ((AllocationCounter.IsCumulative && bytes >= SpikeBytes) ||
+            (!AllocationCounter.IsCumulative && bytes >= FallbackSpikeBytes))
         {
             Runtime.Log($"{AllocationCounter.MetricLabel} spike: {key}={FormatBytes(bytes)} in one call");
         }
@@ -6607,13 +6610,20 @@ internal static class AllocationTracker
 
         _lastLoopMarker = null;
         _lastLoopAllocated = 0;
-        _frames++;
-        if (_frames < ReportEveryFrames)
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_lastReportTicks == 0)
+        {
+            _lastReportTicks = now;
+            return;
+        }
+
+        if (now - _lastReportTicks < ReportIntervalTicks)
         {
             return;
         }
 
-        _frames = 0;
+        _lastReportTicks = now;
         Report();
         SingletonAllocations.Clear();
         LoopAllocations.Clear();
@@ -6666,8 +6676,9 @@ internal static class ManagedHeapSampler
 {
     private const long ArmHeapBytes = 6L * 1024L * 1024L * 1024L;
     private const int SampleEveryFrames = 30;
-    private const int ReportEveryFrames = 300;
     private const int TopCount = 10;
+    private static readonly long ReportIntervalTicks =
+        10L * System.Diagnostics.Stopwatch.Frequency;
 
     public readonly struct Sample
     {
@@ -6691,7 +6702,7 @@ internal static class ManagedHeapSampler
     private static readonly Dictionary<string, long> PlayerLoopGrowth = new(StringComparer.Ordinal);
     private static int _frame;
     private static int _sampledFrames;
-    private static int _framesSinceReport;
+    private static long _lastReportTicks;
     private static bool _sampleThisFrame;
     private static string? _lastLoopMarker;
     private static long _lastLoopHeap;
@@ -6812,12 +6823,22 @@ internal static class ManagedHeapSampler
         _lastLoopHeap = 0;
 
         _frame++;
-        _framesSinceReport++;
 
-        if (_framesSinceReport >= ReportEveryFrames)
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_lastReportTicks == 0)
         {
-            Report(heapBytes);
-            _framesSinceReport = 0;
+            _lastReportTicks = now;
+        }
+        else if (now - _lastReportTicks >= ReportIntervalTicks)
+        {
+            if (heapBytes >= ArmHeapBytes ||
+                SingletonGrowth.Count != 0 ||
+                PlayerLoopGrowth.Count != 0)
+            {
+                Report(heapBytes);
+            }
+
+            _lastReportTicks = now;
             _sampledFrames = 0;
             SingletonGrowth.Clear();
             PlayerLoopGrowth.Clear();
@@ -7152,7 +7173,9 @@ internal static class FreezeDetector
                             nextGc0 - _gc0,
                             nextGc1 - _gc1,
                             nextGc2 - _gc2,
-                            allocatedBytesDelta);
+                            allocatedBytesDelta,
+                            _totalAllocatedBytes,
+                            nextAllocatedBytes);
                     }
                     else
                     {
@@ -7471,7 +7494,9 @@ internal static class FreezeDetector
         int gc0Delta,
         int gc1Delta,
         int gc2Delta,
-        long allocatedBytesDelta)
+        long allocatedBytesDelta,
+        long metricBeforeFrame,
+        long metricAfterFrame)
     {
         var severity = elapsedMs >= FreezeFrameMs
             ? "FREEZE"
@@ -7628,6 +7653,11 @@ internal static class FreezeDetector
             .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms").ToArray();
         var targetDetailText = targetDetails.Length == 0 ? "none" : string.Join(", ", targetDetails);
 
+        var heapTransitionText =
+            !AllocationCounter.IsCumulative && (gc0Delta != 0 || gc1Delta != 0 || gc2Delta != 0)
+                ? $"heapBeforeFrame={FormatBytes(metricBeforeFrame)}, heapAfterFrame={FormatBytes(metricAfterFrame)}; "
+                : string.Empty;
+
         return
             $"{severity} frame={_frameNumber} elapsed={elapsedMs:F1}ms; " +
             $"dispatch: UpdateSingletons={ToMs(updateTicks):F1}ms, " +
@@ -7636,6 +7666,7 @@ internal static class FreezeDetector
             $"unattributed={ToMs(unattributedTicks):F1}ms; " +
             $"physics={ToMs(physicsTicks):F1}ms; " +
             $"heap={FormatBytes(GC.GetTotalMemory(false))}; " +
+            heapTransitionText +
             $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
             $"phase gaps: {phaseGapText}; " +
             $"top update singletons: {topUpdateText}; " +
