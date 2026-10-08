@@ -172,6 +172,7 @@ internal static class FreezeDetectorPatcher
         InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
         InputProcessorDetailProfiler.Patch(FreezeHarmony);
         EbbAndFlowDetailProfiler.Patch(FreezeHarmony);
+        InstantiationHotspotProfiler.Patch(FreezeHarmony);
         HotInputDetailProfiler.Patch(FreezeHarmony);
         PreviewServiceMemberDetailProfiler.Patch(FreezeHarmony);
         BlockPlacementDetailProfiler.Patch(FreezeHarmony);
@@ -183,10 +184,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.65 sampled late-update / GC-phase diagnostics; v1.1.64 gameplay behavior retained; " +
+            "performance build: v1.1.66 preview/sludge shared-instantiation breakdown; v1.1.65 gameplay behavior retained; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; MonoBehaviour LateUpdate sampled 1/8 frames above 5GiB; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; MonoBehaviour LateUpdate sampled 1/8 frames above 5GiB; slow block-preview/Ebb sludge instantiation measured by component/type; " +
             "Keystone prewarm, EBR large-update budgeting, SoilContaminationService interval=4, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
@@ -2631,6 +2632,149 @@ internal static class FaunaRecipeLookupCachePatcher
     }
 }
 
+internal static class InstantiationHotspotProfiler
+{
+    // Targeted diagnostics only. Neither placement nor any callback is skipped or delayed.
+    // Both scopes are main-thread input or simulation calls; keep Ebb nesting thread-local.
+    [ThreadStatic] private static int _sludgeDepth;
+    private const double MinimumMs = 1.0;
+    private static readonly Dictionary<MethodBase, string> Labels = new();
+
+    private readonly struct Timing
+    {
+        public Timing(long started, object? arg0, string? scope)
+        {
+            Started = started;
+            Arg0 = arg0;
+            Scope = scope;
+        }
+
+        public long Started { get; }
+        public object? Arg0 { get; }
+        public string? Scope { get; }
+    }
+
+    public static void EnterSludgePlacement() => _sludgeDepth++;
+    public static void ExitSludgePlacement()
+    {
+        if (_sludgeDepth > 0) _sludgeDepth--;
+    }
+
+    public static void Patch(Harmony harmony)
+    {
+        var targets = new (string Type, string[] Methods)[]
+        {
+            ("Timberborn.TemplateInstantiation.TemplateInstantiator",
+                new[] { "Instantiate", "GetCachedTemplate" }),
+            ("Timberborn.BaseComponentSystem.BaseInstantiator",
+                new[] { "InstantiateInactive", "InstantiateComponents", "InstantiateComponent" }),
+            ("Timberborn.BaseComponentSystem.ComponentCache",
+                new[] { "Initialize" }),
+            ("Timberborn.EntitySystem.EntityService",
+                new[] { "Instantiate" }),
+            ("Timberborn.BlockSystem.BlockObjectFactory",
+                new[] { "CreateFinished", "CreateUnfinished" }),
+            ("Timberborn.BlueprintPrefabSystem.BlueprintPrefabConverter",
+                new[] { "Convert" }),
+            ("Timberborn.PrefabOptimization.PrefabOptimizationChain",
+                new[] { "Process", "ProcessPrefab" })
+        };
+
+        foreach (var target in targets)
+        {
+            var type = AccessTools.TypeByName(target.Type);
+            if (type is null) continue;
+
+            const BindingFlags flags =
+                BindingFlags.Public | BindingFlags.NonPublic |
+                BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+            foreach (var method in type.GetMethods(flags))
+            {
+                if (!target.Methods.Contains(method.Name) ||
+                    method.IsAbstract || method.ContainsGenericParameters ||
+                    method.GetParameters().Any(p => p.ParameterType.IsByRef))
+                    continue;
+
+                var hasArg0 = method.GetParameters().Length != 0;
+                try
+                {
+                    var label = type.Name + "." + method.Name;
+                    Labels[method] = label;
+                    harmony.Patch(
+                        method,
+                        prefix: new HarmonyMethod(
+                            AccessTools.Method(
+                                typeof(InstantiationHotspotProfiler),
+                                hasArg0 ? nameof(PrefixWithFirstArg) : nameof(PrefixNoArgs)))
+                        { priority = Priority.First },
+                        finalizer: new HarmonyMethod(
+                            AccessTools.Method(typeof(InstantiationHotspotProfiler), nameof(Finalizer)))
+                        { priority = Priority.Last });
+                }
+                catch (Exception ex)
+                {
+                    Labels.Remove(method);
+                    Runtime.Log(
+                        $"warning: targeted instantiation timing unavailable for {type.Name}.{method.Name}: " +
+                        ex.GetType().Name);
+                }
+            }
+        }
+
+        Runtime.Log(
+            $"placement/sludge instantiation hotspot profiler installed: {Labels.Count} effective methods; " +
+            "records only calls >=1ms inside block placement or Ebb sludge placement");
+    }
+
+    private static bool IsActive() =>
+        !Runtime.IsBenchmarking &&
+        (HotInputDetailProfiler.BlockScopeActive || _sludgeDepth > 0);
+
+    private static void PrefixWithFirstArg(object? __0, out Timing __state)
+    {
+        __state = IsActive()
+            ? new Timing(
+                System.Diagnostics.Stopwatch.GetTimestamp(),
+                __0,
+                _sludgeDepth > 0 ? "Sludge" : "Block")
+            : default;
+    }
+
+    private static void PrefixNoArgs(out Timing __state)
+    {
+        __state = IsActive()
+            ? new Timing(
+                System.Diagnostics.Stopwatch.GetTimestamp(),
+                null,
+                _sludgeDepth > 0 ? "Sludge" : "Block")
+            : default;
+    }
+
+    private static Exception? Finalizer(
+        Exception? __exception, MethodBase __originalMethod, Timing __state)
+    {
+        if (__state.Started == 0 ||
+            __state.Scope is null ||
+            !Labels.TryGetValue(__originalMethod, out var label))
+            return __exception;
+
+        var duration = System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
+        if (duration * 1000.0 / System.Diagnostics.Stopwatch.Frequency < MinimumMs)
+            return __exception;
+
+        var detail = "";
+        if (label == "BaseInstantiator.InstantiateComponent" && __state.Arg0 is not null)
+        {
+            var type = __state.Arg0 as Type ?? __state.Arg0.GetType();
+            detail = "." + type.Name;
+        }
+
+        FreezeDetector.RecordTargetDetail(
+            $"HotInstantiate.{__state.Scope}.{label}{detail}", duration);
+        return __exception;
+    }
+}
+
 internal static class EbbAndFlowDetailProfiler
 {
     [ThreadStatic] private static int _depth;
@@ -2678,12 +2822,20 @@ internal static class EbbAndFlowDetailProfiler
     {
         __state = 0;
         if (!Runtime.IsBenchmarking && _depth > 0 && Labels.ContainsKey(__originalMethod))
+        {
             __state = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (__originalMethod.Name == "AttemptToPlaceSludgeAt")
+                InstantiationHotspotProfiler.EnterSludgePlacement();
+        }
     }
     private static Exception? InnerFinalizer(Exception? __exception, MethodBase __originalMethod, long __state)
     {
         if (__state != 0 && Labels.TryGetValue(__originalMethod, out var label))
+        {
+            if (__originalMethod.Name == "AttemptToPlaceSludgeAt")
+                InstantiationHotspotProfiler.ExitSludgePlacement();
             FreezeDetector.RecordTargetDetail("Ebb."+label, System.Diagnostics.Stopwatch.GetTimestamp()-__state);
+        }
         return __exception;
     }
     private static IEnumerable<Type> SafeGetTypes(Assembly a)
