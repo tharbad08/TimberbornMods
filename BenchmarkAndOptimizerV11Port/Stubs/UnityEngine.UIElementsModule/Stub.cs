@@ -24,6 +24,15 @@ namespace UnityEngine.UIElements
         FlexEnd,
         Stretch
     }
+    public enum DisplayStyle { Flex, None }
+    public readonly struct StyleEnum<T> where T : struct
+    {
+        public static implicit operator StyleEnum<T>(T value) => new StyleEnum<T>();
+    }
+    public interface IStyle
+    {
+        StyleEnum<DisplayStyle> display { get; set; }
+    }
     public class EventBase { }
     public class DetachFromPanelEvent : EventBase { }
 
@@ -36,6 +45,7 @@ namespace UnityEngine.UIElements
 
     public class VisualElement
     {
+        public IStyle style { get; } = null!;
         public void Add(VisualElement child) { }
         public void Clear() { }
         public void RegisterCallback<TEventType>(EventCallback<TEventType> callback) where TEventType : EventBase { }
