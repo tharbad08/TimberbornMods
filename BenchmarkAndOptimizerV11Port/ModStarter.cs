@@ -184,7 +184,7 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.67 instantiation cardinality/GC analysis; v1.1.66 gameplay behavior retained; " +
+            "performance build: v1.1.68 pins planting and soil-contamination ticks to vanilla cadence; v1.1.67 instantiation/GC diagnostics and other optimizations retained; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
             "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; MonoBehaviour LateUpdate sampled 1/8 frames above 5GiB; slow block-preview/Ebb sludge instantiation measured by component/type; slow-frame logs now include exact per-frame placement/entity/template creation call counts; " +
@@ -9697,6 +9697,11 @@ internal static class Runtime
         "NavMeshObserver",
         "NavigationSynchronizer",
         "AutomationRunner",
+        // Work dispatch and soil-contamination state must be updated at vanilla cadence.
+        // Never suppress state transitions in these gameplay-authoritative services.
+        "PlantingControler",
+        "PlantMonitor",
+        "SoilContaminationService",
         "WaterSimulator",
         "SpeedManager",
         "ConstructionSite"
