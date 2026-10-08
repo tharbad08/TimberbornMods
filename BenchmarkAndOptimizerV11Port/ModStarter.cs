@@ -184,10 +184,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.66 preview/sludge shared-instantiation breakdown; v1.1.65 gameplay behavior retained; " +
+            "performance build: v1.1.67 instantiation cardinality/GC analysis; v1.1.66 gameplay behavior retained; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; MonoBehaviour LateUpdate sampled 1/8 frames above 5GiB; slow block-preview/Ebb sludge instantiation measured by component/type; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; MonoBehaviour LateUpdate sampled 1/8 frames above 5GiB; slow block-preview/Ebb sludge instantiation measured by component/type; slow-frame logs now include exact per-frame placement/entity/template creation call counts; " +
             "Keystone prewarm, EBR large-update budgeting, SoilContaminationService interval=4, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
@@ -2825,7 +2825,10 @@ internal static class EbbAndFlowDetailProfiler
         {
             __state = System.Diagnostics.Stopwatch.GetTimestamp();
             if (__originalMethod.Name == "AttemptToPlaceSludgeAt")
+            {
                 InstantiationHotspotProfiler.EnterSludgePlacement();
+                FreezeDetector.RecordHotspotCount("Ebb.AttemptToPlaceSludgeAt");
+            }
         }
     }
     private static Exception? InnerFinalizer(Exception? __exception, MethodBase __originalMethod, long __state)
@@ -3826,6 +3829,16 @@ internal static class BlockPlacementDetailProfiler
                   Labels.ContainsKey(__originalMethod)
             ? System.Diagnostics.Stopwatch.GetTimestamp()
             : 0;
+
+        if (__state != 0 &&
+            Labels.TryGetValue(__originalMethod, out var label) &&
+            (label == "Block.EntityService.Instantiate" ||
+             label == "Block.Factory.CreateUnfinished" ||
+             label == "Block.TemplateInstantiator.Instantiate" ||
+             label == "Block.BaseInstantiator.InstantiateComponent"))
+        {
+            FreezeDetector.RecordHotspotCount(label);
+        }
     }
 
     private static Exception? Finalizer(
@@ -7201,6 +7214,7 @@ internal static class FreezeDetector
     private static readonly Dictionary<string, long> BfrDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> NavigationDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> InputDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, int> HotspotCalls = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> FaunaDetailTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, long> LateBehaviourTicks = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, KeystoneProfileRecord> KeystoneProfiles = new(StringComparer.Ordinal);
@@ -7268,6 +7282,7 @@ internal static class FreezeDetector
             BfrDetailTicks.Clear();
             NavigationDetailTicks.Clear();
             InputDetailTicks.Clear();
+            HotspotCalls.Clear();
             FaunaDetailTicks.Clear();
             LateBehaviourTicks.Clear();
             KeystoneProfiles.Clear();
@@ -7517,6 +7532,18 @@ internal static class FreezeDetector
 
     public static void RecordInputDetail(string name, long elapsedTicks) =>
         RecordNamedTicks(InputDetailTicks, name, elapsedTicks);
+
+    public static void RecordHotspotCount(string name)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+                return;
+
+            HotspotCalls.TryGetValue(name, out var count);
+            HotspotCalls[name] = count + 1;
+        }
+    }
 
     public static void RecordFaunaDetail(string name, long elapsedTicks) =>
         RecordNamedTicks(FaunaDetailTicks, name, elapsedTicks);
@@ -7768,6 +7795,11 @@ internal static class FreezeDetector
             ? "none"
             : string.Join(", ", inputDetails);
 
+        var hotspotCounts = HotspotCalls.Count == 0
+            ? "none"
+            : string.Join(", ", HotspotCalls.OrderByDescending(x => x.Value)
+                .Select(x => $"{x.Key}={x.Value}"));
+
         var faunaDetails = FaunaDetailTicks
             .OrderByDescending(x => x.Value)
             .Take(TopSystemCount)
@@ -7865,6 +7897,7 @@ internal static class FreezeDetector
             $"BFR detail: {bfrDetailText}; " +
             $"navigation detail: {navigationDetailText}; " +
             $"input detail: {inputDetailText}; " +
+            $"instantiation/placement calls: {hotspotCounts}; " +
             $"fauna detail: {faunaDetailText}; " +
             $"target detail: {targetDetailText}; " +
             $"LateUpdate behaviours: {lateBehaviourText}; " +
