@@ -109,6 +109,8 @@ public sealed class OptimizerPanel : VisualElement
     private readonly VisualElement _others;
     private readonly Label _status;
     private string _filter = "";
+    // Cache rendered controls: filtering must not tear down a focused UI tree.
+    private readonly List<(VisualElement Element, string Name, string Origin)> _rows = new();
 
     private static readonly string[] WellKnown =
     {
@@ -165,11 +167,19 @@ public sealed class OptimizerPanel : VisualElement
         _status = this.AddGameLabel("");
         _status.SetMarginBottom(8);
 
-        // Same live-filter pattern used by TImprove4Mods.
+        // Never Clear()/recreate UI controls during a text-field change callback.
+        // The input event may run inside Unity's LateUpdate/UI dispatch.
         this.AddTextField("Filter", keyword =>
         {
             _filter = keyword?.Trim() ?? "";
-            Rebuild();
+            try
+            {
+                ApplyFilter();
+            }
+            catch (Exception ex)
+            {
+                Runtime.Log($"warning: optimizer UI filter failed: {ex.GetType().Name}: {ex.Message}");
+            }
         })
         .SetWidthPercent(100)
         .SetMarginBottom(8);
@@ -204,6 +214,7 @@ public sealed class OptimizerPanel : VisualElement
         UpdateStatus();
         _wellKnown.Clear();
         _others.Clear();
+        _rows.Clear();
 
         _wellKnown.AddGameLabel("Well-known systems", bold: true).SetMarginBottom(5);
         _others.AddGameLabel("Other detected systems", bold: true).SetMargin(10, 0, 5, 0);
@@ -211,32 +222,37 @@ public sealed class OptimizerPanel : VisualElement
         var names = WellKnown
             .Concat(Runtime.KnownTypes)
             .Distinct(StringComparer.Ordinal)
-            .Where(name =>
-            {
-                if (string.IsNullOrEmpty(_filter))
-                {
-                    return true;
-                }
-
-                var origin = Runtime.GetOrigin(name);
-                return name.Contains(_filter, StringComparison.OrdinalIgnoreCase)
-                    || origin.Contains(_filter, StringComparison.OrdinalIgnoreCase);
-            })
             .OrderBy(n => Array.IndexOf(WellKnown, n) < 0 ? 1 : 0)
             .ThenBy(n => n, StringComparer.OrdinalIgnoreCase);
 
         foreach (var name in names)
         {
-            AddSystemRow(
+            var origin = Runtime.GetOrigin(name);
+            var row = AddSystemRow(
                 Array.IndexOf(WellKnown, name) >= 0 ? _wellKnown : _others,
-                name);
+                name, origin);
+            _rows.Add((row, name, origin));
+        }
+
+        ApplyFilter();
+    }
+
+    private void ApplyFilter()
+    {
+        // Hiding existing rows is safe even during a UI text-change callback.
+        // Refresh/reset buttons may still explicitly rebuild the list.
+        foreach (var row in _rows)
+        {
+            var matches = string.IsNullOrEmpty(_filter)
+                || row.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)
+                || row.Origin.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+            row.Element.style.display = matches ? DisplayStyle.Flex : DisplayStyle.None;
         }
     }
 
-    private static void AddSystemRow(VisualElement parent, string typeName)
+    private static VisualElement AddSystemRow(VisualElement parent, string typeName, string origin)
     {
         var current = Runtime.GetInterval(typeName);
-        var origin = Runtime.GetOrigin(typeName);
         var isProtected = Runtime.IsProtected(typeName);
 
         // Two-line layout so long type/origin text never pushes the interval control
@@ -266,7 +282,7 @@ public sealed class OptimizerPanel : VisualElement
 
         if (isProtected)
         {
-            return;
+            return item;
         }
 
         var slider = intervalRow.AddSliderInt(
@@ -279,6 +295,8 @@ public sealed class OptimizerPanel : VisualElement
             intervalLabel.text = TickIntervalLabel(v);
             Runtime.SetInterval(typeName, v);
         });
+
+        return item;
     }
 
     static string TickIntervalLabel(int value) => $"Tick interval - 1/{value}";
