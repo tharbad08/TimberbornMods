@@ -173,6 +173,7 @@ internal static class FreezeDetectorPatcher
         InputProcessorDetailProfiler.Patch(FreezeHarmony);
         EbbAndFlowDetailProfiler.Patch(FreezeHarmony);
         InstantiationHotspotProfiler.Patch(FreezeHarmony);
+        PreviewComponentBatchCounter.Patch(FreezeHarmony);
         HotInputDetailProfiler.Patch(FreezeHarmony);
         PreviewServiceMemberDetailProfiler.Patch(FreezeHarmony);
         BlockPlacementDetailProfiler.Patch(FreezeHarmony);
@@ -186,10 +187,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.72 corrected SmartPower callback and save-with-GC attribution; v1.1.71 gameplay and v1.1.69 soil behavior unchanged; " +
+            "performance build: v1.1.73 low-overhead bulk preview instantiation; v1.1.72 gameplay and v1.1.69 soil behavior unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; correct SmartPower PowerConsumers callback timing and save callback Gen2/heap snapshots; nested Harmony owner correlation and preview/sludge instantiation tracing retained; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; bulk-preview profiler fast path removes 89k per-component Harmony callbacks and replaces count with one per batch; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
             "Keystone prewarm, EBR large-update budgeting, protected SoilContamination vanilla cadence, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
@@ -2634,6 +2635,49 @@ internal static class FaunaRecipeLookupCachePatcher
     }
 }
 
+internal static class PreviewComponentBatchCounter
+{
+    // Count produced objects once per InstantiateComponents result, instead of
+    // instrumenting each of the ~90,000 individual component creation calls.
+    // This does not skip or alter any component/template/preview creation.
+    public static void Patch(Harmony harmony)
+    {
+        var type = AccessTools.TypeByName("Timberborn.BaseComponentSystem.BaseInstantiator");
+        var method = type is null ? null : AccessTools.Method(type, "InstantiateComponents");
+        if (method is null)
+        {
+            Runtime.Log("warning: preview component batch counter unavailable: InstantiateComponents missing");
+            return;
+        }
+
+        try
+        {
+            harmony.Patch(method,
+                postfix: new HarmonyMethod(AccessTools.Method(
+                    typeof(PreviewComponentBatchCounter), nameof(Postfix)))
+                { priority = Priority.Last });
+            Runtime.Log(
+                "preview component batch counting installed: one count per instantiated component list; " +
+                "89k per-component profiler callbacks removed; no changes to preview creation");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log("warning: preview component batch counting unavailable: " +
+                ex.GetType().Name + ": " + ex.Message);
+        }
+    }
+
+    private static void Postfix(object? __result)
+    {
+        if (HotInputDetailProfiler.BlockScopeActive &&
+            __result is System.Collections.ICollection components)
+        {
+            FreezeDetector.RecordHotspotCount(
+                "Block.ComponentsReturnedByInstantiationBatches", components.Count);
+        }
+    }
+}
+
 internal static class InstantiationHotspotProfiler
 {
     // Targeted diagnostics only. Neither placement nor any callback is skipped or delayed.
@@ -2669,7 +2713,7 @@ internal static class InstantiationHotspotProfiler
             ("Timberborn.TemplateInstantiation.TemplateInstantiator",
                 new[] { "Instantiate", "GetCachedTemplate" }),
             ("Timberborn.BaseComponentSystem.BaseInstantiator",
-                new[] { "InstantiateInactive", "InstantiateComponents", "InstantiateComponent" }),
+                new[] { "InstantiateInactive", "InstantiateComponents" }),
             ("Timberborn.BaseComponentSystem.ComponentCache",
                 new[] { "Initialize" }),
             ("Timberborn.EntitySystem.EntityService",
@@ -3738,7 +3782,6 @@ internal static class BlockPlacementDetailProfiler
         PatchNamed(harmony, "Timberborn.BlueprintPrefabSystem.BlueprintPrefabConverter", "Convert", "Block.BlueprintPrefabConverter.Convert");
         PatchNamed(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateInactive", "Block.BaseInstantiator.InstantiateInactive");
         PatchNamed(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateComponents", "Block.BaseInstantiator.InstantiateComponents");
-        PatchNamed(harmony, "Timberborn.BaseComponentSystem.BaseInstantiator", "InstantiateComponent", "Block.BaseInstantiator.InstantiateComponent");
         PatchNamed(harmony, "Timberborn.BaseComponentSystem.ComponentCache", "Initialize", "Block.ComponentCache.Initialize");
         PatchNamed(harmony, "Timberborn.BlockSystem.BlockObject", "Reposition", "Block.BlockObject.Reposition");
         PatchNamed(harmony, "Timberborn.ConstructionSites.ConstructionSite", "FinishNow", "Block.ConstructionSite.FinishNow");
@@ -3836,8 +3879,7 @@ internal static class BlockPlacementDetailProfiler
             Labels.TryGetValue(__originalMethod, out var label) &&
             (label == "Block.EntityService.Instantiate" ||
              label == "Block.Factory.CreateUnfinished" ||
-             label == "Block.TemplateInstantiator.Instantiate" ||
-             label == "Block.BaseInstantiator.InstantiateComponent"))
+             label == "Block.TemplateInstantiator.Instantiate"))
         {
             FreezeDetector.RecordHotspotCount(label);
         }
@@ -7804,15 +7846,17 @@ internal static class FreezeDetector
     public static void RecordInputDetail(string name, long elapsedTicks) =>
         RecordNamedTicks(InputDetailTicks, name, elapsedTicks);
 
-    public static void RecordHotspotCount(string name)
+    public static void RecordHotspotCount(string name, int amount = 1)
     {
+        if (amount <= 0) return;
+
         lock (Gate)
         {
             if (!_initialized || _frameStartTicks == 0)
                 return;
 
             HotspotCalls.TryGetValue(name, out var count);
-            HotspotCalls[name] = count + 1;
+            HotspotCalls[name] = count + amount;
         }
     }
 
