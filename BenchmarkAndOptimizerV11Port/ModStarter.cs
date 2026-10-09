@@ -186,10 +186,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.71 SmartPower preview callback timing + high-heap lifecycle adapter timing; v1.1.70/1.1.69 gameplay and soil behavior retained unchanged; " +
+            "performance build: v1.1.72 corrected SmartPower callback and save-with-GC attribution; v1.1.71 gameplay and v1.1.69 soil behavior unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; SmartPower preview callback timing and nested Harmony owner correlation added; slow block-preview/Ebb sludge instantiation and per-frame counts retained; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; correct SmartPower PowerConsumers callback timing and save callback Gen2/heap snapshots; nested Harmony owner correlation and preview/sludge instantiation tracing retained; " +
             "Keystone prewarm, EBR large-update budgeting, protected SoilContamination vanilla cadence, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
@@ -4839,6 +4839,9 @@ internal static class MonoBehaviourLateUpdateProfiler
     {
         public long Started;
         public string? TypeName;
+        public bool IsSave;
+        public int Gen2Before;
+        public long HeapBefore;
     }
 
     public static void Patch(Harmony harmony)
@@ -4908,7 +4911,8 @@ internal static class MonoBehaviourLateUpdateProfiler
         }
 
         Runtime.Log(
-            $"sampled MonoBehaviour LateUpdate profiler installed: {PatchedMethods.Count} managed LateUpdate method(s)");
+            $"sampled MonoBehaviour LateUpdate profiler installed: {PatchedMethods.Count} managed LateUpdate method(s); " +
+            "high-heap save and lifecycle adapters measured each frame");
     }
 
     private static void Prefix(object __instance, out Sample __state)
@@ -4922,11 +4926,18 @@ internal static class MonoBehaviourLateUpdateProfiler
         // All other managed LateUpdate callbacks retain 1/8 sampling.
         if (!_armed &&
             type.Name != "BaseComponentLateUpdateUnityAdapter" &&
-            type.Name != "SingletonLifecycleUnityAdapter")
+            type.Name != "SingletonLifecycleUnityAdapter" &&
+            type.Name != "GameSaverUnityAdapter")
             return;
 
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
         __state.TypeName = "MonoLate." + (type.FullName ?? type.Name);
+        if (type.Name == "GameSaverUnityAdapter")
+        {
+            __state.IsSave = true;
+            __state.Gen2Before = GC.CollectionCount(2);
+            __state.HeapBefore = GC.GetTotalMemory(false);
+        }
     }
 
     private static Exception? Finalizer(Exception? __exception, Sample __state)
@@ -4937,10 +4948,25 @@ internal static class MonoBehaviourLateUpdateProfiler
         }
 
         var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - __state.Started;
-        if (elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency >= 0.25)
+        var elapsedMs = elapsed * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        if (elapsedMs >= 0.25)
         {
             FrameTicks.TryGetValue(__state.TypeName, out var existing);
             FrameTicks[__state.TypeName] = existing + elapsed;
+        }
+
+        // Save durations may contain a stop-the-world GC pause; record that fact
+        // without changing save frequency or serialization behavior.
+        if (__state.IsSave && elapsedMs >= 500.0)
+        {
+            var gc2 = GC.CollectionCount(2) - __state.Gen2Before;
+            var heapAfter = GC.GetTotalMemory(false);
+            Runtime.Log(
+                $"save callback diagnostic: LateUpdate={elapsedMs:F1}ms; " +
+                $"gen2DuringCall={gc2}; heapBefore={__state.HeapBefore / 1048576.0:F1}MB; " +
+                $"heapAfter={heapAfter / 1048576.0:F1}MB; " +
+                $"callbackThrew={(__exception is not null)}; " +
+                "does not measure disk IO separately");
         }
 
         return __exception;
@@ -7087,11 +7113,11 @@ internal static class SmartPowerPreviewWorkProfiler
 
     public static void Patch(Harmony harmony)
     {
-        var type = AccessTools.TypeByName("IgorZ.Automation.AutomationSystem.Configurator");
+        var type = AccessTools.TypeByName("IgorZ.SmartPower.PowerConsumers.Configurator");
         var method = type is null ? null : AccessTools.Method(type, "PatchMethod");
         if (method is null || method.ReturnType != typeof(void))
         {
-            Runtime.Log("SmartPower callback timing unavailable: Configurator.PatchMethod not found");
+            Runtime.Log("SmartPower callback timing unavailable: PowerConsumers.Configurator.PatchMethod not found");
             return;
         }
 
@@ -7127,7 +7153,7 @@ internal static class SmartPowerPreviewWorkProfiler
         var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - __state;
         FreezeDetector.RecordHotspotCount("SmartPower.PatchMethod");
         if (ticks > 0)
-            FreezeDetector.RecordTargetDetail("ModPatch.SmartPower.AutomationConfigurator", ticks);
+            FreezeDetector.RecordTargetDetail("ModPatch.SmartPower.PowerConsumersConfigurator", ticks);
         return __exception;
     }
 }
@@ -7146,7 +7172,8 @@ internal static class HarmonyPatchOwnershipAudit
         "PhysicsSimulator", "SoilMoistureService", "EbbAndFlowManager",
         "SingletonLifecycleService", "TickableSingletonService",
         "BaseComponentLateUpdateUnityAdapter", "SingletonLifecycleUnityAdapter",
-        "BlockObject", "TerrainMeshManager", "InputService"
+        "BlockObject", "TerrainMeshManager", "InputService",
+        "GameSaverUnityAdapter", "Autosaver", "GameSaver"
     };
 
     private static Dictionary<string, string[]> _externalByType = new(StringComparer.Ordinal);
