@@ -179,16 +179,17 @@ internal static class FreezeDetectorPatcher
         LevelVisibilityHandlerProfiler.Patch(FreezeHarmony);
         SuperCursorRefreshSmoother.Patch(FreezeHarmony);
         MonoBehaviourLateUpdateProfiler.Patch(FreezeHarmony);
+        HarmonyPatchOwnershipAudit.Initialize();
 
         _patched = true;
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.68 pins planting and soil-contamination ticks to vanilla cadence; v1.1.67 instantiation/GC diagnostics and other optimizations retained; " +
+            "performance build: v1.1.70 Harmony patch owner audit + per-frame instantiation counter correction; v1.1.69 gameplay and soil behavior retained unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
             "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; MonoBehaviour LateUpdate sampled 1/8 frames above 5GiB; slow block-preview/Ebb sludge instantiation measured by component/type; slow-frame logs now include exact per-frame placement/entity/template creation call counts; " +
-            "Keystone prewarm, EBR large-update budgeting, SoilContaminationService interval=4, TimberPhysics limits and all prior gameplay optimizations are unchanged");
+            "Keystone prewarm, EBR large-update budgeting, protected SoilContamination vanilla cadence, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -7069,6 +7070,159 @@ internal static class ManagedHeapSampler
 }
 
 
+internal static class HarmonyPatchOwnershipAudit
+{
+    // Audit only. No patch is disabled, reordered, or executed differently.
+    // Harmony's patch metadata says who *could* affect a method, not who caused a stall.
+    private static readonly HashSet<string> TargetTypes = new(StringComparer.Ordinal)
+    {
+        "ThreadSafeWaterMap", "ChunkRulesApplier", "NavigationSynchronizer",
+        "NavMeshListenerEntityRegistry", "NavMeshListenerSingletonRegistry",
+        "EntityService", "TemplateInstantiator", "BaseInstantiator",
+        "BlockObjectFactory", "PreviewPlacer", "BlockObjectPreviewNavMesh",
+        "SuperCursorTool", "CursorTool", "WaterRenderer", "WaterObjectService",
+        "PhysicsSimulator", "SoilMoistureService", "EbbAndFlowManager",
+        "SingletonLifecycleService", "TickableSingletonService",
+        "BaseComponentLateUpdateUnityAdapter", "SingletonLifecycleUnityAdapter",
+        "BlockObject", "TerrainMeshManager", "InputService"
+    };
+
+    private static Dictionary<string, string[]> _externalByType = new(StringComparer.Ordinal);
+    private static volatile bool _ready;
+    private static bool _attempted;
+    private static long _firstLoadedTick;
+
+    public static void Initialize()
+    {
+        Runtime.Log(
+            "Harmony vanilla-method ownership audit armed: one-time scan after load; " +
+            "reports prefix/postfix/transpiler/finalizer owner, priority and patch assembly; " +
+            "slow frames link target types to potential patch owners, not blame");
+    }
+
+    public static void Pulse(long heapBytes)
+    {
+        if (_attempted || heapBytes < 4L * 1024L * 1024L * 1024L)
+            return;
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_firstLoadedTick == 0)
+        {
+            _firstLoadedTick = now;
+            return;
+        }
+
+        if ((now - _firstLoadedTick) * 1.0 /
+            System.Diagnostics.Stopwatch.Frequency < 12.0)
+            return;
+
+        _attempted = true;
+        try { Audit(); }
+        catch (Exception ex)
+        {
+            Runtime.Log("warning: Harmony patch owner audit failed: " +
+                ex.GetType().Name + ": " + ex.Message);
+        }
+    }
+
+    private static bool IsOurs(string owner) =>
+        owner.StartsWith("shay.BenchmarkAndOptimizerV11", StringComparison.Ordinal);
+
+    private static void Audit()
+    {
+        var byType = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var methodRows = new List<(string Key, string Description)>();
+        var ownerCounts = new Dictionary<string, int>(StringComparer.Ordinal);
+        var inspected = 0;
+
+        foreach (var method in Harmony.GetAllPatchedMethods())
+        {
+            var type = method.DeclaringType;
+            if (type is null) continue;
+            var typeName = type.Name;
+            var patchInfo = Harmony.GetPatchInfo(method);
+            if (patchInfo is null) continue;
+
+            var patches = patchInfo.Prefixes.Select(p => ("pre", p))
+                .Concat(patchInfo.Postfixes.Select(p => ("post", p)))
+                .Concat(patchInfo.Transpilers.Select(p => ("IL", p)))
+                .Concat(patchInfo.Finalizers.Select(p => ("final", p)))
+                .Where(t => !IsOurs(t.Item2.owner))
+                .ToArray();
+            if (patches.Length == 0) continue;
+
+            inspected++;
+            var isVanilla = (type.Assembly.GetName().Name ?? "").StartsWith(
+                "Timberborn.", StringComparison.Ordinal);
+            if (isVanilla)
+            {
+                foreach (var owner in patches.Select(p => p.Item2.owner).Distinct())
+                {
+                    ownerCounts.TryGetValue(owner, out var n);
+                    ownerCounts[owner] = n + 1;
+                }
+            }
+
+            if (!TargetTypes.Contains(typeName)) continue;
+
+            if (!byType.TryGetValue(typeName, out var owners))
+            {
+                owners = new HashSet<string>(StringComparer.Ordinal);
+                byType[typeName] = owners;
+            }
+
+            foreach (var p in patches)
+                owners.Add(p.Item2.owner);
+
+            var desc = string.Join(", ", patches.Select(p =>
+                p.Item1 + ":" + p.Item2.owner +
+                "(p=" + p.Item2.priority +
+                ",asm=" + (p.Item2.PatchMethod?.DeclaringType?.Assembly.GetName().Name ?? "?") +
+                ")"));
+            methodRows.Add((typeName + "." + method.Name, desc));
+        }
+
+        var dict = new Dictionary<string, string[]>(StringComparer.Ordinal);
+        foreach (var entry in byType)
+            dict[entry.Key] = entry.Value.OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        _externalByType = dict;
+        _ready = true;
+
+        Runtime.Log(
+            $"Harmony patch owner audit: examined {inspected} methods with non-optimizer patches; " +
+            $"{methodRows.Count} target methods have external patch owners; " +
+            $"{byType.Count} target types affected");
+
+        foreach (var row in methodRows.OrderBy(x => x.Key, StringComparer.Ordinal).Take(110))
+            Runtime.Log("Harmony hotspot method " + row.Key + ": " + row.Description);
+
+        Runtime.Log("Harmony most widespread vanilla patch owners (patched methods): " +
+            string.Join(", ", ownerCounts.OrderByDescending(x => x.Value)
+                .Take(25).Select(x => x.Key + "=" + x.Value)));
+
+        foreach (var target in TargetTypes.OrderBy(x => x, StringComparer.Ordinal))
+            if (!byType.ContainsKey(target))
+                Runtime.Log("Harmony hotspot type " + target +
+                    ": no non-optimizer Harmony patches found on its methods");
+    }
+
+    public static string DescribeCandidates(IEnumerable<string> slowTypeNames)
+    {
+        if (!_ready) return "audit pending";
+
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var type in slowTypeNames)
+        {
+            if (!seen.Add(type)) continue;
+            if (!_externalByType.TryGetValue(type, out var owners)) continue;
+            result.Add(type + "=[" + string.Join(",", owners.Take(5)) + "]");
+            if (result.Count >= 5) break;
+        }
+        return result.Count == 0 ? "none among top timed types" : string.Join("; ", result);
+    }
+}
+
 internal static class IncrementalGcSmoother
 {
     private const long StartHeapBytes = 5632L * 1024L * 1024L;
@@ -7381,6 +7535,7 @@ internal static class FreezeDetector
             BfrDetailTicks.Clear();
             NavigationDetailTicks.Clear();
             InputDetailTicks.Clear();
+            HotspotCalls.Clear(); // Per-frame counts; v1.1.67 incorrectly left them cumulative.
             FaunaDetailTicks.Clear();
             LateBehaviourTicks.Clear();
             KeystoneProfiles.Clear();
@@ -7407,6 +7562,7 @@ internal static class FreezeDetector
         }
 
         var heapBytes = GC.GetTotalMemory(false);
+        HarmonyPatchOwnershipAudit.Pulse(heapBytes);
         MonoBehaviourLateUpdateProfiler.ArmForUpcomingFrame(heapBytes);
         ManagedHeapSampler.FrameBoundary(heapBytes);
         IncrementalGcSmoother.Pulse(heapBytes);
@@ -7872,6 +8028,12 @@ internal static class FreezeDetector
             .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms").ToArray();
         var targetDetailText = targetDetails.Length == 0 ? "none" : string.Join(", ", targetDetails);
 
+        var patchOwnerCandidates = HarmonyPatchOwnershipAudit.DescribeCandidates(
+            TickSingletonTicks.Concat(UpdateSingletonTicks).Concat(LateUpdateSingletonTicks)
+                .OrderByDescending(pair => pair.Value)
+                .Select(pair => ShortName(pair.Key))
+                .Take(10));
+
         var heapTransitionText =
             !AllocationCounter.IsCumulative && (gc0Delta != 0 || gc1Delta != 0 || gc2Delta != 0)
                 ? $"heapBeforeFrame={FormatBytes(metricBeforeFrame)}, heapAfterFrame={FormatBytes(metricAfterFrame)}; "
@@ -7900,6 +8062,7 @@ internal static class FreezeDetector
             $"instantiation/placement calls: {hotspotCounts}; " +
             $"fauna detail: {faunaDetailText}; " +
             $"target detail: {targetDetailText}; " +
+            $"patched vanilla candidates (not attribution): {patchOwnerCandidates}; " +
             $"LateUpdate behaviours: {lateBehaviourText}; " +
             $"Keystone profile: {keystoneProfileText}; " +
             $"PlayerLoop: {playerLoop}; " +
