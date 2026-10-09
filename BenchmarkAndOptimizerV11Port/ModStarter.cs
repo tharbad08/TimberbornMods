@@ -179,16 +179,17 @@ internal static class FreezeDetectorPatcher
         LevelVisibilityHandlerProfiler.Patch(FreezeHarmony);
         SuperCursorRefreshSmoother.Patch(FreezeHarmony);
         MonoBehaviourLateUpdateProfiler.Patch(FreezeHarmony);
+        SmartPowerPreviewWorkProfiler.Patch(FreezeHarmony);
         HarmonyPatchOwnershipAudit.Initialize();
 
         _patched = true;
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.70 Harmony patch owner audit + per-frame instantiation counter correction; v1.1.69 gameplay and soil behavior retained unchanged; " +
+            "performance build: v1.1.71 SmartPower preview callback timing + high-heap lifecycle adapter timing; v1.1.70/1.1.69 gameplay and soil behavior retained unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; MonoBehaviour LateUpdate sampled 1/8 frames above 5GiB; slow block-preview/Ebb sludge instantiation measured by component/type; slow-frame logs now include exact per-frame placement/entity/template creation call counts; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; SmartPower preview callback timing and nested Harmony owner correlation added; slow block-preview/Ebb sludge instantiation and per-frame counts retained; " +
             "Keystone prewarm, EBR large-update budgeting, protected SoilContamination vanilla cadence, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
@@ -4823,9 +4824,13 @@ internal static class MonoBehaviourLateUpdateProfiler
 {
     private const long ArmHeapBytes = 5L * 1024L * 1024L * 1024L;
     private static bool _armed;
+    private static bool _highHeap;
     private static int _frameIndex;
-    public static void ArmForUpcomingFrame(long heapBytes) =>
-        _armed = heapBytes >= ArmHeapBytes && ((++_frameIndex & 7) == 0);
+    public static void ArmForUpcomingFrame(long heapBytes)
+    {
+        _highHeap = heapBytes >= ArmHeapBytes;
+        _armed = _highHeap && ((++_frameIndex & 7) == 0);
+    }
 
     private static readonly HashSet<MethodBase> PatchedMethods = new();
     private static readonly Dictionary<string, long> FrameTicks = new(StringComparer.Ordinal);
@@ -4909,12 +4914,17 @@ internal static class MonoBehaviourLateUpdateProfiler
     private static void Prefix(object __instance, out Sample __state)
     {
         __state = default;
-        if (!_armed || Runtime.IsBenchmarking || __instance is null)
-        {
+        if (Runtime.IsBenchmarking || __instance is null || !_highHeap)
             return;
-        }
 
         var type = __instance.GetType();
+        // Two lifecycle adapters are measured on every high-heap frame.
+        // All other managed LateUpdate callbacks retain 1/8 sampling.
+        if (!_armed &&
+            type.Name != "BaseComponentLateUpdateUnityAdapter" &&
+            type.Name != "SingletonLifecycleUnityAdapter")
+            return;
+
         __state.Started = System.Diagnostics.Stopwatch.GetTimestamp();
         __state.TypeName = "MonoLate." + (type.FullName ?? type.Name);
     }
@@ -7070,6 +7080,58 @@ internal static class ManagedHeapSampler
 }
 
 
+internal static class SmartPowerPreviewWorkProfiler
+{
+    // Observation only; does not alter blueprint/component-instantiation behavior.
+    private static bool _installed;
+
+    public static void Patch(Harmony harmony)
+    {
+        var type = AccessTools.TypeByName("IgorZ.Automation.AutomationSystem.Configurator");
+        var method = type is null ? null : AccessTools.Method(type, "PatchMethod");
+        if (method is null || method.ReturnType != typeof(void))
+        {
+            Runtime.Log("SmartPower callback timing unavailable: Configurator.PatchMethod not found");
+            return;
+        }
+
+        try
+        {
+            harmony.Patch(method,
+                prefix: new HarmonyMethod(AccessTools.Method(
+                    typeof(SmartPowerPreviewWorkProfiler), nameof(Prefix)))
+                { priority = Priority.First },
+                finalizer: new HarmonyMethod(AccessTools.Method(
+                    typeof(SmartPowerPreviewWorkProfiler), nameof(Finalizer)))
+                { priority = Priority.Last });
+            _installed = true;
+            Runtime.Log("SmartPower preview callback profiler installed (diagnostic only)");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log("warning: SmartPower preview timing not installed: " + ex.GetType().Name +
+                ": " + ex.Message);
+        }
+    }
+
+    private static void Prefix(out long __state)
+    {
+        __state = _installed && HotInputDetailProfiler.BlockScopeActive && !Runtime.IsBenchmarking
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+    }
+
+    private static Exception? Finalizer(Exception? __exception, long __state)
+    {
+        if (__state == 0) return __exception;
+        var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - __state;
+        FreezeDetector.RecordHotspotCount("SmartPower.PatchMethod");
+        if (ticks > 0)
+            FreezeDetector.RecordTargetDetail("ModPatch.SmartPower.AutomationConfigurator", ticks);
+        return __exception;
+    }
+}
+
 internal static class HarmonyPatchOwnershipAudit
 {
     // Audit only. No patch is disabled, reordered, or executed differently.
@@ -7204,6 +7266,32 @@ internal static class HarmonyPatchOwnershipAudit
             if (!byType.ContainsKey(target))
                 Runtime.Log("Harmony hotspot type " + target +
                     ": no non-optimizer Harmony patches found on its methods");
+    }
+
+    public static string? DetailType(string label)
+    {
+        if (label.Contains("PreviewPlacer.", StringComparison.Ordinal))
+            return "PreviewPlacer";
+        if (label.Contains("BaseInstantiator.", StringComparison.Ordinal))
+            return "BaseInstantiator";
+        if (label.Contains("BlockObjectFactory.", StringComparison.Ordinal) ||
+            label.Contains("Block.Factory.", StringComparison.Ordinal))
+            return "BlockObjectFactory";
+        if (label.Contains("TemplateInstantiator.", StringComparison.Ordinal))
+            return "TemplateInstantiator";
+        if (label.Contains("BlockObjectPreviewNavMesh.", StringComparison.Ordinal))
+            return "BlockObjectPreviewNavMesh";
+        if (label.Contains("BlockObject.", StringComparison.Ordinal))
+            return "BlockObject";
+        if (label.Contains("CursorTool.", StringComparison.Ordinal))
+            return "CursorTool";
+        if (label.Contains("EntityService.", StringComparison.Ordinal))
+            return "EntityService";
+        if (label.Contains("NavigationSynchronizer.", StringComparison.Ordinal))
+            return "NavigationSynchronizer";
+        if (label.Contains("Ebb.", StringComparison.Ordinal))
+            return "EbbAndFlowManager";
+        return null;
     }
 
     public static string DescribeCandidates(IEnumerable<string> slowTypeNames)
@@ -8028,11 +8116,25 @@ internal static class FreezeDetector
             .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms").ToArray();
         var targetDetailText = targetDetails.Length == 0 ? "none" : string.Join(", ", targetDetails);
 
+        // Include nested input targets: otherwise a >400ms preview creation only
+        // shows InputService, and misses patches on PreviewPlacer/BaseInstantiator.
         var patchOwnerCandidates = HarmonyPatchOwnershipAudit.DescribeCandidates(
             TickSingletonTicks.Concat(UpdateSingletonTicks).Concat(LateUpdateSingletonTicks)
                 .OrderByDescending(pair => pair.Value)
                 .Select(pair => ShortName(pair.Key))
-                .Take(10));
+                .Take(10)
+                .Concat(InputDetailTicks
+                    .Where(pair => ToMs(pair.Value) >= 5.0)
+                    .OrderByDescending(pair => pair.Value)
+                    .Select(pair => HarmonyPatchOwnershipAudit.DetailType(pair.Key))
+                    .Where(name => !string.IsNullOrEmpty(name))
+                    .Select(name => name!))
+                .Concat(TargetDetailTicks
+                    .Where(pair => ToMs(pair.Value) >= 5.0)
+                    .OrderByDescending(pair => pair.Value)
+                    .Select(pair => HarmonyPatchOwnershipAudit.DetailType(pair.Key))
+                    .Where(name => !string.IsNullOrEmpty(name))
+                    .Select(name => name!)));
 
         var heapTransitionText =
             !AllocationCounter.IsCumulative && (gc0Delta != 0 || gc1Delta != 0 || gc2Delta != 0)
