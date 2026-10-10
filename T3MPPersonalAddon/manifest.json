@@ -1,0 +1,11 @@
+{
+  "Name": "T3MP Personal Companion (speed policy off + readout)",
+  "Id": "T3MPPersonalAddon",
+  "Version": "0.1.0",
+  "MinimumGameVersion": "1.1.2.0",
+  "Description": "Personal companion for T3MP. Removes T3MP requested-speed scaling override so another configurable speed mod can own speeds. Shows only rSPD/iSPD, dynamically positioned underneath the game speed UI if a matching UI Toolkit control is found. Never patches tick or loading code.",
+  "RequiredMods": [
+    {"Id":"Harmony","MinimumVersion":"2.4.1"},
+    {"Id":"T3MP","MinimumVersion":"1.2.5"}
+  ]
+}

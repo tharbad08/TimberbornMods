@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <AssemblyName>T3MPPersonalAddon</AssemblyName>
+    <Version>0.1.0</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.4.1" />
+    <ProjectReference Include="../BenchmarkAndOptimizerV11Port/Stubs/Timberborn.ModManagerScene/Timberborn.ModManagerScene.Stub.csproj" Private="false" />
+  </ItemGroup>
+</Project>

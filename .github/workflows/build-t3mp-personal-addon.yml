@@ -1,0 +1,38 @@
+name: Build T3MP Personal Companion
+
+on:
+  push:
+    branches:
+      - chatgpt/t3mp-personal-addon
+    paths:
+      - 'T3MPPersonalAddon/**'
+      - '.github/workflows/build-t3mp-personal-addon.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Compile
+        run: dotnet build T3MPPersonalAddon/T3MPPersonalAddon.csproj -c Release
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          MOD=/tmp/T3MPPersonalAddon/version-1.1
+          mkdir -p "$MOD/Scripts"
+          cp T3MPPersonalAddon/manifest.json "$MOD/manifest.json"
+          cp T3MPPersonalAddon/bin/Release/netstandard2.1/T3MPPersonalAddon.dll "$MOD/Scripts/"
+          cd /tmp
+          zip -qr T3MPPersonalAddon-v0.1.0.zip T3MPPersonalAddon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: T3MPPersonalAddon-v0.1.0
+          path: /tmp/T3MPPersonalAddon-v0.1.0.zip
