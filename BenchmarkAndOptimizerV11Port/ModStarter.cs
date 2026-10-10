@@ -164,6 +164,7 @@ internal static class FreezeDetectorPatcher
         UnusedPreviewPoolFastPath.Patch(FreezeHarmony);
         FullyBuildablePreviewFastPath.Patch(FreezeHarmony);
         BlueprintSpecInstantiationCache.Patch(FreezeHarmony);
+        BulkComponentInstantiationFastPath.Patch(FreezeHarmony);
         FaunaSpawnBudgetPatcher.Patch(FreezeHarmony);
         FaunaRecipeLookupCachePatcher.Patch(FreezeHarmony);
         KeystoneFaunaTemplatePrewarmer.Patch(FreezeHarmony);
@@ -195,10 +196,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.77 globally-scoped TickBuckets limiter removed for correctness; v1.1.75 preview/blueprint optimizations and v1.1.69 soil behavior unchanged; " +
+            "performance build: v1.1.78 cached-spec bulk creation and ordered preview invalidation; v1.1.77 global tick fix and v1.1.69 soil behavior unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; all-buildable brushes bypass empty remaining-preview LINQ enumeration; terrain-triggered global TickableBucketService throttling is disabled: all entity/singleton tick buckets run at vanilla cadence; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; preview invalidation uses ordered no-allocation sweep for valid mixed brushes; warmed immutable ComponentSpecs are read directly during bulk construction/preview creation; terrain-triggered global TickableBucketService throttling is disabled: all entity/singleton tick buckets run at vanilla cadence; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
             "Keystone prewarm, EBR large-update budgeting, protected SoilContamination vanilla cadence, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
@@ -2646,107 +2647,128 @@ internal static class FaunaRecipeLookupCachePatcher
 
 internal static class FullyBuildablePreviewFastPath
 {
-    // The vanilla HideRemainingPreviews method enumerates Previews.Except(buildablePreviews).
-    // PopulateBuildablePreviewsAndAddToBlockServices only inserts each preview from
-    // the pool once, in pool order. If all entries are buildable, Except is empty:
-    // skipping the enumeration has exactly the same preview/service effects.
-    // No part of ShowBuildablePreviews / validator / modded ShowPreviews is skipped.
-    private static FieldInfo? _lazyPool;
+    // Timberborn uses Previews.Except(buildablePreviews) on EVERY mixed brush
+    // refresh, constructing LINQ/HashSet state for up to 899 previews. Its
+    // buildable list is a unique ordered subset of the already-positioned pool.
+    // Verify this invariant before doing anything, then perform an ordered
+    // zero-allocation sweep and invoke the EXACT vanilla hide/removal helper
+    // for each invalid preview. Mod callbacks on ShowPreviews remain in place.
+    private static FieldInfo? _pool;
     private static PropertyInfo? _value;
+    private static Action<object>? _hideAndRemove;
     private static bool _enabled;
-    private static int _allValidSkipped;
-    private static int _fallbacks;
+    private static int _noOp;
+    private static int _mixedSweeps;
 
     public static void Patch(Harmony harmony)
     {
         var type = AccessTools.TypeByName("Timberborn.BlockObjectTools.PreviewPlacer");
         if (type is null) return;
-
         var method = AccessTools.Method(type, "HideRemainingPreviews");
         var pool = AccessTools.Field(type, "_previews");
         var args = method?.GetParameters();
+        var preview = AccessTools.TypeByName("Timberborn.BlockSystem.Preview");
+        var hide = AccessTools.Method(type, "HideAndRemoveFromServices");
         if (method is null || method.ReturnType != typeof(void) ||
             args is null || args.Length != 2 ||
             args[1].ParameterType != typeof(bool) ||
             pool is null || !pool.FieldType.IsGenericType ||
-            pool.FieldType.GetGenericTypeDefinition() != typeof(Lazy<>))
+            pool.FieldType.GetGenericTypeDefinition() != typeof(Lazy<>) ||
+            preview is null || hide is null ||
+            hide.GetParameters().Length != 1 ||
+            hide.GetParameters()[0].ParameterType != preview ||
+            hide.ReturnType != typeof(void))
         {
-            Runtime.Log("fully-buildable preview fast path unavailable: vanilla signature changed");
+            Runtime.Log("preview ordered-sweep fast path disabled: method layout changed");
             return;
         }
-
         var value = pool.FieldType.GetProperty("Value", BindingFlags.Public | BindingFlags.Instance);
-        if (value is null || !value.PropertyType.IsArray)
+        if (value is null || value.PropertyType != preview.MakeArrayType())
+            return;
+        var info = Harmony.GetPatchInfo(method);
+        if (info is not null &&
+            info.Owners.Any(owner => owner != harmony.Id))
         {
-            Runtime.Log("fully-buildable preview fast path unavailable: preview array missing");
+            Runtime.Log("preview ordered-sweep fast path disabled: externally patched inner method");
             return;
         }
-
-        // Preserve third-party patches on the inner method: fail closed instead
-        // of bypassing unknown mod-specific side effects.
-        var patchInfo = Harmony.GetPatchInfo(method);
-        if (patchInfo is not null &&
-            patchInfo.Owners.Any(owner => !owner.StartsWith("shay.BenchmarkAndOptimizerV11",
-                StringComparison.Ordinal)))
-        {
-            Runtime.Log("fully-buildable preview fast path disabled: external inner-method patch");
-            return;
-        }
-
-        _lazyPool = pool;
-        _value = value;
-
         try
         {
-            harmony.Patch(method, prefix: new HarmonyMethod(
-                AccessTools.Method(typeof(FullyBuildablePreviewFastPath), nameof(Prefix)))
+            var p = Expression.Parameter(typeof(object), "preview");
+            _hideAndRemove = Expression.Lambda<Action<object>>(
+                Expression.Call(hide, Expression.Convert(p, preview)), p).Compile();
+            _pool = pool;
+            _value = value;
+            harmony.Patch(method, prefix: new HarmonyMethod(AccessTools.Method(
+                typeof(FullyBuildablePreviewFastPath), nameof(Prefix)))
             { priority = Priority.Last });
             _enabled = true;
             Runtime.Log(
-                "fully-buildable preview fast path installed: skip empty Except enumeration " +
-                "when all previews are buildable; validation, showing, hiding and mod callbacks unchanged");
+                "preview ordered-sweep fast path installed: zero-allocation replacement " +
+                "for repeated remaining-preview LINQ/Except; preserves vanilla hide calls " +
+                "and all preview validators and AutoScaffold/EzTube hooks");
         }
         catch (Exception ex)
         {
             _enabled = false;
-            Runtime.Log("warning: fully-buildable preview fast path disabled: " +
-                ex.GetType().Name + ": " + ex.Message);
+            Runtime.Log("preview ordered-sweep fast path disabled: " + ex.GetType().Name + ": " + ex.Message);
         }
     }
 
-    private static bool Prefix(object __instance, object __0)
+    private static bool Prefix(object __instance, object __0, bool __1)
     {
-        if (!_enabled || _lazyPool is null || _value is null ||
-            __0 is not System.Collections.IList buildable)
+        if (!_enabled || _pool is null || _value is null ||
+            _hideAndRemove is null || __0 is not System.Collections.IList valid)
             return true;
-
         try
         {
-            if (_value.GetValue(_lazyPool.GetValue(__instance)) is not Array previews ||
-                buildable.Count != previews.Length ||
-                previews.Length == 0)
+            if (_value.GetValue(_pool.GetValue(__instance)) is not object[] previews)
+                return true;
+            // A valid buildable list is exactly an ordered pool subset.
+            // If another mod changes the list, fail closed to vanilla.
+            int found = 0;
+            for (int i = 0; i < previews.Length && found < valid.Count; i++)
+                if (ReferenceEquals(previews[i], valid[found]))
+                    found++;
+            if (found != valid.Count)
                 return true;
 
-            // Sanity-check the native order to avoid affecting a mod that
-            // substitutes or reorders the vanilla buildable list.
-            var last = previews.Length - 1;
-            if (!ReferenceEquals(buildable[0], previews.GetValue(0)) ||
-                !ReferenceEquals(buildable[last], previews.GetValue(last)) ||
-                !ReferenceEquals(buildable[last / 2], previews.GetValue(last / 2)))
+            if (valid.Count == previews.Length)
             {
-                if (_fallbacks++ == 0)
-                    Runtime.Log("fully-buildable preview fast path: non-native preview list; vanilla fallback");
-                return true;
+                _noOp++;
+                if (_noOp == 1)
+                    Runtime.Log("preview ordered-sweep: all-buildable no-op traversal skipped");
+                return false;
             }
 
-            _allValidSkipped++;
-            if (_allValidSkipped == 1 || _allValidSkipped % 10000 == 0)
-                Runtime.Log($"fully-buildable preview: bypassed {_allValidSkipped} empty remaining-preview enumeration(s)");
+            int current = 0;
+            for (int i = 0; i < previews.Length; i++)
+            {
+                var p = previews[i];
+                if (current < valid.Count && ReferenceEquals(p, valid[current]))
+                {
+                    current++;
+                    continue;
+                }
+                if (i == 0 && __1)
+                    continue;
+                _hideAndRemove(p);
+            }
+            _mixedSweeps++;
+            if (_mixedSweeps == 1000)
+                Runtime.Log("preview ordered-sweep: avoided 1000 repeated mixed-brush LINQ/HashSet allocations");
             return false;
         }
-        catch
+        catch (Exception ex)
         {
-            return true;
+            // Do not replay vanilla after partial hiding: each hide performs
+            // callbacks and repeating them may be unsafe. Warn, then keep
+            // subsequent calls vanilla. The already-processed previews remain
+            // consistently hidden using their original helper.
+            _enabled = false;
+            Runtime.Log("warning: preview ordered-sweep disabled after error: " +
+                ex.GetType().Name + ": " + ex.Message);
+            return false;
         }
     }
 }
@@ -2835,6 +2857,15 @@ internal static class BlueprintSpecInstantiationCache
         }
     }
 
+    internal static bool IsComponentSpecType(Type type) => _enabled && IsSpecType(type);
+
+    internal static bool TryGetCachedSpec(object blueprint, Type type, out object spec)
+    {
+        spec = null!;
+        return _enabled && Cached.TryGetValue(blueprint, out var entry)
+            && entry.Values.TryGetValue(type, out spec!);
+    }
+
     private static bool IsSpecType(Type type)
     {
         var spec = _specBaseType;
@@ -2866,6 +2897,135 @@ internal static class BlueprintSpecInstantiationCache
         var entry = Cached.GetValue(__0, _ => new Entry());
         if (entry.Values.TryAdd(__1, __result))
             _stored++;
+    }
+}
+
+
+internal static class BulkComponentInstantiationFastPath
+{
+    // BaseInstantiator.InstantiateComponents creates the same list for every
+    // instance of an immutable template. Its inner InstantiateComponent takes
+    // a costly Harmony + blueprint lookup path per ComponentSpec. Once vanilla
+    // has successfully populated the immutable per-blueprint spec cache, avoid
+    // those repeated calls while preserving ALL live component allocations.
+    //
+    // This prefix must only run after every spec in the batch was resolved by
+    // vanilla at least once. The original non-spec DI method is invoked through
+    // a compiled delegate; no components, initializers, events or callbacks
+    // are skipped. Harmony postfixes (notably SmartPower) still execute.
+    private static Func<object, object, Type, object>? _instantiateComponent;
+    private static bool _enabled;
+    private static int _fastBatches;
+    private static long _cachedSpecResolutions;
+
+    public static void Patch(Harmony harmony)
+    {
+        var instantiator = AccessTools.TypeByName("Timberborn.BaseComponentSystem.BaseInstantiator");
+        var blueprint = AccessTools.TypeByName("Timberborn.BlueprintSystem.Blueprint");
+        var baseComponent = AccessTools.TypeByName("Timberborn.BaseComponentSystem.BaseComponent");
+        if (instantiator is null || blueprint is null || baseComponent is null)
+            return;
+
+        var batch = AccessTools.Method(instantiator, "InstantiateComponents");
+        var item = AccessTools.Method(instantiator, "InstantiateComponent");
+        var args = batch?.GetParameters();
+        if (batch is null || item is null || batch.ReturnType != typeof(List<object>) ||
+            args is null || args.Length != 3 || args[0].ParameterType != blueprint ||
+            args[1].ParameterType != baseComponent ||
+            !args[2].ParameterType.IsGenericType ||
+            args[2].ParameterType.GetGenericTypeDefinition().FullName !=
+                "System.Collections.Immutable.ImmutableArray`1" ||
+            item.ReturnType != typeof(object))
+        {
+            Runtime.Log("bulk instantiation fast path disabled: BaseInstantiator method signatures changed");
+            return;
+        }
+
+        // A method-replacing transpiler or another prefix might change
+        // semantics; do not intercept such methods. Ordinary postfixes still
+        // execute even when this prefix skips the vanilla method body.
+        var info = Harmony.GetPatchInfo(batch);
+        if (info is not null &&
+            (info.Prefixes.Any(p => p.owner != harmony.Id) ||
+             info.Transpilers.Any(p => p.owner != harmony.Id) ||
+             info.Finalizers.Any(p => p.owner != harmony.Id)))
+        {
+            Runtime.Log("bulk instantiation fast path disabled: foreign prefix/IL/finalizer");
+            return;
+        }
+
+        try
+        {
+            var self = Expression.Parameter(typeof(object), "self");
+            var template = Expression.Parameter(typeof(object), "template");
+            var type = Expression.Parameter(typeof(Type), "type");
+            var invoke = Expression.Call(Expression.Convert(self, instantiator),
+                item, Expression.Convert(template, blueprint), type);
+            _instantiateComponent = Expression.Lambda<Func<object, object, Type, object>>(
+                invoke, self, template, type).Compile();
+
+            harmony.Patch(batch, prefix: new HarmonyMethod(AccessTools.Method(
+                typeof(BulkComponentInstantiationFastPath), nameof(Prefix)))
+            { priority = Priority.Last });
+            _enabled = true;
+            Runtime.Log(
+                "bulk instantiation fast path installed: cached ComponentSpecs bypass repeated " +
+                "Harmony calls after vanilla warmup; non-spec DI, template initializers, " +
+                "SmartPower postfixes and EntityCreatedEvent remain intact");
+        }
+        catch (Exception ex)
+        {
+            _enabled = false;
+            Runtime.Log("bulk instantiation fast path disabled: " + ex.GetType().Name + ": " + ex.Message);
+        }
+    }
+
+    private static bool Prefix(object __instance, object __0, object? __1,
+        object __2, ref object __result)
+    {
+        if (!_enabled || _instantiateComponent is null ||
+            __0 is null || __2 is not IReadOnlyList<Type> components ||
+            components.Count < 2)
+            return true;
+
+        // Validate the full immutable spec plan before creating ANY instance.
+        // First-ever blueprint creation, special mods and missing specs retain
+        // exactly the vanilla path, including its error handling.
+        for (int i = 0; i < components.Count; i++)
+        {
+            var type = components[i];
+            if (BlueprintSpecInstantiationCache.IsComponentSpecType(type) &&
+                !BlueprintSpecInstantiationCache.TryGetCachedSpec(__0, type, out _))
+                return true;
+        }
+
+        var created = new List<object>(components.Count + (__1 is null ? 0 : 1) + 1);
+        if (__1 is not null)
+            created.Add(__1);
+
+        for (int i = 0; i < components.Count; i++)
+        {
+            var type = components[i];
+            if (BlueprintSpecInstantiationCache.IsComponentSpecType(type) &&
+                BlueprintSpecInstantiationCache.TryGetCachedSpec(__0, type, out var cached))
+            {
+                created.Add(cached);
+                _cachedSpecResolutions++;
+            }
+            else
+            {
+                // Original method preserves Bindito DI, component identity,
+                // and error semantics for every live/non-spec component.
+                created.Add(_instantiateComponent(__instance, __0, type));
+            }
+        }
+        __result = created;
+        _fastBatches++;
+        if (_fastBatches == 1000 || _fastBatches == 5000 || _fastBatches == 20000)
+            Runtime.Log(
+                $"bulk instantiation fast path: {_fastBatches} identical component batches, " +
+                $"{_cachedSpecResolutions} cached immutable spec accesses");
+        return false;
     }
 }
 
