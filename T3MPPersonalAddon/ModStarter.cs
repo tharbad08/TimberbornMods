@@ -181,11 +181,21 @@ namespace T3MPPersonalAddon
 
         private static void SetStyle(object style, string property, object value)
         {
+            // Unity exposes these properties through IStyle. On the shipped
+            // game build InlineStyleAccess implements IStyle explicitly, so
+            // reflection on the concrete type cannot find "position"/"left".
             var p = style.GetType().GetProperty(property, All);
-            if (p == null) throw new MissingMemberException(style.GetType().FullName, property);
-            // IStyle's properties are StyleLength / StyleEnum<Position>,
-            // each of which has a public constructor accepting its value.
-            var wrapper = Activator.CreateInstance(p.PropertyType, new[] {value});
+            if (p == null)
+                foreach (var iface in style.GetType().GetInterfaces())
+                {
+                    p = iface.GetProperty(property, All);
+                    if (p != null && p.CanWrite) break;
+                    p = null;
+                }
+            if (p == null || !p.CanWrite)
+                throw new MissingMemberException(style.GetType().FullName, "IStyle." + property);
+            // Each IStyle setter takes StyleLength or StyleEnum<T>.
+            var wrapper = Activator.CreateInstance(p.PropertyType, new[] { value });
             p.SetValue(style, wrapper);
         }
     }
