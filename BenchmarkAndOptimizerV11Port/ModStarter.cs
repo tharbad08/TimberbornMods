@@ -190,10 +190,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.75 immutable blueprint-spec cache and fully-buildable preview hotpath; v1.1.74 behavior and v1.1.69 soil behavior unchanged; " +
+            "performance build: v1.1.76 terrain-recovery anti-starvation repair; v1.1.75 preview/blueprint optimizations and v1.1.69 soil behavior unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; all-buildable brushes bypass empty remaining-preview LINQ enumeration; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; all-buildable brushes bypass empty remaining-preview LINQ enumeration; terrain recovery now enforces 4s continuous-edit grace and repays backlog on top of vanilla tick requests; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
             "Keystone prewarm, EBR large-update budgeting, protected SoilContamination vanilla cadence, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
@@ -3287,6 +3287,8 @@ internal static class TerrainRecoveryTickLimiter
     private static bool _installed;
     private static bool _loggedActivation;
     private static bool _loggedAntiStarvation;
+    private static bool _loggedContinuousRecoveryFallback;
+    private static long _lastDebtProgressTicks;
 
     public static void Patch(Harmony harmony)
     {
@@ -3306,9 +3308,10 @@ internal static class TerrainRecoveryTickLimiter
 
         _installed = true;
         Runtime.Log(
-            "terrain recovery tick limiter installed: recovery budgets 8/16/24; " +
-            "debt-pressure ramp uses 32/48/64/96 once deferred debt exceeds 4096; " +
-            "post-recovery debt budgets 16/32/64/96; debt-only calls can repay backlog");
+            "terrain recovery limiter installed: initial burst budgets 8/16/24 with pressure ramp 32/48/64/96; " +
+            "after 4s of uninterrupted edits, vanilla requested tick work is no longer delayed " +
+            "and 16/32/64/96 existing debt buckets are repaid per call; " +
+            "post-recovery drain also adds bounded debt work instead of starving behind current work");
     }
 
     public static void NotifyTerrainEdit()
@@ -3319,6 +3322,8 @@ internal static class TerrainRecoveryTickLimiter
         {
             _continuousRecoveryStartedAt = now;
             _loggedAntiStarvation = false;
+            _loggedContinuousRecoveryFallback = false;
+            _lastDebtProgressTicks = 0;
         }
 
         _recoveryUntil = Math.Max(
@@ -3335,6 +3340,30 @@ internal static class TerrainRecoveryTickLimiter
 
         if (now < _recoveryUntil)
         {
+            // The 4s continuous-recovery grace existed as a setting but was
+            // never enforced. With sustained terrain edits that meant the
+            // deferred bucket debt could grow indefinitely (>16k in v1.1.75).
+            // Fail OPEN after the grace: keep every vanilla-requested bucket,
+            // and perform a bounded extra repayment rather than dropping work.
+            if (_continuousRecoveryStartedAt != 0 &&
+                now - _continuousRecoveryStartedAt >=
+                    (long)(ContinuousRecoveryGraceSeconds * System.Diagnostics.Stopwatch.Frequency))
+            {
+                var initialDebt = _deferredBuckets;
+                AddDebtRepayment(ref numberOfBucketsToTick);
+                if (!_loggedContinuousRecoveryFallback)
+                {
+                    _loggedContinuousRecoveryFallback = true;
+                    Runtime.Log(
+                        $"terrain recovery anti-starvation activated after " +
+                        $"{ContinuousRecoveryGraceSeconds:F0}s continuous edits: " +
+                        $"vanilla buckets preserved, debt={initialDebt}, " +
+                        $"remaining={_deferredBuckets}");
+                }
+                LogDebtProgress(now);
+                return;
+            }
+
             var total = Math.Max(0L, (long)numberOfBucketsToTick) + _deferredBuckets;
             var budget = total >= 8192 ? EmergencyRecoveryBudget
                 : total >= 2048 ? ElevatedRecoveryBudget
@@ -3374,27 +3403,54 @@ internal static class TerrainRecoveryTickLimiter
 
         _loggedActivation = false;
         _loggedAntiStarvation = false;
+        _loggedContinuousRecoveryFallback = false;
         _continuousRecoveryStartedAt = 0;
         if (_deferredBuckets <= 0) return;
 
-        var totalBudget = _deferredBuckets >= 16384 ? PostRecoveryEmergencyBudget
+        AddDebtRepayment(ref numberOfBucketsToTick);
+        LogDebtProgress(now);
+    }
+
+    private static void AddDebtRepayment(ref int numberOfBucketsToTick)
+    {
+        var baseRequested = Math.Max(0, numberOfBucketsToTick);
+        if (_deferredBuckets <= 0)
+        {
+            numberOfBucketsToTick = baseRequested;
+            return;
+        }
+
+        var extraBudget = _deferredBuckets >= 16384 ? PostRecoveryEmergencyBudget
             : _deferredBuckets >= 4096 ? PostRecoveryHighBudget
             : _deferredBuckets >= 1024 ? PostRecoveryMediumBudget
             : PostRecoveryLowBudget;
 
-        var baseRequested = Math.Max(0, numberOfBucketsToTick);
-        var drain = Math.Min(_deferredBuckets, Math.Max(0, totalBudget - baseRequested));
-        if (drain > 0)
-        {
-            numberOfBucketsToTick = baseRequested + drain;
-            _deferredBuckets -= drain;
-        }
-
+        // This is EXTRA capacity, not a total cap. Old code subtracted
+        // current requests from its budget and could repay zero forever when
+        // numberOfBucketsToTick was consistently >= the budget.
+        var repay = Math.Min(_deferredBuckets, Math.Min(extraBudget, int.MaxValue - baseRequested));
+        numberOfBucketsToTick = baseRequested + repay;
+        _deferredBuckets -= repay;
         if (_deferredBuckets == 0)
         {
             Runtime.Log($"terrain recovery tick debt fully drained; peak debt={_peakDeferredBuckets}");
             _peakDeferredBuckets = 0;
+            _lastDebtProgressTicks = 0;
         }
+    }
+
+    private static void LogDebtProgress(long now)
+    {
+        if (_deferredBuckets <= 0)
+            return;
+        if (_lastDebtProgressTicks != 0 &&
+            now - _lastDebtProgressTicks < 20L * System.Diagnostics.Stopwatch.Frequency)
+            return;
+
+        _lastDebtProgressTicks = now;
+        Runtime.Log(
+            $"terrain recovery debt repayment: remaining={_deferredBuckets}, " +
+            $"peak={_peakDeferredBuckets}; new vanilla requests not deferred after grace");
     }
 }
 
