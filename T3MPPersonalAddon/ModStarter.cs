@@ -1,202 +1,222 @@
 using System;
 using System.Collections;
+using System.Linq;
 using System.Reflection;
 using HarmonyLib;
 using Timberborn.ModManagerScene;
 
 namespace T3MPPersonalAddon
 {
-    // Deliberately no Unity or T3MP compile-time references.
-    // Upstream T3MP can be updated without recompiling against its DLL.
+    // Independent of T3MP and HeightShower binary versions. Only the T3MP
+    // speed-owner patch and the display are changed; optimizations remain on.
     public sealed class ModStarter : IModStarter
     {
-        private static readonly Harmony H = new Harmony("local.t3mp.personal");
-        private static bool _done;
-        private static readonly BindingFlags All = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        private static readonly Harmony Patcher = new Harmony("local.t3mp.personal");
+        private static bool _started;
 
         public void StartMod(IModEnvironment environment)
         {
-            if (_done) return;
-            var ui = AccessTools.TypeByName("T3MP.UI.SimulationRateMeterView");
-            if (ui == null) throw new InvalidOperationException("[T3MPPersonalAddon] T3MP meter view not found. Requires T3MP 1.2.5 or a compatible newer version.");
-            var gui = AccessTools.Method(ui, "OnGUI", Type.EmptyTypes);
-            if (gui == null) throw new MissingMethodException(ui.FullName, "OnGUI");
-            var field = AccessTools.Field(ui, "_text");
-            if (field == null || field.FieldType != typeof(string)) throw new MissingFieldException(ui.FullName, "_text");
-            Overlay.Text = field;
-            Overlay.Prepare();
-            HudAnchor.Install(H);
-            // The original GUI is disabled, but the original sampling Update()
-            // and simulation tick observer remain untouched.
-            H.Patch(gui, prefix: new HarmonyMethod(typeof(Overlay), nameof(Overlay.DrawInstead)));
-            _done = true;
-            // T3MP's speed prefix may be registered later by another mod-load order.
-            RemoveSpeedPolicy();
-            // This patch runs after T3MP's patch is installed, if it exists.
+            if (_started) return;
+            var view = AccessTools.TypeByName("T3MP.UI.SimulationRateMeterView")
+                ?? throw new TypeLoadException("T3MP.UI.SimulationRateMeterView");
+            var onGui = AccessTools.Method(view, "OnGUI", Type.EmptyTypes)
+                ?? throw new MissingMethodException(view.FullName, "OnGUI");
+            RatePanel.Source = AccessTools.Field(view, "_text")
+                ?? throw new MissingFieldException(view.FullName, "_text");
+
+            Patcher.Patch(onGui, prefix: new HarmonyMethod(typeof(RatePanel), nameof(RatePanel.DrawInstead)));
+            HeightShowerAdapter.Install(Patcher);
+            _started = true;
+            RemoveT3MPSpeedPatch();
             var policy = AccessTools.TypeByName("T3MP.Runtime.RequestedSpeedPolicy");
-            if (policy != null)
-            {
-                var install = AccessTools.Method(policy, "Install");
-                if (install != null) H.Patch(install, postfix: new HarmonyMethod(typeof(ModStarter), nameof(AfterSpeedInstall)));
-            }
-            Console.WriteLine("[T3MPPersonalAddon] Meter override installed; T3MP tick/load optimizations untouched.");
+            var install = policy == null ? null : AccessTools.Method(policy, "Install");
+            if (install != null)
+                Patcher.Patch(install, postfix: new HarmonyMethod(typeof(ModStarter), nameof(AfterSpeedInstall)));
+            Console.WriteLine("[T3MPPersonalAddon] Height-styled readout addon v0.2.0 started; all T3MP optimizations retained");
         }
 
-        public static void AfterSpeedInstall() => RemoveSpeedPolicy();
+        public static void AfterSpeedInstall() => RemoveT3MPSpeedPatch();
 
-        private static void RemoveSpeedPolicy()
+        private static void RemoveT3MPSpeedPatch()
         {
-            var manager = AccessTools.TypeByName("Timberborn.TimeSystem.SpeedManager");
-            if (manager == null) return;
-            var target = AccessTools.Method(manager, "ChangeSpeedScale", new[] { typeof(float) });
-            if (target == null) return;
-            var patches = Harmony.GetPatchInfo(target);
-            if (patches == null) return;
-            var removed = 0;
-            foreach (var p in patches.Prefixes)
+            var speedManager = AccessTools.TypeByName("Timberborn.TimeSystem.SpeedManager");
+            var method = speedManager == null ? null :
+                AccessTools.Method(speedManager, "ChangeSpeedScale", new[] {typeof(float)});
+            if (method == null) return;
+            var info = Harmony.GetPatchInfo(method);
+            if (info == null) return;
+            foreach (var prefix in info.Prefixes)
             {
-                // Never touch patches from other speed mods or our optimizer.
-                if (p.owner != "t3mp.speed.requested") continue;
-                H.Unpatch(target, p.PatchMethod);
-                removed++;
+                // Only this exact T3MP owner: never unpatch the configurable
+                // speed mod, our optimizer, or any other mod's Harmony hooks.
+                if (prefix.owner != "t3mp.speed.requested") continue;
+                Patcher.Unpatch(method, prefix.PatchMethod);
+                Console.WriteLine("[T3MPPersonalAddon] Removed T3MP requested-speed prefix; all other speed patches remain");
             }
-            if (removed > 0) Console.WriteLine("[T3MPPersonalAddon] Removed T3MP speed-policy prefix; left other Harmony patches intact.");
         }
     }
 
-    // UI Toolkit label is an earlier sibling in the existing root. The
-    // expanding Global view panel paints over it instead of pushing it down.
-    internal static class Overlay
+    internal static class RatePanel
     {
-        internal static FieldInfo Text = null!;
-        private const BindingFlags All = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.Static;
-        private static object? _root, _label, _header;
-        private static double _nextScan;
-        private static string _lastText = "";
-        private static bool _warned;
-        private static Type _labelType = null!, _lengthType = null!, _lengthUnitType = null!, _positionType = null!;
+        internal static FieldInfo Source = null!;
+        private static object? _label;
+        private static string _last = "";
+        private static bool _error;
 
-        internal static void Prepare()
+        internal static void Attach(object label)
         {
-            _labelType = AccessTools.TypeByName("UnityEngine.UIElements.Label") ?? throw new TypeLoadException("UIElements.Label");
-            _lengthType = AccessTools.TypeByName("UnityEngine.UIElements.Length") ?? throw new TypeLoadException("UIElements.Length");
-            _lengthUnitType = AccessTools.TypeByName("UnityEngine.UIElements.LengthUnit") ?? throw new TypeLoadException("UIElements.LengthUnit");
-            _positionType = AccessTools.TypeByName("UnityEngine.UIElements.Position") ?? throw new TypeLoadException("UIElements.Position");
+            _label = label;
+            _last = "";
+            Console.WriteLine("[T3MPPersonalAddon] Display attached after HeightShower (top-right order 9)");
         }
 
         public static bool DrawInstead(object __instance)
         {
+            // Returning false suppresses ONLY original T3MP OnGUI. T3MP's
+            // Update and tick observer still calculate values normally.
+            if (_label == null) return false;
             try
             {
-                var raw = (string?)Text.GetValue(__instance) ?? "";
-                var line = raw.Split('\n')[0];
-                if (!line.StartsWith("rSPD/iSPD", StringComparison.Ordinal)) return false;
-                var now = (double)DateTime.UtcNow.Ticks / TimeSpan.TicksPerSecond;
-                if (now >= _nextScan || _label == null || HudAnchor.Get(_label, "panel") == null)
+                var raw = (string?)Source.GetValue(__instance) ?? "";
+                var first = raw.Split('\n')[0];
+                if (first.StartsWith("rSPD/iSPD", StringComparison.Ordinal) && first != _last)
                 {
-                    _nextScan = now + 2;
-                    Locate();
-                }
-                if (_label != null && _header != null && _root != null &&
-                    HudAnchor.TryBounds(_root, out var rb) && HudAnchor.TryBounds(_header, out var hb))
-                {
-                    // Recalculate from *header* geometry, never from the dropdown
-                    // container's variable height.
-                    Position(_label, hb.Left - rb.Left, hb.Bottom - rb.Top + 6f);
-                    if (line != _lastText)
-                    {
-                        _labelType.GetProperty("text", All)!.SetValue(_label, line);
-                        _lastText = line;
-                    }
+                    var text = _label.GetType().GetProperty("text", HeightShowerAdapter.All);
+                    if (text == null) throw new MissingMemberException("Label.text");
+                    text.SetValue(_label, first);
+                    _last = first;
                 }
             }
             catch (Exception e)
             {
+                if (!_error)
+                {
+                    _error = true;
+                    Console.WriteLine("[T3MPPersonalAddon] Display text update failed: " + e.GetBaseException().Message);
+                }
+            }
+            return false;
+        }
+    }
+
+    internal static class HeightShowerAdapter
+    {
+        internal const BindingFlags All = BindingFlags.Instance | BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic;
+        private static bool _warned;
+
+        internal static void Install(Harmony harmony)
+        {
+            var types = AppDomain.CurrentDomain.GetAssemblies().SelectMany(a =>
+            {
+                try { return a.GetTypes(); }
+                catch (ReflectionTypeLoadException e) { return e.Types.Where(t => t != null).Cast<Type>(); }
+                catch { return Enumerable.Empty<Type>(); }
+            }).Where(t => t.Name == "HeightShowerPanel" && (t.Namespace ?? "").Contains("HeightShower")).ToArray();
+            if (types.Length == 0)
+            {
+                Console.WriteLine("[T3MPPersonalAddon] HeightShowerPanel not found; readout cannot be created");
+                return;
+            }
+            foreach (var t in types)
+            {
+                var load = AccessTools.Method(t, "Load", Type.EmptyTypes);
+                if (load != null) harmony.Patch(load,
+                    postfix: new HarmonyMethod(typeof(HeightShowerAdapter), nameof(AfterHeightLoad)));
+            }
+            Console.WriteLine("[T3MPPersonalAddon] HeightShower Load hook installed");
+        }
+
+        public static void AfterHeightLoad(object __instance)
+        {
+            try
+            {
+                var type = __instance.GetType();
+                var oldPanel = AccessTools.Field(type, "_root")?.GetValue(__instance)
+                    ?? throw new MissingFieldException(type.FullName, "_root");
+                var gameLayout = AccessTools.Field(type, "_gameLayout")?.GetValue(__instance)
+                    ?? throw new MissingFieldException(type.FullName, "_gameLayout");
+                var heightLabel = AccessTools.Field(type, "HeightLabel")?.GetValue(__instance);
+
+                var ve = AccessTools.TypeByName("UnityEngine.UIElements.VisualElement")
+                    ?? throw new TypeLoadException("UnityEngine.UIElements.VisualElement");
+                var labelType = AccessTools.TypeByName("UnityEngine.UIElements.Label")
+                    ?? throw new TypeLoadException("UnityEngine.UIElements.Label");
+                var panel = Activator.CreateInstance(ve)!;
+                var label = Activator.CreateInstance(labelType)!;
+                ve.GetProperty("name", All)!.SetValue(panel, "T3MPPersonalRatePanel");
+                ve.GetProperty("name", All)!.SetValue(label, "T3MPPersonalRateLabel");
+
+                if (!CopyClasses(oldPanel, panel))
+                    foreach (var c in new[] {"top-right-item","square-large--green"}) AddClass(panel,c);
+                if (heightLabel == null || !CopyClasses(heightLabel, label))
+                    foreach (var c in new[] {"text--centered","text--yellow","date-panel__text","game-text--normal"}) AddClass(label,c);
+
+                CopyInline(oldPanel, panel, "flexDirection");
+                CopyInline(oldPanel, panel, "flexWrap");
+                CopyInline(oldPanel, panel, "justifyContent");
+
+                // The readout must never intercept any game UI clicks.
+                var picking = AccessTools.TypeByName("UnityEngine.UIElements.PickingMode");
+                var pickProperty = ve.GetProperty("pickingMode", All);
+                if (picking != null && pickProperty != null)
+                {
+                    var ignore = Enum.Parse(picking, "Ignore");
+                    pickProperty.SetValue(panel, ignore);
+                    pickProperty.SetValue(label, ignore);
+                }
+
+                labelType.GetProperty("text",All)!.SetValue(label, "rSPD/iSPD -- / --");
+                var add = ve.GetMethod("Add", All, null, new[] {ve}, null)
+                    ?? throw new MissingMethodException("VisualElement.Add");
+                add.Invoke(panel, new object[]{label});
+                // HeightShower calls UILayout.AddTopRight(...,8). Place after it
+                // at 9, with *the same* existing green and gold panel styling.
+                var append = gameLayout.GetType().GetMethods(All).FirstOrDefault(m =>
+                    m.Name == "AddTopRight" && m.GetParameters().Length == 2 &&
+                    m.GetParameters()[0].ParameterType.IsAssignableFrom(ve) &&
+                    m.GetParameters()[1].ParameterType == typeof(int))
+                    ?? throw new MissingMethodException("UILayout.AddTopRight(VisualElement,int)");
+                append.Invoke(gameLayout, new object[]{panel,9});
+                RatePanel.Attach(label);
+            }
+            catch(Exception ex)
+            {
                 if (!_warned)
                 {
                     _warned = true;
-                    Console.WriteLine("[T3MPPersonalAddon] Readout unavailable; game unaffected: " + e.GetBaseException().Message);
+                    Console.WriteLine("[T3MPPersonalAddon] HeightShower panel creation failed: "+ex.GetBaseException().Message);
                 }
             }
-            // Always suppress original floating T3MP OnGUI. Keep its native
-            // meter sampling, tick observers and all optimizations.
-            return false;
         }
 
-        private static void Locate()
+        private static bool CopyClasses(object source, object target)
         {
-            foreach (var root in HudAnchor.LiveRoots())
-            {
-                if (!HudAnchor.TryFindHeader(root, out var header)) continue;
-                if (!ReferenceEquals(_root, root) || _label == null || HudAnchor.Get(_label, "panel") == null)
-                {
-                    _root = root;
-                    _header = header;
-                    _label = Activator.CreateInstance(_labelType, new object[] { "" })!;
-                    // Put label behind the other HUD elements, including the
-                    // Global view expandable rows. Does not intercept clicks.
-                    var insert = root.GetType().GetMethod("Insert", All, null, new[] {typeof(int), AccessTools.TypeByName("UnityEngine.UIElements.VisualElement")!}, null);
-                    if (insert == null) throw new MissingMethodException("VisualElement.Insert");
-                    insert.Invoke(root, new object[] {0, _label});
-                    var style = HudAnchor.Get(_label, "style")!;
-                    SetEnumStyle(style, "position", _positionType, "Absolute");
-                    SetEnumStyle(style, "pickingMode", AccessTools.TypeByName("UnityEngine.UIElements.PickingMode")!, "Ignore");
-                    SetLength(style, "width", 245);
-                    SetLength(style, "height", 25);
-                    // The readout has a transparent background. Expanded
-                    // Global view contents remain on top.
-                    _lastText = "";
-                }
-                _header = header;
-                return;
-            }
-            _header = null;
+            var get = source.GetType().GetMethod("GetClasses", All, null, Type.EmptyTypes, null);
+            if (get?.Invoke(source, null) is not IEnumerable classes) return false;
+            bool copied = false;
+            foreach(var c in classes)
+                if(c is string s) { AddClass(target,s); copied = true; }
+            return copied;
         }
 
-        private static void Position(object label, float x, float y)
+        private static void AddClass(object element, string className)
         {
-            var style = HudAnchor.Get(label, "style")!;
-            SetLength(style, "left", Math.Max(0f, x));
-            SetLength(style, "top", Math.Max(0f, y));
+            var add = element.GetType().GetMethod("AddToClassList", All, null, new[]{typeof(string)},null)
+                ?? throw new MissingMethodException("VisualElement.AddToClassList");
+            add.Invoke(element,new object[]{className});
         }
 
-        private static void SetLength(object style, string property, float value)
+        private static void CopyInline(object source, object target, string prop)
         {
-            var unit = Enum.Parse(_lengthUnitType, "Pixel");
-            var length = Activator.CreateInstance(_lengthType, new object[] {value, unit})!;
-            SetStyle(style, property, length);
-        }
-
-        private static void SetEnumStyle(object style, string property, Type enumeration, string name)
-        {
-            // pickingMode is on VisualElement, not IStyle; no-op if absent.
-            if (property == "pickingMode")
-            {
-                var v = Enum.Parse(enumeration, name);
-                _label?.GetType().GetProperty(property, All)?.SetValue(_label, v);
-                return;
-            }
-            SetStyle(style, property, Enum.Parse(enumeration, name));
-        }
-
-        private static void SetStyle(object style, string property, object value)
-        {
-            // Unity exposes these properties through IStyle. On the shipped
-            // game build InlineStyleAccess implements IStyle explicitly, so
-            // reflection on the concrete type cannot find "position"/"left".
-            var p = style.GetType().GetProperty(property, All);
-            if (p == null)
-                foreach (var iface in style.GetType().GetInterfaces())
-                {
-                    p = iface.GetProperty(property, All);
-                    if (p != null && p.CanWrite) break;
-                    p = null;
-                }
-            if (p == null || !p.CanWrite)
-                throw new MissingMemberException(style.GetType().FullName, "IStyle." + property);
-            // Each IStyle setter takes StyleLength or StyleEnum<T>.
-            var wrapper = Activator.CreateInstance(p.PropertyType, new[] { value });
-            p.SetValue(style, wrapper);
+            var from = source.GetType().GetProperty("style", All)?.GetValue(source);
+            var to = target.GetType().GetProperty("style", All)?.GetValue(target);
+            if(from == null || to == null) return;
+            // Unity 6 exposes IStyle members through explicit interface
+            // implementations, not always as properties of InlineStyleAccess.
+            var iface = from.GetType().GetInterfaces()
+                .FirstOrDefault(i => i.Name == "IStyle" && i.GetProperty(prop) != null);
+            var property = iface?.GetProperty(prop);
+            if(property != null) property.SetValue(to, property.GetValue(from));
         }
     }
 }
