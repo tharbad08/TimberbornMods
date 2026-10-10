@@ -47,8 +47,9 @@ internal static class EbrVerifiedNoOpFastPath
 
         if (setter is null || !IsTriviallyPureSetter(setter, out var a, out var b))
         {
-            Runtime.Log("EBR identical-access fast path inactive: game SetAccesses " +
-                "is not a verified two-field assignment; preserve its original effects");
+            Runtime.Log("EBR identical-access fast path inactive: runtime setter has side effects " +
+                "beyond two assignments (older Accessible source refreshes validators, " +
+                "clears/adds accesses, and enables component). Preserve vanilla state and callbacks");
             return;
         }
 

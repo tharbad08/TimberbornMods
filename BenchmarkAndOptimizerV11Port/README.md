@@ -125,3 +125,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.82: add a fail-closed EBR identical-access no-op guard that activates only after an exact IL proof of a side-effect-free two-field setter, otherwise preserving vanilla; broaden bulk instantiation's return contract from exact List<object> to compatible declared interfaces, log precise actual runtime signatures and failures. No scheduling or save changes. See EBR-SAFE-NOOP-AND-BULK-v1.1.82.md.
+
+
+- v1.1.83: four-argument Timberborn 1.1 bulk-instantiation fast path, using the T3MP-reviewed construction order and an IL method-body allowlist. First-use/spec cache misses always use native; repeated preview batches can reuse immutable cached ComponentSpec instances while every live component still uses the original InstantiateComponent and all external postfixes run. T3MP's prefix is explicitly preserved; no changes to EBR SetAccesses because its original body refreshes validators and enables the component. Startup logs state whether the runtime IL passes verification and successful fast-batch counts. See SAFE-BULK-PREVIEW-v1.1.83.md.
