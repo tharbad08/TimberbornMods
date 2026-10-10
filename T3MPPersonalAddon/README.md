@@ -6,11 +6,16 @@ Separate addon for stock Workshop T3MP **1.2.5+**, Harmony, and the Benchmark & 
 - Unpatch **only** the T3MP Harmony prefix owned by `t3mp.speed.requested` on `SpeedManager.ChangeSpeedScale(float)`. Other speed mods retain control of the speed values.
 - Suppress the *original T3MP meter OnGUI only*, preserving T3MP's native tick observer and measurement calculation.
 - Draw only the first text line, `rSPD/iSPD ...`. No UPS, no overlay smooth-mode banner.
-- Attempt to anchor beneath the UI Toolkit speed panel via measured `worldBound`. Fallback is at the upper right, 155 pixels from the top.
+- Anchor beneath the existing **Global view** header; expanded menu is layered above the readout.
 - Do not modify T3MP's performance patches, game ticking, save loading, the optimizer, soil contamination, or preview logic.
 
+## Global view placement (v0.2)
+The readout is a non-interactive UI Toolkit Label positioned beneath the **Global view** header in the top-right HUD. It uses the header's `worldBound`, not the expanded menu height. The label is inserted as the *first* element of its root and will be drawn behind other UI content, including expanded Global view rows. It does not resize or push down the HUD. Text is sampled from T3MP's existing meter, omitting UPS.
+
+The anchor searches the visible English label **Global view**. If that exact label is absent (localization or an alternate view selector), the companion deliberately suppresses the old T3MP overlay but does not draw a misplaced replacement. A screenshot and log are needed for a new selector variant.
+
 ## Limitations and notes
-This is an **experimental initial implementation**. The in-game UI element may not be named with the expected Time/Speed/Buttons substring and UI Toolkit may not expose the game speed panel as UIDocument. In that case the fallback is used, not a guaranteed position below other mod UI. The original T3MP hide/show toggle is replaced by the companion readout. Shift+O smooth mode remains installed in T3MP and is *not* disabled by this addon.
+This is an **experimental initial implementation**. The selector hierarchy and UI Toolkit render layering require validation with the user's installed mod set. If the selector label is missing or localized, the readout stays hidden rather than drawing at an unrelated fixed position. The original T3MP hide/show toggle is replaced by the companion readout. Shift+O smooth mode remains installed in T3MP and is *not* disabled by this addon.
 
 The companion does **not** automatically resolve incompatibilities between unrelated optimization patches. It intentionally targets only the speed policy and GUI.
 
