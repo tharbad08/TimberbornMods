@@ -196,7 +196,7 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.78 cached-spec bulk creation and ordered preview invalidation; v1.1.77 global tick fix and v1.1.69 soil behavior unchanged; " +
+            "performance build: v1.1.79 EBR memory and coordinates; v1.1.78 cached-spec bulk creation and ordered preview invalidation; v1.1.77 global tick fix and v1.1.69 soil behavior unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
             "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; preview invalidation uses ordered no-allocation sweep for valid mixed brushes; warmed immutable ComponentSpecs are read directly during bulk construction/preview creation; terrain-triggered global TickableBucketService throttling is disabled: all entity/singleton tick buckets run at vanilla cadence; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
@@ -1661,6 +1661,10 @@ internal static class ExtendedBuilderReachNavOptimizer
     private static PropertyInfo? _updateBoundsProperty;
     private static MemberInfo? _coordX;
     private static MemberInfo? _coordY;
+    // Avoid repeated reflection/boxing for public int x/y fields or properties.
+    // Other coordinate shapes retain the original implementation.
+    private static Func<object, int>? _fastX;
+    private static Func<object, int>? _fastY;
     private static Func<object, object, bool>? _intersects;
     private static Action<object, object>? _notify;
 
@@ -1686,10 +1690,11 @@ internal static class ExtendedBuilderReachNavOptimizer
 
     private sealed class PendingBatch
     {
-        public PendingBatch(object update, object[] candidates, int total, int scanned, bool usedSpatial)
+        public PendingBatch(object update, object[] candidates, int candidateCount, int total, int scanned, bool usedSpatial)
         {
             Update = update;
             Candidates = candidates;
+            CandidateCount = candidateCount;
             Total = total;
             Scanned = scanned;
             UsedSpatial = usedSpatial;
@@ -1697,6 +1702,7 @@ internal static class ExtendedBuilderReachNavOptimizer
 
         public object Update { get; }
         public object[] Candidates { get; }
+        public int CandidateCount { get; }
         public int Total { get; }
         public int Scanned { get; }
         public bool UsedSpatial { get; }
@@ -1798,6 +1804,18 @@ internal static class ExtendedBuilderReachNavOptimizer
                 ?? AccessTools.Property(terrainCoordinatesType, "x");
             _coordY = (MemberInfo?)AccessTools.Field(terrainCoordinatesType, "y")
                 ?? AccessTools.Property(terrainCoordinatesType, "y");
+            // Compilation is opportunistic; reflection fallback is always available.
+            try
+            {
+                _fastX = CreateCoordinateReader(terrainCoordinatesType, _coordX);
+                _fastY = CreateCoordinateReader(terrainCoordinatesType, _coordY);
+            }
+            catch (Exception ex)
+            {
+                _fastX = null;
+                _fastY = null;
+                Runtime.Log($"EBR coordinate accessor fallback: {ex.GetType().Name}: {ex.Message}");
+            }
         }
 
         try
@@ -1854,7 +1872,7 @@ internal static class ExtendedBuilderReachNavOptimizer
             _installed = true;
             Runtime.Log(
                 $"Extended Builder Reach nav optimizer installed: {BucketSize}x{BucketSize} " +
-                "spatial buckets + exact terrain/road-bounds candidate selection; " +
+                "spatial buckets + exact terrain/road-bounds candidate selection; pooled large-update arrays and fast coordinate readers when supported; " +
                 $"updates with >= {LargeUpdateCandidateThreshold} EBR candidates are deferred " +
                 $"and drained at <= {DeferredDrainMaxListenersPerFrame} listeners / {DeferredDrainBudgetMs:F0}ms per frame; " +
                 "exact intersection check retained before notifying listeners");
@@ -1986,8 +2004,12 @@ internal static class ExtendedBuilderReachNavOptimizer
                 }
 
                 coordinateCount++;
-                var x = Convert.ToInt32(ReadMember(coordinate, _coordX));
-                var y = Convert.ToInt32(ReadMember(coordinate, _coordY));
+                var x = _fastX is null
+                    ? Convert.ToInt32(ReadMember(coordinate, _coordX))
+                    : _fastX(coordinate);
+                var y = _fastY is null
+                    ? Convert.ToInt32(ReadMember(coordinate, _coordY))
+                    : _fastY(coordinate);
                 var key = BucketKey(FloorDiv(x, BucketSize), FloorDiv(y, BucketSize));
                 if (!SpatialBuckets.TryGetValue(key, out var bucket))
                 {
@@ -2004,13 +2026,16 @@ internal static class ExtendedBuilderReachNavOptimizer
         }
 
         object[]? deferredCandidates = null;
+        var deferredCount = 0;
 
         if (usedSpatial)
         {
             scanned = CandidateSet.Count;
             if (scanned >= LargeUpdateCandidateThreshold)
             {
-                deferredCandidates = CandidateSet.ToArray();
+                deferredCount = scanned;
+                deferredCandidates = System.Buffers.ArrayPool<object>.Shared.Rent(scanned);
+                CandidateSet.CopyTo(deferredCandidates);
             }
             else
             {
@@ -2029,7 +2054,9 @@ internal static class ExtendedBuilderReachNavOptimizer
             scanned = total;
             if (scanned >= LargeUpdateCandidateThreshold)
             {
-                deferredCandidates = EbrListeners.ToArray();
+                deferredCount = scanned;
+                deferredCandidates = System.Buffers.ArrayPool<object>.Shared.Rent(scanned);
+                EbrListeners.CopyTo(deferredCandidates);
             }
             else
             {
@@ -2048,8 +2075,8 @@ internal static class ExtendedBuilderReachNavOptimizer
         if (deferredCandidates is not null)
         {
             DeferredBatches.Enqueue(
-                new PendingBatch(__0, deferredCandidates, total, scanned, usedSpatial));
-            _deferredCandidates += deferredCandidates.Length;
+                new PendingBatch(__0, deferredCandidates, deferredCount, total, scanned, usedSpatial));
+            _deferredCandidates += deferredCount;
 
             if (!_deferredModeLogged)
             {
@@ -2101,9 +2128,11 @@ internal static class ExtendedBuilderReachNavOptimizer
         {
             var batch = DeferredBatches.Peek();
 
-            if (batch.Index >= batch.Candidates.Length)
+            if (batch.Index >= batch.CandidateCount)
             {
                 DeferredBatches.Dequeue();
+                // Clear references before returning the pool rental.
+                System.Buffers.ArrayPool<object>.Shared.Return(batch.Candidates, clearArray: true);
                 Runtime.Log(
                     $"EBR deferred batch complete: registered={batch.Total}, scanned={batch.Scanned}, " +
                     $"notified={batch.Notified}, remainingBatches={DeferredBatches.Count}, " +
@@ -2289,6 +2318,26 @@ internal static class ExtendedBuilderReachNavOptimizer
         var result = value / divisor;
         var remainder = value % divisor;
         return remainder < 0 ? result - 1 : result;
+    }
+
+    private static Func<object, int>? CreateCoordinateReader(Type coordinateType, MemberInfo? member)
+    {
+        var parameter = System.Linq.Expressions.Expression.Parameter(typeof(object), "coordinate");
+        var typed = System.Linq.Expressions.Expression.Convert(parameter, coordinateType);
+        if (member is FieldInfo field && field.FieldType == typeof(int) && field.IsPublic)
+        {
+            return System.Linq.Expressions.Expression.Lambda<Func<object, int>>(
+                System.Linq.Expressions.Expression.Field(typed, field), parameter).Compile();
+        }
+
+        if (member is PropertyInfo property && property.PropertyType == typeof(int) &&
+            property.GetGetMethod() is { IsPublic: true })
+        {
+            return System.Linq.Expressions.Expression.Lambda<Func<object, int>>(
+                System.Linq.Expressions.Expression.Property(typed, property), parameter).Compile();
+        }
+
+        return null;
     }
 
     private static object? ReadMember(object instance, MemberInfo member) =>
