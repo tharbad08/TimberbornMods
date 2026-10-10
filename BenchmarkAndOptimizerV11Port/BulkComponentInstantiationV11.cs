@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Immutable;
 using System.Linq;
 using System.Linq.Expressions;
 using System.Reflection;
@@ -59,7 +58,10 @@ internal static class BulkComponentInstantiationFastPath
             args[0].ParameterType == blueprint &&
             args[1].ParameterType == typeof(string) &&
             args[2].ParameterType == typeof(IReadOnlyList<object>) &&
-            args[3].ParameterType == typeof(ImmutableArray<Type>) &&
+            args[3].ParameterType.IsGenericType &&
+            args[3].ParameterType.GetGenericTypeDefinition().FullName ==
+                "System.Collections.Immutable.ImmutableArray`1" &&
+            args[3].ParameterType.GetGenericArguments()[0] == typeof(Type) &&
             item.ReturnType == typeof(object) &&
             itemArgs is { Length: 2 } &&
             itemArgs[0].ParameterType == blueprint &&
@@ -165,8 +167,8 @@ internal static class BulkComponentInstantiationFastPath
             __0 is null || __3 is not IReadOnlyList<Type> types ||
             types.Count < 2) return true;
 
-        if (!Plans.TryGetValue(__0, out var planMap) ||
-            !planMap.TryGetValue(__3, out var plan))
+        var planMap = Plans.GetValue(__0, _ => new Dictionary<object, Plan>());
+        if (!planMap.TryGetValue(__3, out var plan))
         {
             // Full-plan validation before any live creation. First use,
             // uncertain spec lookup, or missing spec retains vanilla.
@@ -190,7 +192,6 @@ internal static class BulkComponentInstantiationFastPath
             if (cached == 0) return true;
 
             plan = new Plan(typeArray, specs, cached);
-            planMap = Plans.GetValue(__0, _ => new Dictionary<object, Plan>());
             planMap[__3] = plan;
         }
 
