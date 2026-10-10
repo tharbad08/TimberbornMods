@@ -168,7 +168,12 @@ internal static class FreezeDetectorPatcher
         FaunaRecipeLookupCachePatcher.Patch(FreezeHarmony);
         KeystoneFaunaTemplatePrewarmer.Patch(FreezeHarmony);
         FaunaInstantiationDetailProfiler.Patch(FreezeHarmony);
-        TerrainRecoveryTickLimiter.Patch(FreezeHarmony);
+        // v1.1.77: This hook targets TickableBucketService.TickBuckets, which is
+        // the GLOBAL simulation scheduler (128 entity buckets + 1 singleton).
+        // Terrain-triggered throttling here postpones unrelated gameplay ticks,
+        // including planting and other entity updates. Leave it unpatched.
+        // NotifyTerrainEdit remains a no-op while _installed is false.
+        Runtime.Log("global TickBuckets terrain recovery limiter disabled: vanilla entity and singleton tick scheduling preserved");
         SoilContaminationResetOptimizer.Patch(FreezeHarmony);
         SoilContaminationDeepProfiler.Patch(FreezeHarmony);
         SoilMoistureProfiler.Patch(FreezeHarmony);
@@ -190,10 +195,10 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.76 terrain-recovery anti-starvation repair; v1.1.75 preview/blueprint optimizations and v1.1.69 soil behavior unchanged; " +
+            "performance build: v1.1.77 globally-scoped TickBuckets limiter removed for correctness; v1.1.75 preview/blueprint optimizations and v1.1.69 soil behavior unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; all-buildable brushes bypass empty remaining-preview LINQ enumeration; terrain recovery now enforces 4s continuous-edit grace and repays backlog on top of vanilla tick requests; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
+            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; all-buildable brushes bypass empty remaining-preview LINQ enumeration; terrain-triggered global TickableBucketService throttling is disabled: all entity/singleton tick buckets run at vanilla cadence; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
             "Keystone prewarm, EBR large-update budgeting, protected SoilContamination vanilla cadence, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
