@@ -141,7 +141,12 @@ namespace T3MPPersonalAddon
                     ?? throw new TypeLoadException("UnityEngine.UIElements.VisualElement");
                 var labelType = AccessTools.TypeByName("UnityEngine.UIElements.Label")
                     ?? throw new TypeLoadException("UnityEngine.UIElements.Label");
-                var panel = Activator.CreateInstance(ve)!;
+                // Timberborn's square-large--green panel uses NineSlice geometry,
+                // not a stock VisualElement. HeightShower's VisualElementBuilder
+                // actually creates a NineSliceVisualElement (TimberAPI source).
+                var nineSlice = AccessTools.TypeByName("Timberborn.CoreUI.NineSliceVisualElement")
+                    ?? throw new TypeLoadException("Timberborn.CoreUI.NineSliceVisualElement");
+                var panel = Activator.CreateInstance(nineSlice)!;
                 var label = Activator.CreateInstance(labelType)!;
                 ve.GetProperty("name", All)!.SetValue(panel, "T3MPPersonalRatePanel");
                 ve.GetProperty("name", All)!.SetValue(label, "T3MPPersonalRateLabel");
@@ -177,6 +182,7 @@ namespace T3MPPersonalAddon
                     m.GetParameters()[1].ParameterType == typeof(int))
                     ?? throw new MissingMethodException("UILayout.AddTopRight(VisualElement,int)");
                 append.Invoke(gameLayout, new object[]{panel,9});
+                Console.WriteLine("[T3MPPersonalAddon] Styled readout element: " + panel.GetType().FullName);
                 RatePanel.Attach(label);
             }
             catch(Exception ex)
