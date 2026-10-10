@@ -25,8 +25,8 @@ internal static class EbrWorkProfiler
 
     // Exact timing for candidate lookup; sample-only timing for per-listener work.
     private static long _lookupTicks, _intersectTicks, _callbackTicks;
-    private static long _boundsTicks, _accessTicks, _setTicks;
-    private static long _maxLookupTicks, _maxCallbackTicks;
+    private static long _boundsTicks, _accessTicks, _setTicks, _rebuildTicks;
+    private static long _maxLookupTicks, _maxCallbackTicks, _maxRebuildTicks;
     private static long _reportedAt;
     private static int _lookupEvents, _lookupCandidates, _maxLookupCandidates;
     private static int _sampledIntersections, _sampledCallbacks, _sampledRebuilds;
@@ -52,7 +52,10 @@ internal static class EbrWorkProfiler
 
         counts[0] = InstallMethods(harmony, generator, "GenerateAccessBounds", 2);
         counts[1] = InstallMethods(harmony, generator, "GenerateAccesses", 2);
-        counts[2] = InstallMethods(harmony, accessible, "SetAccesses", 1);
+        // v1.1.81: The actual game's SetAccesses signature need not have
+        // one parameter. Probe every non-generic overload on the resolved
+        // Accessible type, then report the exact runtime signatures patched.
+        counts[2] = InstallMethods(harmony, accessible, "SetAccesses", null);
         counts[3] = InstallMethods(harmony, ebrType, "UpdateAccesses", 0);
         _enabled = true;
         _reportedAt = Stopwatch.GetTimestamp();
@@ -60,10 +63,12 @@ internal static class EbrWorkProfiler
             "EBR diagnostic sampler active: every 32nd intersection/callback; " +
             $"stage hooks bounds={counts[0]}, accesses={counts[1]}, apply={counts[2]}, rebuild={counts[3]}; " +
             $"aggregate EBR.PROFILE report every {ReportSeconds}s of runtime activity; " +
-            "stage timings are inclusive and callback-only; no worker threads or game-state changes");
+            "stage timings are inclusive and callback-only; " +
+            "rebuild inclusive timing separates unexplained update cost from notification overhead; " +
+            "no worker threads or game-state changes");
     }
 
-    private static int InstallMethods(Harmony harmony, Type? type, string name, int parameters)
+    private static int InstallMethods(Harmony harmony, Type? type, string name, int? parameters)
     {
         if (type is null)
         {
@@ -74,7 +79,7 @@ internal static class EbrWorkProfiler
         var methods = type.GetMethods(
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
             .Where(m => m.Name == name && !m.IsAbstract && !m.ContainsGenericParameters &&
-                        m.GetParameters().Length == parameters)
+                        (!parameters.HasValue || m.GetParameters().Length == parameters.Value))
             .Distinct()
             .ToArray();
 
@@ -91,6 +96,13 @@ internal static class EbrWorkProfiler
                         AccessTools.Method(typeof(EbrWorkProfiler), nameof(StageFinalizer)))
                     { priority = Priority.Last });
                 installed++;
+                if (name == "SetAccesses")
+                {
+                    Runtime.Log(
+                        $"EBR SetAccesses profiler attached: " +
+                        $"{method.DeclaringType?.FullName}.{method.Name}" +
+                        $"({string.Join(", ", method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name))})");
+                }
             }
             catch (Exception ex)
             {
@@ -101,7 +113,18 @@ internal static class EbrWorkProfiler
         }
 
         if (installed == 0)
-            Runtime.Log($"EBR diagnostic probe unavailable: {type.FullName}.{name}/{parameters}");
+        {
+            var target = parameters.HasValue ? $"/{parameters.Value}" : "/any-overload";
+            var candidateSignatures = name == "SetAccesses"
+                ? string.Join("; ", type.GetMethods(
+                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                    .Where(m => m.Name.Contains("Access", StringComparison.Ordinal))
+                    .Select(m => m.Name + "/" + m.GetParameters().Length)
+                    .Distinct())
+                : "";
+            Runtime.Log($"EBR diagnostic probe unavailable: {type.FullName}.{name}{target}" +
+                (name == "SetAccesses" ? $"; available access methods=[{candidateSignatures}]" : ""));
+        }
         return installed;
     }
 
@@ -133,6 +156,8 @@ internal static class EbrWorkProfiler
                 break;
             case "UpdateAccesses":
                 _sampledRebuilds++;
+                _rebuildTicks += ticks;
+                _maxRebuildTicks = Math.Max(_maxRebuildTicks, ticks);
                 break;
         }
 
@@ -216,7 +241,10 @@ internal static class EbrWorkProfiler
             // estimates callback overhead/repeated bounds checks and is not
             // independently measured. Sub-stage totals only cover sampled calls.
             var inner = _boundsTicks + _accessTicks + _setTicks;
-            var other = Math.Max(0, _callbackTicks - inner);
+            // These are separately inclusive scopes. Individual method timings
+            // incur profiler overhead, so treat residuals as approximations.
+            var rebuildOther = Math.Max(0, _rebuildTicks - inner);
+            var callbackOther = Math.Max(0, _callbackTicks - _rebuildTicks);
             Runtime.Log(
                 "EBR.PROFILE: " +
                 $"lookup events={_lookupEvents} total={Ms(_lookupTicks):F2}ms " +
@@ -229,17 +257,19 @@ internal static class EbrWorkProfiler
                 $"total={Ms(_callbackTicks):F2}ms " +
                 $"avg={Avg(_callbackTicks, _sampledCallbacks):F3}ms " +
                 $"max={Ms(_maxCallbackTicks):F2}ms failures={_callbackFailures}; " +
-                $"rebuild sampled={_sampledRebuilds}; " +
+                $"rebuild sampled={_sampledRebuilds} " +
+                $"total={Ms(_rebuildTicks):F2}ms max={Ms(_maxRebuildTicks):F2}ms; " +
                 $"breakdown(sampled) bounds={Ms(_boundsTicks):F2}ms/{_boundsCalls} " +
                 $"generate={Ms(_accessTicks):F2}ms/{_accessCalls} " +
                 $"apply={Ms(_setTicks):F2}ms/{_setCalls} " +
-                $"other~={Ms(other):F2}ms; " +
+                $"rebuildOther~={Ms(rebuildOther):F2}ms " +
+                $"callbackOther~={Ms(callbackOther):F2}ms; " +
                 "stages inclusive; GC pauses may distort wall times");
         }
 
         _lookupTicks = _intersectTicks = _callbackTicks = 0;
-        _boundsTicks = _accessTicks = _setTicks = 0;
-        _maxLookupTicks = _maxCallbackTicks = 0;
+        _boundsTicks = _accessTicks = _setTicks = _rebuildTicks = 0;
+        _maxLookupTicks = _maxCallbackTicks = _maxRebuildTicks = 0;
         _lookupEvents = _lookupCandidates = _maxLookupCandidates = 0;
         _sampledIntersections = _sampledCallbacks = _sampledRebuilds = 0;
         _boundsCalls = _accessCalls = _setCalls = _callbackFailures = 0;

@@ -119,3 +119,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.80: diagnostic-only EBR threading feasibility sampler. Adds exact aggregate candidate-selection timing and 1/32 sampled intersection/notification timing, with nested sampled GenerateAccessBounds, GenerateAccesses, SetAccesses and UpdateAccesses probes resolved from the installed EBR assembly. Summaries appear in optimizer-v11.log as EBR.PROFILE every 15 seconds of relevant activity. Existing EBR budgets, gameplay, GC, saves, soil and tick scheduling unchanged. See EBR-THREADING-PROFILE-v1.1.80.md.
+
+
+- v1.1.81: fix the SetAccesses profiler by attaching to runtime-discovered Accessible.SetAccesses overloads (not assumed single-argument method), reporting successful hook signatures, and measuring sampled UpdateAccesses inclusive time so application, rebuild remainder, and callback remainder can be separated. Diagnostics only. See EBR-SETACCESSES-PROFILER-v1.1.81.md.
