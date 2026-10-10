@@ -116,3 +116,6 @@ The runtime package requires the normal Timberborn Harmony mod.
   AutoScaffold, EzTube, and game rules are unchanged.
 - Build workflow stages a ready-to-install mod directory directly, so GitHub's
   single downloadable ZIP no longer contains a second ZIP.
+
+
+- v1.1.80: diagnostic-only EBR threading feasibility sampler. Adds exact aggregate candidate-selection timing and 1/32 sampled intersection/notification timing, with nested sampled GenerateAccessBounds, GenerateAccesses, SetAccesses and UpdateAccesses probes resolved from the installed EBR assembly. Summaries appear in optimizer-v11.log as EBR.PROFILE every 15 seconds of relevant activity. Existing EBR budgets, gameplay, GC, saves, soil and tick scheduling unchanged. See EBR-THREADING-PROFILE-v1.1.80.md.
