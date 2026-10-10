@@ -122,3 +122,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.81: fix the SetAccesses profiler by attaching to runtime-discovered Accessible.SetAccesses overloads (not assumed single-argument method), reporting successful hook signatures, and measuring sampled UpdateAccesses inclusive time so application, rebuild remainder, and callback remainder can be separated. Diagnostics only. See EBR-SETACCESSES-PROFILER-v1.1.81.md.
+
+
+- v1.1.82: add a fail-closed EBR identical-access no-op guard that activates only after an exact IL proof of a side-effect-free two-field setter, otherwise preserving vanilla; broaden bulk instantiation's return contract from exact List<object> to compatible declared interfaces, log precise actual runtime signatures and failures. No scheduling or save changes. See EBR-SAFE-NOOP-AND-BULK-v1.1.82.md.
