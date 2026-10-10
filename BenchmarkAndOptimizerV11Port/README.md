@@ -95,3 +95,24 @@ The runtime package requires the normal Timberborn Harmony mod.
 - v1.1.68: safety mitigation for planting not resuming after contamination weather events. Protect `Timberborn.SoilContaminationSystem.SoilContaminationService`, `TonWolfe.SimpleWorkshopControl.PlantingControler`, and `TonWolfe.SimpleWorkshopControl.PlantMonitor` from all tick throttling (interval 1), even if saved settings still contain 4/2/10. Keep the reset optimizer unchanged because the affected session did not log any Reset execution; its causal role is unproven. All other optimization behavior is unchanged. Test live by manually setting these three intervals to 1 in existing v1.1.66 before restarting.
 
 - v1.1.69: optimizer search-field stability fix. Filtering now hides/shows already-created setting rows via `style.display` rather than calling `Clear()` and recreating hundreds of sliders inside the text-change callback during UI LateUpdate. Explicit Refresh and Reset may still rebuild rows. The callback logs and contains local filtering failures. Keeps the v1.1.68 soil-contamination vanilla cadence and existing optimizations.
+
+
+## v1.1.79 — October 10, 2026
+
+- Large EBR navigation candidate lists now rent arrays from `ArrayPool<object>`.
+  The pending item explicitly stores the logical candidate count (a rental may
+  be larger), drains exactly that many candidates in the same order, and returns
+  the buffer with all references cleared only after completion.
+- Terrain-coordinate `x`/`y` readers compile once for public integer members;
+  unsupported types and accessor failures keep the original reflection path.
+  Exact bounds checks, spatial buckets, active-listener checks, callback order,
+  256-listener/8ms budgets, and normal navigation dispatch are unchanged.
+- This is a targeted EBR allocation/CPU improvement, **not** a Gen2 collection
+  workaround. The October 10 logs show 2.7–8.5s full-GC freezes; the Unity
+  runtime reports incremental GC disabled, and no forced GC is introduced.
+- The logged `GC.GetTotalMemory(false)` fallback measures global live-heap
+  growth during a scope, not allocations causally attributable to that method.
+- Save code, Soil Contamination and reset, global ticks, preview placement,
+  AutoScaffold, EzTube, and game rules are unchanged.
+- Build workflow stages a ready-to-install mod directory directly, so GitHub's
+  single downloadable ZIP no longer contains a second ZIP.
