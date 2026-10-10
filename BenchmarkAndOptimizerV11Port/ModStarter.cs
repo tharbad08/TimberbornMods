@@ -160,6 +160,7 @@ internal static class FreezeDetectorPatcher
         BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
         ExtendedBuilderReachNavOptimizer.Patch(FreezeHarmony);
         EbrWorkProfiler.Patch(FreezeHarmony);
+        EbrVerifiedNoOpFastPath.Patch(FreezeHarmony);
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
         PreviewNavMeshBatcher.Patch(FreezeHarmony);
         UnusedPreviewPoolFastPath.Patch(FreezeHarmony);
@@ -197,7 +198,7 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.81 signature-resilient SetAccesses and rebuild profiling; v1.1.80 EBR stage-only sampled diagnostics; v1.1.79 EBR memory and coordinates; v1.1.78 cached-spec bulk creation and ordered preview invalidation; v1.1.77 global tick fix and v1.1.69 soil behavior unchanged; " +
+            "performance build: v1.1.82 verified EBR no-op guard and bulk signature adaptation; v1.1.81 signature-resilient SetAccesses and rebuild profiling; v1.1.80 EBR stage-only sampled diagnostics; v1.1.79 EBR memory and coordinates; v1.1.78 cached-spec bulk creation and ordered preview invalidation; v1.1.77 global tick fix and v1.1.69 soil behavior unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
             "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; preview invalidation uses ordered no-allocation sweep for valid mixed brushes; warmed immutable ComponentSpecs are read directly during bulk construction/preview creation; terrain-triggered global TickableBucketService throttling is disabled: all entity/singleton tick buckets run at vanilla cadence; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
@@ -2985,15 +2986,34 @@ internal static class BulkComponentInstantiationFastPath
         var batch = AccessTools.Method(instantiator, "InstantiateComponents");
         var item = AccessTools.Method(instantiator, "InstantiateComponent");
         var args = batch?.GetParameters();
-        if (batch is null || item is null || batch.ReturnType != typeof(List<object>) ||
-            args is null || args.Length != 3 || args[0].ParameterType != blueprint ||
-            args[1].ParameterType != baseComponent ||
-            !args[2].ParameterType.IsGenericType ||
-            args[2].ParameterType.GetGenericTypeDefinition().FullName !=
-                "System.Collections.Immutable.ImmutableArray`1" ||
-            item.ReturnType != typeof(object))
+        var itemArgs = item?.GetParameters();
+        // Do not assume the method returns exactly List<object>. A version can
+        // expose a compatible interface such as IReadOnlyList<object>. We may
+        // still return List<object> ONLY when the declared type accepts it.
+        // For a concrete List<T> with T != object or an incompatible return
+        // shape, keep the original method. Do not risk cast failures.
+        var outputCompatible = batch is not null &&
+            batch.ReturnType.IsAssignableFrom(typeof(List<object>));
+        var paramsCompatible = args is { Length: 3 } &&
+            args[0].ParameterType == blueprint &&
+            args[1].ParameterType == baseComponent &&
+            args[2].ParameterType.IsGenericType &&
+            args[2].ParameterType.GetGenericTypeDefinition().FullName ==
+                "System.Collections.Immutable.ImmutableArray`1" &&
+            args[2].ParameterType.GetGenericArguments()[0] == typeof(Type);
+        var itemCompatible = item is not null && item.ReturnType == typeof(object) &&
+            itemArgs is { Length: 2 } &&
+            itemArgs[0].ParameterType == blueprint &&
+            itemArgs[1].ParameterType == typeof(Type);
+        if (!outputCompatible || !paramsCompatible || !itemCompatible)
         {
-            Runtime.Log("bulk instantiation fast path disabled: BaseInstantiator method signatures changed");
+            string Describe(MethodInfo? m) => m is null ? "not found" :
+                $"{m.ReturnType.FullName} {m.DeclaringType?.FullName}.{m.Name}(" +
+                string.Join(", ", m.GetParameters().Select(p => p.ParameterType.FullName)) + ")";
+            Runtime.Log("bulk instantiation fast path disabled: incompatible runtime signature; " +
+                $"batch=[{Describe(batch)}]; item=[{Describe(item)}]; " +
+                $"returnAcceptsListObject={outputCompatible}, batchArgsMatch={paramsCompatible}, " +
+                $"itemArgsMatch={itemCompatible}; vanilla creation retained");
             return;
         }
 
