@@ -159,6 +159,7 @@ internal static class FreezeDetectorPatcher
             "LateUpdateSingleton");
         BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
         ExtendedBuilderReachNavOptimizer.Patch(FreezeHarmony);
+        EbrWorkProfiler.Patch(FreezeHarmony);
         NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
         PreviewNavMeshBatcher.Patch(FreezeHarmony);
         UnusedPreviewPoolFastPath.Patch(FreezeHarmony);
@@ -196,7 +197,7 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.Initialize();
         PlayerLoopPhaseProfiler.Install();
         Runtime.Log(
-            "performance build: v1.1.79 EBR memory and coordinates; v1.1.78 cached-spec bulk creation and ordered preview invalidation; v1.1.77 global tick fix and v1.1.69 soil behavior unchanged; " +
+            "performance build: v1.1.80 EBR stage-only sampled diagnostics; v1.1.79 EBR memory and coordinates; v1.1.78 cached-spec bulk creation and ordered preview invalidation; v1.1.77 global tick fix and v1.1.69 soil behavior unchanged; " +
             $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
             "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
             "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; preview invalidation uses ordered no-allocation sweep for valid mixed brushes; warmed immutable ComponentSpecs are read directly during bulk construction/preview creation; terrain-triggered global TickableBucketService throttling is disabled: all entity/singleton tick buckets run at vanilla cadence; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
@@ -1951,6 +1952,7 @@ internal static class ExtendedBuilderReachNavOptimizer
         }
 
         var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        var lookupStarted = started;
         var total = EbrListeners.Count;
         var notified = 0;
         var scanned = 0;
@@ -2025,6 +2027,11 @@ internal static class ExtendedBuilderReachNavOptimizer
             usedSpatial = coordinateCount > 0;
         }
 
+        // Measure lookup separately from intersections, callbacks and snapshotting.
+        EbrWorkProfiler.RecordSelection(
+            System.Diagnostics.Stopwatch.GetTimestamp() - lookupStarted,
+            CandidateSet.Count, total, usedSpatial);
+
         object[]? deferredCandidates = null;
         var deferredCount = 0;
 
@@ -2041,9 +2048,9 @@ internal static class ExtendedBuilderReachNavOptimizer
             {
                 foreach (var listener in CandidateSet)
                 {
-                    if (_intersects(listener, __0))
+                    if (EbrWorkProfiler.Intersects(listener, __0, _intersects))
                     {
-                        _notify(listener, __0);
+                        EbrWorkProfiler.Notify(listener, __0, _notify);
                         notified++;
                     }
                 }
@@ -2063,9 +2070,9 @@ internal static class ExtendedBuilderReachNavOptimizer
                 for (var i = 0; i < EbrListeners.Count; i++)
                 {
                     var listener = EbrListeners[i];
-                    if (_intersects(listener, __0))
+                    if (EbrWorkProfiler.Intersects(listener, __0, _intersects))
                     {
-                        _notify(listener, __0);
+                        EbrWorkProfiler.Notify(listener, __0, _notify);
                         notified++;
                     }
                 }
@@ -2151,9 +2158,9 @@ internal static class ExtendedBuilderReachNavOptimizer
 
             try
             {
-                if (_intersects(listener, batch.Update))
+                if (EbrWorkProfiler.Intersects(listener, batch.Update, _intersects))
                 {
-                    _notify(listener, batch.Update);
+                    EbrWorkProfiler.Notify(listener, batch.Update, _notify);
                     batch.Notified++;
                     notified++;
                 }
@@ -8366,6 +8373,7 @@ internal static class FreezeDetector
         MonoBehaviourLateUpdateProfiler.ArmForUpcomingFrame(heapBytes);
         ManagedHeapSampler.FrameBoundary(heapBytes);
         IncrementalGcSmoother.Pulse(heapBytes);
+        EbrWorkProfiler.Pulse();
         ExtendedBuilderReachNavOptimizer.DrainDeferred();
     }
 
