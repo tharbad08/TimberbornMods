@@ -128,3 +128,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.83: four-argument Timberborn 1.1 bulk-instantiation fast path, using the T3MP-reviewed construction order and an IL method-body allowlist. First-use/spec cache misses always use native; repeated preview batches can reuse immutable cached ComponentSpec instances while every live component still uses the original InstantiateComponent and all external postfixes run. T3MP's prefix is explicitly preserved; no changes to EBR SetAccesses because its original body refreshes validators and enables the component. Startup logs state whether the runtime IL passes verification and successful fast-batch counts. See SAFE-BULK-PREVIEW-v1.1.83.md.
+
+
+- v1.1.84: isolate the ~300 ms residual in large preview TemplateInstantiator.Instantiate by timing T3MP PreparedEntityVisuals.Activate (inclusive Unity GameObject.SetActive and lifecycle) and separate T3MP Prepare, in existing block-scope freeze detail plus occasional TEMPLATE.ACTIVATION summaries. Add preview-specific counts of actually accelerated component-list batches, cached specs, and natively constructed live components. No preview lifecycle/validation, T3MP, AutoScaffold, EzTube, SmartPower, EBR, save, soil or scheduling changes. See TEMPLATE-ACTIVATION-PROFILING-v1.1.84.md.
