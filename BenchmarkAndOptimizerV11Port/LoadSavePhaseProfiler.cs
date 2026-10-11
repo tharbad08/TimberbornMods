@@ -134,7 +134,10 @@ internal static class LoadSavePhaseProfiler
 
         // The private GameSaver.Save executes only for an actual save, unlike
         // SaveQueued / GameSaverUnityAdapter.LateUpdate, which run every frame.
-        AddUniqueSave(harmony);
+        // v1.1.95: GameSaver.Save(QueuedSave) contains exception blocks that
+        // reject even observational Harmony instrumentation on this runtime.
+        // Do not retry; working SaveWriter and GameSaverUnityAdapter probes stay on.
+        Runtime.Log("SAVE.PROBE GameSaver.Save direct hook disabled after invalid exception-block IL; SaveWriter + GameSaverUnityAdapter remain");
         Add(harmony, "Timberborn.SaveSystem.SaveWriter",
             "WriteToSaveStream", Category.Save, "SaveWriter.ZIPArchiveAndEntries", 2,
             begin: true, milestone: true);
