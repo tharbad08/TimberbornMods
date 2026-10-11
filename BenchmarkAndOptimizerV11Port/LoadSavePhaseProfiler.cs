@@ -134,8 +134,7 @@ internal static class LoadSavePhaseProfiler
 
         // The private GameSaver.Save executes only for an actual save, unlike
         // SaveQueued / GameSaverUnityAdapter.LateUpdate, which run every frame.
-        Add(harmony, "Timberborn.GameSaveRuntimeSystem.GameSaver",
-            "Save", Category.Save, "GameSaver.Save", 1, begin: true, end: true, milestone: true);
+        AddUniqueSave(harmony);
         Add(harmony, "Timberborn.SaveSystem.SaveWriter",
             "WriteToSaveStream", Category.Save, "SaveWriter.ZIPArchiveAndEntries", 2,
             begin: true, milestone: true);
@@ -168,6 +167,27 @@ internal static class LoadSavePhaseProfiler
             "curated game phase methods only; no all-assembly GetTypes, no " +
             "per-mod handler patching, no coroutine MoveNext patch; " +
             "LOAD.START/PHASE/GAP/SUMMARY and SAVE.START/PHASE/SUMMARY remain");
+    }
+
+    // The private Save signature can vary across game patches.
+    // Resolve exactly one declared implementation; never patch ambiguous methods.
+    private static void AddUniqueSave(Harmony harmony)
+    {
+        var type = AccessTools.TypeByName("Timberborn.GameSaveRuntimeSystem.GameSaver");
+        if (type is null) { _skipped++; Runtime.Log("SAVE.PROBE GameSaver missing"); return; }
+        var flags = BindingFlags.Public | BindingFlags.NonPublic |
+                    BindingFlags.Instance | BindingFlags.Static | BindingFlags.DeclaredOnly;
+        var found = type.GetMethods(flags).Where(m => m.Name == "Save" &&
+            !m.IsAbstract && !m.ContainsGenericParameters).ToArray();
+        if (found.Length != 1)
+        {
+            _skipped++;
+            Runtime.Log($"SAVE.PROBE GameSaver.Save ambiguous matches={found.Length}");
+            return;
+        }
+        Runtime.Log("SAVE.PROBE GameSaver.Save signature=" + found[0]);
+        Install(harmony, found[0], new Target("GameSaver.Save",
+            Category.Save, begin: true, end: true, milestone: true));
     }
 
     private static void Add(Harmony h, string typeName, string methodName,
@@ -261,11 +281,10 @@ internal static class LoadSavePhaseProfiler
         __state = Stopwatch.GetTimestamp();
     }
 
-    private static Exception? Finalizer(Exception? __exception,
-        MethodBase __originalMethod, long __state)
+    private static void Postfix(MethodBase __originalMethod, long __state)
     {
         if (__state == 0 || !Targets.TryGetValue(__originalMethod, out var target))
-            return __exception;
+            return;
 
         var ended = Stopwatch.GetTimestamp();
         var elapsed = Math.Max(0, ended - __state);
@@ -273,7 +292,7 @@ internal static class LoadSavePhaseProfiler
         lock (Sync)
         {
             var session = target.Kind == Category.Load ? _loading : _saving;
-            if (session is null) return __exception;
+            if (session is null) return;
 
             if (!session.Entries.TryGetValue(target.Name, out var metric))
                 session.Entries[target.Name] = metric = new Metric();
@@ -281,7 +300,7 @@ internal static class LoadSavePhaseProfiler
             metric.Count++;
             metric.Total += elapsed;
             metric.Max = Math.Max(metric.Max, elapsed);
-            if (__exception is not null) { metric.Errors++; session.Errors++; }
+            // Observational postfix: no exception interception.
             if (target.Detail) session.HandlersObserved++;
 
             if (target.Milestone || target.Request ||
@@ -301,7 +320,7 @@ internal static class LoadSavePhaseProfiler
             if (target.End || (target.Kind == Category.Save && session.WriterOnly &&
                                target.Name == "SaveWriter.ZIPArchiveAndEntries"))
             {
-                Complete(session, target.Kind, ended, __exception);
+                Complete(session, target.Kind, ended, null);
                 if (target.Kind == Category.Load) _loading = null;
                 else _saving = null;
             }
