@@ -223,8 +223,8 @@ internal static class LoadSavePhaseProfiler
             harmony.Patch(method,
                 prefix: new HarmonyMethod(AccessTools.Method(
                     typeof(LoadSavePhaseProfiler), nameof(Prefix))) { priority = Priority.First },
-                finalizer: new HarmonyMethod(AccessTools.Method(
-                    typeof(LoadSavePhaseProfiler), nameof(Finalizer))) { priority = Priority.Last });
+                postfix: new HarmonyMethod(AccessTools.Method(
+                    typeof(LoadSavePhaseProfiler), nameof(Postfix))) { priority = Priority.Last });
             Targets.Add(method, target);
             _installed++;
             return true;
@@ -309,7 +309,7 @@ internal static class LoadSavePhaseProfiler
                 Runtime.Log((target.Kind == Category.Load ? "LOAD.PHASE " : "SAVE.PHASE ") +
                     $"{target.Name} elapsed={Ms(elapsed):F1}ms " +
                     $"t+{Ms(ended - session.Started):F1}ms" +
-                    (__exception is null ? "" : " exception=" + __exception.GetType().Name));
+                    " completion=normal");
             }
             if (target.Milestone || target.Request)
             {
@@ -326,8 +326,6 @@ internal static class LoadSavePhaseProfiler
             }
         }
 
-        // Never swallow or replace the game's actual exception.
-        return __exception;
     }
 
     private static void Complete(Session session, Category category,
