@@ -9,70 +9,82 @@ using HarmonyLib;
 namespace BenchmarkAndOptimizerV11;
 
 /// <summary>
-/// Narrow workaround for Bindito's reflection scan encountering an unfinished
-/// MonoMod DynamicMethodDefinition DMD type in an AssemblyBuilder.GetTypes().
+/// Narrow runtime guard for the two observed Timberborn startup paths that
+/// enumerate AppDomain assemblies through Assembly.GetTypes():
+///  - Bindito ContainerDefinition.FindConfigurators (v1.1.87/88 crash)
+///  - Timberborn.BlueprintSystem.SpecTypeCache.Create (v1.1.89 crash)
 ///
-/// Only changes the Assembly.GetTypes() call inside the compiler-generated
-/// ContainerDefinition.FindConfigurators lambda, NOT AppDomain.GetAssemblies,
-/// NOT Assembly.GetTypes globally, and NOT the actual configurator filters.
-/// Bindito needs named mod assemblies, not transient emitted DMD assemblies.
+/// MonoMod/Harmony dynamic AssemblyBuilders may contain unfinished DMD types.
+/// Normal game/mod DLLs are NOT filtered, and this does not globally alter
+/// Assembly.GetTypes, assembly discovery, or blueprint/configurator selection.
 /// </summary>
 internal static class BinditoConfiguratorDynamicAssemblyGuard
 {
     private static int _dynamicAssembliesSkipped;
-    private static bool _installed;
     private static readonly MethodInfo? SafeTypesMethod =
         AccessTools.Method(typeof(BinditoConfiguratorDynamicAssemblyGuard),
             nameof(GetSafeConfiguratorTypes));
 
     public static void Patch(Harmony harmony)
     {
+        // Catch failures separately: one incompatible site must not prevent
+        // us from protecting the other verified crash site.
+        PatchSite(harmony, "Bindito.Core.Internal.ContainerDefinition",
+            "FindConfigurators", "BINDITO.DMD.GUARD");
+        PatchSite(harmony, "Timberborn.BlueprintSystem.SpecTypeCache",
+            "Create", "BLUEPRINT.DMD.GUARD");
+    }
+
+    private static void PatchSite(Harmony harmony, string typeName,
+        string selectorName, string logPrefix)
+    {
         try
         {
-            var owner = AccessTools.TypeByName(
-                "Bindito.Core.Internal.ContainerDefinition");
+            var owner = AccessTools.TypeByName(typeName);
             if (owner is null)
             {
-                Runtime.Log("BINDITO.DMD.GUARD unavailable: ContainerDefinition not found");
+                Runtime.Log($"{logPrefix} unavailable: {typeName} not found; " +
+                    "vanilla method retained");
                 return;
             }
 
+            // v1.1.89 matched Bindito's compiler-generated
+            // <FindConfigurators>b__10_0(Assembly). v1.1.89's Player log
+            // identifies the other site as SpecTypeCache+<>c.<Create>b__5_0.
+            // Require a Type[] selector so nothing else is rewritten.
+            var selector = "<" + selectorName + ">b__";
             var candidates = owner.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
                 .SelectMany(t => t.GetMethods(BindingFlags.Public |
                     BindingFlags.NonPublic | BindingFlags.Static |
                     BindingFlags.Instance | BindingFlags.DeclaredOnly))
-                .Where(m => m.Name.Contains("FindConfigurators", StringComparison.Ordinal)
+                .Where(m => m.Name.StartsWith(selector, StringComparison.Ordinal)
                     && m.GetParameters().Length == 1
                     && m.GetParameters()[0].ParameterType == typeof(Assembly)
-                    && m.ReturnType != typeof(void)
+                    && m.ReturnType == typeof(Type[])
                     && !m.ContainsGenericParameters)
                 .ToArray();
 
             if (candidates.Length != 1 || SafeTypesMethod is null)
             {
-                Runtime.Log("BINDITO.DMD.GUARD unavailable: expected exactly one " +
-                    "FindConfigurators lambda(Assembly); matches=" + candidates.Length +
-                    "; vanilla Bindito unchanged");
+                Runtime.Log($"{logPrefix} unavailable: expected one " +
+                    $"{selector}(Assembly)->Type[] selector, matches={candidates.Length}; " +
+                    "no patch installed");
                 return;
             }
 
-            // Reject unexpected method IL instead of replacing arbitrary
-            // compiler-generated/third-party behavior. Harmony transpiler
-            // itself requires one Assembly.GetTypes call.
             var target = candidates[0];
-            harmony.Patch(target, transpiler: new HarmonyMethod(
-                AccessTools.Method(typeof(BinditoConfiguratorDynamicAssemblyGuard),
+            harmony.Patch(target,
+                transpiler: new HarmonyMethod(AccessTools.Method(
+                    typeof(BinditoConfiguratorDynamicAssemblyGuard),
                     nameof(TranspileGetTypes))) { priority = Priority.First });
-
-            _installed = true;
-            Runtime.Log($"BINDITO.DMD.GUARD installed: {target.DeclaringType?.FullName}." +
-                $"{target.Name}; only Assembly.GetTypes uses safe dynamic-assembly filter");
+            Runtime.Log($"{logPrefix} installed: " +
+                $"{target.DeclaringType?.FullName}.{target.Name}; " +
+                "only Assembly.GetTypes() replaced with guarded equivalent");
         }
         catch (Exception ex)
         {
-            Runtime.Log("BINDITO.DMD.GUARD patch unavailable: " +
-                ex.GetType().Name + ": " + ex.Message +
-                "; original game behavior retained");
+            Runtime.Log($"{logPrefix} unavailable: {ex.GetType().Name}: " +
+                ex.Message + "; original selector retained");
         }
     }
 
@@ -82,40 +94,42 @@ internal static class BinditoConfiguratorDynamicAssemblyGuard
         var list = instructions.ToList();
         var matches = list.Where(i =>
             (i.opcode == OpCodes.Call || i.opcode == OpCodes.Callvirt) &&
-            i.operand is MethodInfo m &&
-            m.Name == nameof(Assembly.GetTypes) &&
-            m.DeclaringType == typeof(Assembly) &&
-            m.GetParameters().Length == 0 &&
-            m.ReturnType == typeof(Type[])).ToArray();
+            i.operand is MethodInfo method &&
+            method.Name == nameof(Assembly.GetTypes) &&
+            method.DeclaringType == typeof(Assembly) &&
+            method.GetParameters().Length == 0 &&
+            method.ReturnType == typeof(Type[])).ToArray();
+
+        // If Timberborn's implementation or other Harmony transpilers have
+        // changed this selector, never rewrite ambiguous IL.
         if (matches.Length != 1 || SafeTypesMethod is null)
             throw new InvalidOperationException(
-                "Bindito configurator selector IL changed: Assembly.GetTypes call count=" +
-                matches.Length + "; refusing unsafe rewrite");
+                "Assembly.GetTypes call count=" + matches.Length +
+                "; refusing ambiguous or missing discovery method rewrite");
 
-        foreach (var item in matches)
-        {
-            // Original callvirt consumes Assembly, wrapper static method
-            // consumes the exact same Assembly argument, returns Type[].
-            // No other IL or exception handling is modified.
-            item.opcode = OpCodes.Call;
-            item.operand = SafeTypesMethod;
-        }
+        var instruction = matches[0];
+        // Existing stack: Assembly receiver -> Type[] result.
+        // Static wrapper has identical stack signature, and preserves labels,
+        // exception blocks and all other IL in the selector.
+        instruction.opcode = OpCodes.Call;
+        instruction.operand = SafeTypesMethod;
         return list;
     }
 
     public static Type[] GetSafeConfiguratorTypes(Assembly assembly)
     {
-        // Emitted assemblies contain Harmony/MonoMod temporary methods and
-        // no legitimate compile-time [Context] configurators. Calling
-        // AssemblyBuilder.GetTypes can throw "DMD<>? is not finished".
-        // Normal game/mod assemblies still use vanilla GetTypes(), and
-        // their real reflection errors are not swallowed.
+        // No emitted MonoMod DMD assembly contains a real compiled
+        // ComponentSpec or static mod configurator; skipping it does not
+        // exclude blueprint specs or dependencies from installed mod DLLs.
+        // Guard ONLY dynamic assemblies. All static assembly errors pass
+        // through unmodified and remain diagnosable.
         if (assembly.IsDynamic)
         {
-            if (Interlocked.Increment(ref _dynamicAssembliesSkipped) == 1)
-                Runtime.Log("BINDITO.DMD.GUARD skipped dynamic MonoMod/Harmony " +
-                    "assemblies during configurator discovery; first=" +
-                    assembly.GetName().Name + "; static mod assemblies unchanged");
+            int n = Interlocked.Increment(ref _dynamicAssembliesSkipped);
+            if (n == 1 || n == 100)
+                Runtime.Log($"DMD.GUARD excluded dynamic assembly during " +
+                    $"type discovery count={n} name={assembly.GetName().Name}; " +
+                    "static game/mod DLLs retained");
             return Type.EmptyTypes;
         }
 

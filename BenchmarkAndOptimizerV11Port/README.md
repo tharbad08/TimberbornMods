@@ -146,3 +146,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.89: mitigate reproducible Bindito startup crash (`ReflectionTypeLoadException: DMD<>? is not finished`) by narrowly rewriting only the `Assembly.GetTypes` call in compiler-generated `ContainerDefinition.FindConfigurators` lambda. Skip dynamic Harmony/MonoMod assemblies, keep ordinary game/mod assembly discovery and exceptions unchanged. Fail closed on changed lambda signatures. Retains v1.1.88 load/save, UI-only panel/FPS probes, all gameplay optimizations. See BINDITO-DMD-STARTUP-v1.1.89.md.
+
+
+- v1.1.90: startup crash follow-up. In v1.1.89 the Bindito crash was bypassed, but an identical `DMD<>? is not finished` exception occurred in `Timberborn.BlueprintSystem.SpecTypeCache.Create` instead. Guard its compiler-generated `<Create>b__5_0(Assembly)->Type[]` selector *as well as* Bindito `FindConfigurators`, skipping **only** transient dynamic `AssemblyBuilder` assemblies during these two reflection scans. Preserve normal game/mod DLLs, actual `ComponentSpec` types, blueprint deserialization, UI-only FPS mode, load/save probes and all gameplay optimizations. See DMD-BLUEPRINT-STARTUP-v1.1.90.md.
