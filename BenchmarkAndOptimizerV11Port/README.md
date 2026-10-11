@@ -134,3 +134,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.85: post-diagnostics normal-play build: removes the now-completed EBR stage profiling and T3MP preview-activation Harmony hooks and the per-preview-batch counters introduced in v1.1.84. All verified gameplay optimizations retained. Full test evidence and remaining work in POST-DIAGNOSTICS-1.1.85.md.
+
+
+- v1.1.86: lightweight normal-play profile with targeted **load/save phase probes**. Scene-load request through ShowPrimaryUI, ZIP/JSON/world/entities/singleton phases, and save snapshot/ZIP/entry writer timing; top 35 stages per operation and gaps logged. Retires 10 per-frame input/preview/placement diagnostic patch groups while retaining all gameplay behavior. See LOAD-SAVE-PHASE-PROFILER-v1.1.86.md.
