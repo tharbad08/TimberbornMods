@@ -140,3 +140,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.87: separate session-only **UI-only simulation** ModSettings panel with toggle; masks only the main gameplay camera's 3D layers while keeping native FPS counter/UI and every simulation service active. Logs measured FPS via Unity Time.frameCount every 15s, both modes, restores camera mask on disable/unload. Pins FPS panel/counter and UI-only controller to interval=1. See UI-ONLY-SIMULATION-v1.1.87.md.
+
+
+- v1.1.88 **startup compatibility fix** for the 2026-10-11 crash: limit load/save probes to curated game phase methods. Remove broad reflection scan over all loaded assemblies and hundreds of per-mod handler Harmony patches; remove instrumented compiler-generated scene coroutine MoveNext. These were introduced in v1.1.86 and are suspected (not conclusively proven) contributors to Bindito's `DMD<> type is not finished` ReflectionTypeLoadException. Preserve phase and total load/save timers, UI-only panel, FPS logging, and gameplay optimizations. See STARTUP-SAFETY-1.1.88.md.

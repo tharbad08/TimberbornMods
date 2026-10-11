@@ -8,8 +8,8 @@ using HarmonyLib;
 namespace BenchmarkAndOptimizerV11;
 
 /// <summary>
-/// Event-driven, observational save/load profiler. Nothing here changes a
-/// save, creates new game objects, drives scene coroutines or schedules work.
+/// Startup-safe, event-driven observational load/save profiler. Nothing here
+/// changes a save, creates game objects, drives scene coroutines or schedules work.
 /// Timers are attached to methods called during loading/saving, not Update.
 /// Historical decompilation only guides method discovery; unsupported APIs
 /// are logged and skipped on the running game version.
@@ -68,6 +68,7 @@ internal static class LoadSavePhaseProfiler
         }
     }
 
+    // Exact-method hooks only: never scan dynamic assemblies during startup.
     private static readonly object Sync = new();
     private static readonly Dictionary<MethodBase, Target> Targets = new();
     private static Session? _loading;
@@ -127,7 +128,9 @@ internal static class LoadSavePhaseProfiler
         // SceneLoader.LoadSceneCoroutine is a Unity IEnumerator. Instrument
         // MoveNext steps (including the synchronous SceneManager.LoadScene
         // call) but never attempt to move/cancel the enumerator ourselves.
-        AddSceneCoroutine(harmony);
+        // v1.1.88: do not patch compiler-generated scene-coroutine MoveNext.
+        // The request-to-Load/ShowPrimaryUI monotonic timing still includes
+        // native scene load/coroutine/GC gaps without a dynamic MoveNext patch.
 
         // The private GameSaver.Save executes only for an actual save, unlike
         // SaveQueued / GameSaverUnityAdapter.LateUpdate, which run every frame.
@@ -153,24 +156,18 @@ internal static class LoadSavePhaseProfiler
         Add(harmony, "Timberborn.SerializationSystem.SerializedObjectReaderWriter",
             "WriteJson", Category.Save, "JSON.BuildAndWrite", 2, parameterType: null);
 
-        // Per-mod save entries and per-singleton LOAD methods execute only
-        // on save/load. They are aggregated in the session's top-method list
-        // (not emitted as thousands of individual log records).
-        AddInterfaceHandlers(harmony, Category.Load,
-            "Timberborn.SingletonSystem.ILoadableSingleton", "Load");
-        AddInterfaceHandlers(harmony, Category.Load,
-            "Timberborn.SingletonSystem.INonSingletonLoader", "LoadNonSingletons");
-        AddInterfaceHandlers(harmony, Category.Load,
-            "Timberborn.SingletonSystem.IPostLoadableSingleton", "PostLoad");
-        AddInterfaceHandlers(harmony, Category.Load,
-            "Timberborn.SingletonSystem.INonSingletonPostLoader", "PostLoadNonSingletons");
-        AddInterfaceHandlers(harmony, Category.Save,
-            "Timberborn.SaveSystem.ISaveEntryWriter", "WriteToSaveEntryStream");
+        // 1.1.88 startup crash mitigation:
+        // Do not enumerate every AppDomain assembly or patch each mod's
+        // ILoadableSingleton/ISaveEntryWriter implementation at startup.
+        // This previously created large numbers of MonoMod dynamic-method
+        // assemblies before Bindito's configurator discovery, which later
+        // failed on an unfinished DMD<> type on the user's game.
+        // Keep the curated coarse-grained save/load phase timers below.
 
-        Runtime.Log($"LOADSAVE.PROBE installed={_installed} skipped={_skipped}; " +
-            "event-driven only; LOAD.START/PHASE/GAP/SUMMARY, " +
-            "SAVE.START/PHASE/SUMMARY; never changes load/save streams, " +
-            "compression, tick, completion callbacks or scene coroutine");
+        Runtime.Log($"LOADSAVE.PROBE startup-safe v1.1.88 installed={_installed} skipped={_skipped}; " +
+            "curated game phase methods only; no all-assembly GetTypes, no " +
+            "per-mod handler patching, no coroutine MoveNext patch; " +
+            "LOAD.START/PHASE/GAP/SUMMARY and SAVE.START/PHASE/SUMMARY remain");
     }
 
     private static void Add(Harmony h, string typeName, string methodName,
@@ -196,75 +193,6 @@ internal static class LoadSavePhaseProfiler
             return;
         }
         Install(h, found[0], new Target(label, category, begin, request, end, milestone));
-    }
-
-    private static void AddSceneCoroutine(Harmony h)
-    {
-        var type = AccessTools.TypeByName("Timberborn.SceneLoading.SceneLoader");
-        if (type is null) { _skipped++; return; }
-        foreach (var nested in type.GetNestedTypes(BindingFlags.NonPublic | BindingFlags.Public))
-        {
-            if (!nested.Name.Contains("LoadSceneCoroutine", StringComparison.Ordinal))
-                continue;
-            var move = nested.GetMethod("MoveNext",
-                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance |
-                BindingFlags.DeclaredOnly);
-            if (move is null) continue;
-            Install(h, move, new Target("SceneCoroutine.MoveNext", Category.Load));
-            return;
-        }
-        _skipped++;
-        Runtime.Log("LOADSAVE.PROBE SceneLoader coroutine MoveNext unavailable; " +
-            "scene request-to-world gap will still be measured");
-    }
-
-    private static void AddInterfaceHandlers(Harmony h, Category category,
-        string interfaceName, string methodName)
-    {
-        var iface = AccessTools.TypeByName(interfaceName);
-        if (iface is null) { _skipped++; return; }
-        int count = 0;
-        foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
-        {
-            foreach (var type in SafeTypes(assembly))
-            {
-                if (count >= 650) break;
-                if (type.IsAbstract || type.IsInterface || type.ContainsGenericParameters ||
-                    !iface.IsAssignableFrom(type)) continue;
-                try
-                {
-                    var map = type.GetInterfaceMap(iface);
-                    for (int i = 0; i < map.InterfaceMethods.Length; i++)
-                    {
-                        if (map.InterfaceMethods[i].Name != methodName) continue;
-                        var method = map.TargetMethods[i];
-                        if (method is null || method.IsAbstract ||
-                            method.ContainsGenericParameters || Targets.ContainsKey(method)) continue;
-                        var label = (category == Category.Load ? "Handler.Load." : "Entry.Save.") +
-                            (method.DeclaringType?.FullName ?? type.FullName ?? type.Name);
-                        if (Install(h, method, new Target(label, category, detail: true)))
-                            count++;
-                    }
-                }
-                catch (Exception)
-                {
-                    _skipped++;
-                }
-            }
-            if (count >= 650) break;
-        }
-        Runtime.Log($"LOADSAVE.PROBE {interfaceName}.{methodName} handlers={count}" +
-            (count >= 650 ? " (cap reached; other handlers not sampled)" : ""));
-    }
-
-    private static IEnumerable<Type> SafeTypes(Assembly assembly)
-    {
-        try { return assembly.GetTypes(); }
-        catch (ReflectionTypeLoadException e)
-        {
-            return e.Types.Where(x => x is not null).Cast<Type>();
-        }
-        catch { return Array.Empty<Type>(); }
     }
 
     private static bool Install(Harmony harmony, MethodBase method, Target target)
