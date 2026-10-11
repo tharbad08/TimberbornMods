@@ -22,6 +22,8 @@ namespace BenchmarkAndOptimizerV11;
 /// </summary>
 public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
 {
+    private static IContainer? _container;
+    public UiOnlyHudService(IContainer container) => _container = container;
     private const BindingFlags All = BindingFlags.Instance | BindingFlags.Static |
                                      BindingFlags.Public | BindingFlags.NonPublic;
     private static Toggle? _checkbox;
@@ -34,6 +36,9 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
     // HeightShowerPanel._root is the known working HUD landmark.
     // Use it instead of guessing the localized resource-counter names.
     private static VisualElement? _heightAnchor;
+    private static VisualElement? _waterAnchor;
+    private static int _waterLookupAttempts;
+    private static bool _waterMissingLogged;
     private static long _nextAnchorCheck;
     private static bool _secondRowAttached;
     private const float PanelWidth = 205f;
@@ -153,6 +158,9 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
 
             _panel = panel;
             _heightAnchor = oldRoot as VisualElement;
+            _waterAnchor = null;
+            _waterLookupAttempts = 0;
+            _waterMissingLogged = false;
             _secondRowAttached = false;
             _nextAnchorCheck = 0;
             PositionSecondRow();
@@ -215,17 +223,20 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
         _lastEnabled = false;
         _panel = null;
         _heightAnchor = null;
+        _waterAnchor = null;
+        _container = null;
+        _waterLookupAttempts = 0;
+        _waterMissingLogged = false;
         _overlayRoot = null;
         _secondRowAttached = false;
         _nextAnchorCheck = 0;
     }
 
 
-    // The top-right container has limited rows and can clip order=10.
-    // Reparent the control into the UI document's overlay and position it
-    // on the second line, directly to the left of the HeightShower landmark.
-    // This occupies no flex-row space and does not create a gap in the
-    // water/badwater counters or disturb conditional weather UI elements.
+    // More TopBars adds resource groups; Water itself is a vanilla counter.
+    // Locate it through the game's TopBarPanel._counters and TopBarCounterRow
+    // _goodId/_root, never through a translated label or fragile UI node name.
+    // The HeightShower reference remains a safe fallback if an API changes.
     private static void PositionSecondRow()
     {
         if (_panel is null || _heightAnchor is null) return;
@@ -235,21 +246,37 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
 
         try
         {
-            VisualElement document = _heightAnchor;
+            if (_waterAnchor is null && _waterLookupAttempts < 24)
+                TryResolveWaterCounter();
+
+            var anchor = _waterAnchor ?? _heightAnchor;
+            VisualElement document = anchor;
             while (document.parent is not null) document = document.parent;
-            if (!ReadBounds(_heightAnchor, out var anchorX, out var anchorY,
+            if (!ReadBounds(anchor, out var anchorX, out var anchorY,
                     out var anchorWidth, out var anchorHeight) ||
                 !ReadBounds(document, out var docX, out var docY, out var docWidth, out _))
                 return;
 
-            // If HeightShower is still on the top row, move one row below.
-            // Normally it already occupies the second row, so match its Y.
-            float y = anchorY - docY;
-            float firstRowHeight = Math.Max(anchorHeight, 24f);
-            if (y < firstRowHeight - 2f)
-                y += firstRowHeight + 2f;
+            // Water counter: align the new panel's LEFT with Water's left,
+            // and its TOP flush against Water's bottom. It may run below
+            // Badwater, as requested, with no flex-row spacing reserved.
+            // Fallback: use the existing second-row HeightShower placement.
+            bool usingWater = _waterAnchor is not null;
+            float x, y;
+            if (usingWater)
+            {
+                x = Math.Max(2f, anchorX - docX);
+                y = anchorY + anchorHeight - docY;
+            }
+            else
+            {
+                y = anchorY - docY;
+                float firstRowHeight = Math.Max(anchorHeight, 24f);
+                if (y < firstRowHeight - 2f)
+                    y += firstRowHeight + 2f;
+                x = Math.Max(2f, anchorX - docX - PanelWidth - PanelGap);
+            }
 
-            float x = Math.Max(2f, anchorX - docX - PanelWidth - PanelGap);
             if (x + PanelWidth > docWidth)
                 x = Math.Max(2f, docWidth - PanelWidth - 2f);
 
@@ -257,27 +284,94 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             {
                 _panel.RemoveFromClassList("top-right-item");
                 _panel.style.position = Position.Absolute;
-                document.Add(_panel); // Unity UI reparent removes it from top-right flex.
+                document.Add(_panel); // Removes panel from limited top-right flex rows.
                 _overlayRoot = document;
                 _secondRowAttached = true;
-                Runtime.Log($"UIONLY.HUD second-row overlay attached x={x:F0} y={y:F0} " +
-                    $"heightAnchor={anchorX:F0},{anchorY:F0},{anchorWidth:F0},{anchorHeight:F0}; " +
-                    "no extra flex row; 4px horizontal gap");
+                Runtime.Log("UIONLY.HUD overlay attached; zero layout spacing; " +
+                    "position source=" + (usingWater ? "TopBarPanel.Water" : "HeightShower fallback"));
             }
 
             _panel.style.left = x;
             _panel.style.top = y;
+            if (usingWater && !_waterMissingLogged)
+            {
+                _waterMissingLogged = true; // One-time position confirmation.
+                Runtime.Log($"UIONLY.HUD anchored below vanilla Water: x={x:F0} y={y:F0}; " +
+                    $"waterBounds={anchorX:F0},{anchorY:F0},{anchorWidth:F0},{anchorHeight:F0}; " +
+                    "no gap; panel may extend under Badwater");
+            }
         }
         catch (Exception ex)
         {
             if (!_warned)
             {
                 _warned = true;
-                Runtime.Log("UIONLY.HUD second-row position unavailable: " +
+                Runtime.Log("UIONLY.HUD overlay positioning failed: " +
                     ex.GetBaseException().GetType().Name + ": " +
                     ex.GetBaseException().Message);
             }
         }
+    }
+
+    private static void TryResolveWaterCounter()
+    {
+        ++_waterLookupAttempts;
+        if (_container is null) return;
+        try
+        {
+            var type = AccessTools.TypeByName("Timberborn.TopBarSystem.TopBarPanel");
+            if (type is null) return;
+            var method = _container.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "GetInstance" &&
+                    m.IsGenericMethodDefinition && m.GetParameters().Length == 0);
+            var instance = method?.MakeGenericMethod(type).Invoke(_container, null);
+            if (instance is null) return;
+            var counters = AccessTools.Field(type, "_counters")?.GetValue(instance) as IEnumerable;
+            if (counters is null) return;
+
+            var names = new List<string>(16);
+            foreach (var counter in counters)
+            {
+                if (counter is null) continue;
+                if (InspectCounter(counter, names)) return;
+                var nested = AccessTools.Field(counter.GetType(), "_counterRows")
+                    ?.GetValue(counter) as IEnumerable;
+                if (nested is null) continue;
+                foreach (var row in nested)
+                    if (row is not null && InspectCounter(row, names)) return;
+            }
+            if (_waterLookupAttempts >= 24)
+                Runtime.Log("UIONLY.HUD TopBarPanel water counter unresolved; " +
+                    "counter resource IDs=" + string.Join(",", names.Take(20)) +
+                    "; HeightShower fallback kept");
+        }
+        catch (Exception ex)
+        {
+            if (_waterLookupAttempts == 24)
+                Runtime.Log("UIONLY.HUD TopBarPanel lookup unavailable: " +
+                    ex.GetBaseException().GetType().Name + ": " +
+                    ex.GetBaseException().Message);
+        }
+    }
+
+    private static bool InspectCounter(object counter, List<string> foundIds)
+    {
+        var type = counter.GetType();
+        var id = AccessTools.Field(type, "_goodId")?.GetValue(counter)?.ToString();
+        if (string.IsNullOrWhiteSpace(id)) return false;
+        if (foundIds.Count < 20 && !foundIds.Contains(id)) foundIds.Add(id);
+
+        // Water is the game's resource ID; explicitly exclude Badwater.
+        if (!id.Equals("Water", StringComparison.OrdinalIgnoreCase) &&
+            !id.EndsWith(".Water", StringComparison.OrdinalIgnoreCase)) return false;
+        var visual = AccessTools.Field(type, "_root")?.GetValue(counter) as VisualElement;
+        if (visual is null || !ReadBounds(visual, out _, out _, out var width, out var height) ||
+            width < 10 || height < 10) return false;
+
+        _waterAnchor = visual;
+        Runtime.Log("UIONLY.HUD vanilla resource counter located " +
+            type.FullName + " goodId=" + id + " (More TopBars groups ignored)");
+        return true;
     }
 
     private static bool ReadBounds(VisualElement e, out float x, out float y,
