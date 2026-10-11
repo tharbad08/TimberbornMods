@@ -601,6 +601,8 @@ internal static class FreezeDetectorPatcher
         var section = __originalMethod.Name;
         FreezeDetector.RecordSection(section, now - __state);
         FreezeDetector.EndPhase(section, now);
+        if (section == "TickSingletons")
+            UiOnlySimulationService.RecordCompletedSimulationTick();
     }
 }
 
