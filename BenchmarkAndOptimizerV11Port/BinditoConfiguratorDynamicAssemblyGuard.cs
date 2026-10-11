@@ -51,7 +51,13 @@ internal static class BinditoConfiguratorDynamicAssemblyGuard
             // v1.1.89 matched Bindito's compiler-generated
             // <FindConfigurators>b__10_0(Assembly). v1.1.89's Player log
             // identifies the other site as SpecTypeCache+<>c.<Create>b__5_0.
-            // Require a Type[] selector so nothing else is rewritten.
+            // SelectMany selectors are compiler-generated for a
+            // Func<Assembly, IEnumerable<Type>> delegate. Their declared
+            // return type is often IEnumerable<Type>, NOT Type[], even
+            // though Assembly.GetTypes returns Type[]. Our v1.1.90 check
+            // incorrectly required Type[] and rejected the actual method.
+            // Match either (and other interface-compatible variants),
+            // while keeping the strict Assembly argument + IL proof.
             var selector = "<" + selectorName + ">b__";
             var candidates = owner.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
                 .SelectMany(t => t.GetMethods(BindingFlags.Public |
@@ -60,15 +66,26 @@ internal static class BinditoConfiguratorDynamicAssemblyGuard
                 .Where(m => m.Name.StartsWith(selector, StringComparison.Ordinal)
                     && m.GetParameters().Length == 1
                     && m.GetParameters()[0].ParameterType == typeof(Assembly)
-                    && m.ReturnType == typeof(Type[])
+                    && typeof(IEnumerable<Type>).IsAssignableFrom(m.ReturnType)
                     && !m.ContainsGenericParameters)
                 .ToArray();
 
             if (candidates.Length != 1 || SafeTypesMethod is null)
             {
-                Runtime.Log($"{logPrefix} unavailable: expected one " +
-                    $"{selector}(Assembly)->Type[] selector, matches={candidates.Length}; " +
-                    "no patch installed");
+                var nameMatches = owner.GetNestedTypes(BindingFlags.Public | BindingFlags.NonPublic)
+                    .SelectMany(t => t.GetMethods(BindingFlags.Public |
+                        BindingFlags.NonPublic | BindingFlags.Static |
+                        BindingFlags.Instance | BindingFlags.DeclaredOnly))
+                    .Where(m => m.Name.StartsWith(selector, StringComparison.Ordinal) &&
+                        m.GetParameters().Length == 1 &&
+                        m.GetParameters()[0].ParameterType == typeof(Assembly))
+                    .Select(m => m.DeclaringType?.Name + "." + m.Name +
+                        " returns " + (m.ReturnType.FullName ?? m.ReturnType.Name))
+                    .Take(8).ToArray();
+                Runtime.Log($"{logPrefix} unavailable: expected exactly one " +
+                    $"{selector}(Assembly)->IEnumerable<Type> compatible selector, " +
+                    $"matches={candidates.Length}; nameCandidates=[" +
+                    string.Join("; ", nameMatches) + "]; no patch installed");
                 return;
             }
 
@@ -79,7 +96,8 @@ internal static class BinditoConfiguratorDynamicAssemblyGuard
                     nameof(TranspileGetTypes))) { priority = Priority.First });
             Runtime.Log($"{logPrefix} installed: " +
                 $"{target.DeclaringType?.FullName}.{target.Name}; " +
-                "only Assembly.GetTypes() replaced with guarded equivalent");
+                $"selectorReturns={target.ReturnType.FullName}; " +
+                "Assembly.GetTypes() replaced with guarded equivalent");
         }
         catch (Exception ex)
         {
@@ -113,6 +131,8 @@ internal static class BinditoConfiguratorDynamicAssemblyGuard
         // exception blocks and all other IL in the selector.
         instruction.opcode = OpCodes.Call;
         instruction.operand = SafeTypesMethod;
+        Runtime.Log("DMD.GUARD transpiler verified: replaced exactly one " +
+            "Assembly.GetTypes() instruction; preserved all other IL");
         return list;
     }
 

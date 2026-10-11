@@ -149,3 +149,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.90: startup crash follow-up. In v1.1.89 the Bindito crash was bypassed, but an identical `DMD<>? is not finished` exception occurred in `Timberborn.BlueprintSystem.SpecTypeCache.Create` instead. Guard its compiler-generated `<Create>b__5_0(Assembly)->Type[]` selector *as well as* Bindito `FindConfigurators`, skipping **only** transient dynamic `AssemblyBuilder` assemblies during these two reflection scans. Preserve normal game/mod DLLs, actual `ComponentSpec` types, blueprint deserialization, UI-only FPS mode, load/save probes and all gameplay optimizations. See DMD-BLUEPRINT-STARTUP-v1.1.90.md.
+
+
+- v1.1.91: fix v1.1.90 startup guard regression. The compiler-generated `SelectMany` selectors for Bindito configurators and blueprint `SpecTypeCache` can return `IEnumerable<Type>` even though their single internal `Assembly.GetTypes()` call returns `Type[]`. v1.1.90 incorrectly required the enclosing method to return `Type[]`, so its guards could be skipped. Accept only `(Assembly) -> IEnumerable<Type>`-compatible methods and verify exactly one `Assembly.GetTypes` IL call. Report selector signature and successful transpiler application; no gameplay/blueprint changes. See DMD-SELECTOR-SIGNATURE-1.1.91.md.
