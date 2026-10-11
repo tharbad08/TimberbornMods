@@ -34,7 +34,8 @@ public sealed class GameConfig : Configurator
             .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
             .BindSingleton<OptimizerSettingsBoxWidthService>()
             .BindSingleton<OptimizerOriginRegistryService>()
-            .BindSingleton<OptimizerMenuService>();
+            .BindSingleton<OptimizerMenuService>()
+            .BindSingleton<UiOnlySimulationService>();
     }
 }
 
@@ -48,12 +49,65 @@ public sealed class OptimizerSettingsOwner(
     public override ModSettingsContext ChangeableOn => ModSettingsContext.All;
 
     public OptimizerUiSetting Optimizer { get; } = new();
+    public UiOnlySimulationSetting UiOnlySimulation { get; } = new();
 }
 
 public sealed class OptimizerUiSetting()
     : NonPersistentSetting(ModSettingDescriptor.Create("Live optimizer"))
 {
     public override void Reset() => Runtime.ResetIntervals();
+}
+
+public sealed class UiOnlySimulationSetting()
+    : NonPersistentSetting(ModSettingDescriptor.Create("UI-only simulation"))
+{
+    // The mode is deliberately session-only. On game unloading, the original
+    // camera culling mask is restored and the requested state is cleared.
+    public override void Reset() => UiOnlySimulationService.TrySetEnabled(false);
+}
+
+public sealed class UiOnlySimulationPanel : VisualElement
+{
+    public UiOnlySimulationPanel()
+    {
+        this.SetPadding(8);
+        this.AddGameLabel("UI-only simulation — live rendering toggle", bold: true)
+            .SetMarginBottom(6);
+        this.AddGameLabel(
+            "Hide the 3D colony from the main camera. Simulation, physics, " +
+            "navigation, production and all existing UI panels keep updating.")
+            .SetMarginBottom(8);
+        this.AddGameLabel(
+            "The resource bar, statistics, build queue mods and native FPS counter " +
+            "remain accessible. Reopen this panel to refresh the displayed status.")
+            .SetMarginBottom(8);
+
+        var status = this.AddGameLabel(UiOnlySimulationService.Status)
+            .SetMarginBottom(6);
+        Toggle? toggle = null;
+        toggle = this.AddToggle("Enable UI-only simulation", onValueChanged: value =>
+        {
+            var applied = UiOnlySimulationService.TrySetEnabled(value);
+            if (!applied)
+                Runtime.Log("UIONLY requested state rejected: no active playable-game camera");
+            // Don't leave the UI checked if no camera could be safely switched.
+            // TimberUi AddToggle invokes callbacks only for user interaction.
+            var actual = UiOnlySimulationService.Enabled;
+            if (value != actual) toggle?.SetValueWithoutNotify(actual);
+            status.text = UiOnlySimulationService.Status;
+        });
+        toggle.SetValueWithoutNotify(UiOnlySimulationService.Enabled);
+
+        this.AddGameLabel(
+            "Every 15s the optimizer log records native frame-count FPS for " +
+            "UI-only ON/OFF. These are comparison samples, not changes to " +
+            "Timberborn's own FPS counter.")
+            .SetMargin(12, 0, 4, 0);
+        this.AddGameLabel(
+            "This is a graphics-only experiment. It does not disable GameObjects, " +
+            "renderer components, animation scripts or other mods' gameplay logic.")
+            .SetMarginBottom(6);
+    }
 }
 
 public sealed class OptimizerSettingElementFactory(
@@ -64,14 +118,20 @@ public sealed class OptimizerSettingElementFactory(
 
     public bool TryCreateElement(ModSetting modSetting, out IModSettingElement? element)
     {
-        if (modSetting is not OptimizerUiSetting)
+        if (modSetting is UiOnlySimulationSetting)
         {
-            element = null;
-            return false;
+            element = new ModSettingElement(new UiOnlySimulationPanel(), modSetting);
+            return true;
         }
 
-        element = new ModSettingElement(new OptimizerPanel(veInit), modSetting);
-        return true;
+        if (modSetting is OptimizerUiSetting)
+        {
+            element = new ModSettingElement(new OptimizerPanel(veInit), modSetting);
+            return true;
+        }
+
+        element = null;
+        return false;
     }
 }
 

@@ -137,3 +137,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.86: lightweight normal-play profile with targeted **load/save phase probes**. Scene-load request through ShowPrimaryUI, ZIP/JSON/world/entities/singleton phases, and save snapshot/ZIP/entry writer timing; top 35 stages per operation and gaps logged. Retires 10 per-frame input/preview/placement diagnostic patch groups while retaining all gameplay behavior. See LOAD-SAVE-PHASE-PROFILER-v1.1.86.md.
+
+
+- v1.1.87: separate session-only **UI-only simulation** ModSettings panel with toggle; masks only the main gameplay camera's 3D layers while keeping native FPS counter/UI and every simulation service active. Logs measured FPS via Unity Time.frameCount every 15s, both modes, restores camera mask on disable/unload. Pins FPS panel/counter and UI-only controller to interval=1. See UI-ONLY-SIMULATION-v1.1.87.md.
