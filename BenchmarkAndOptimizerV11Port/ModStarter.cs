@@ -602,7 +602,7 @@ internal static class FreezeDetectorPatcher
         FreezeDetector.RecordSection(section, now - __state);
         FreezeDetector.EndPhase(section, now);
         if (section == "TickSingletons")
-            UiOnlySimulationService.RecordCompletedSimulationTick();
+            SimulationThroughputService.RecordCompletedSimulationTick();
     }
 }
 
@@ -10572,12 +10572,10 @@ internal static class Runtime
         "WaterSimulator",
         "SpeedManager",
         "ConstructionSite",
-        // Never let the interval optimizer stale the FPS display or our
-        // main-camera restore/check service, regardless of global defaults.
+        // Preserve FPS and read-only simulation throughput measurement cadence.
         "FramesPerSecondPanel",
         "FramesPerSecondCounter",
-        "UiOnlySimulationService",
-        "UiOnlyHudService"
+        "SimulationThroughputService"
     };
 
     public static bool Enabled => _settings.Enabled;
@@ -10851,7 +10849,6 @@ internal static class Runtime
         // Bindito FindConfigurators and Timberborn SpecTypeCache.Create.
         // Preserve ordinary assembly.GetTypes behavior for real mod DLLs.
         BinditoConfiguratorDynamicAssemblyGuard.Patch(harmony);
-        UiOnlyHudService.Install(harmony);
         IncrementalGcSmoother.Initialize();
         FreezeDetectorPatcher.Patch();
         TimberPhysicsCatchUpLimiterPatcher.Patch(harmony);
