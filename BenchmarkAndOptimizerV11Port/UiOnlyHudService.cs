@@ -117,22 +117,17 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             if (ReferenceEquals(_attachedLayout, layout) && _checkbox is not null)
                 return;
 
-            // Game-native nine-slice FRAME outside a green content panel.
-            // Initialization is necessary for the textures and USS rules.
-            var frame = new NineSliceVisualElement();
-            frame.AddToClassList("top-right-item");
-            frame.AddToClassList("entity-sub-panel");
-            frame.AddToClassList("bg-sub-box--frame");
-            frame.SetWidth(PanelWidth).SetPadding(2f);
-
+            // Mirror the working T3MP HeightShower addon: one NineSlice
+            // element, not an extra frame wrapper (the nested wrapper made
+            // the style selector stop matching after overlay reparenting).
             var panel = new NineSliceVisualElement();
-            panel.AddToClassList("square-large--green");
             CopyClasses(oldRoot, panel);
+            panel.AddToClassList("top-right-item");
+            panel.AddToClassList("square-large--green");
             CopyInlineStyle(oldRoot, panel, "flexDirection");
             CopyInlineStyle(oldRoot, panel, "flexWrap");
             CopyInlineStyle(oldRoot, panel, "justifyContent");
-            panel.SetWidth(PanelWidth - 4f).SetPadding(5f);
-            frame.Add(panel);
+            panel.SetWidth(PanelWidth).SetPadding(5f);
 
             var row = panel.AddRow();
             var checkbox = row.AddToggle("UI-only simulation",
@@ -158,11 +153,12 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
                     method.GetParameters()[1].ParameterType == typeof(int))
                 ?? throw new MissingMethodException("UILayout.AddTopRight(VisualElement,int)");
 
-            // Initialize new nine-slice subtree before reparenting.
-            InitializeFrame(frame);
-            append.Invoke(layout, new object[] { frame, 10 });
+            // The game initializer may bind the nine-slice textures. Run
+            // while still in the native top-right HUD before absolute move.
+            InitializeFrame(panel);
+            append.Invoke(layout, new object[] { panel, 10 });
 
-            _panel = frame;
+            _panel = panel;
             _heightAnchor = oldRoot as VisualElement;
             _waterAnchor = null;
             _waterLookupAttempts = 0;
@@ -292,6 +288,10 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
                 // removes the element from the original flex layout.
                 _panel.style.position = Position.Absolute;
                 document.Add(_panel); // Removes panel from limited top-right flex rows.
+                // UI stylesheet parent selectors no longer apply outside HUD.
+                // Apply native dark-green/gold fallback skin as inline styles,
+                // and preserve the single NineSliceVisualElement.
+                ApplyDetachedSkin(_panel, _checkbox, _status);
                 _overlayRoot = document;
                 _secondRowAttached = true;
                 Runtime.Log("UIONLY.HUD overlay attached; zero layout spacing; " +
@@ -399,6 +399,74 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             return width > 0f && height > 0f;
         }
         catch { return false; }
+    }
+
+    // Native nine-slice USS looks correct inside UILayout.AddTopRight but
+    // can lose its parent-dependent skin after absolute overlay reparenting.
+    // Unity UI Toolkit inline colors/borders survive that move and match the
+    // T3MP dark-green panel with its gold stroke. All writes happen once.
+    private static void ApplyDetachedSkin(VisualElement panel, Toggle? toggle, Label? label)
+    {
+        try
+        {
+            var unityColor = AccessTools.TypeByName("UnityEngine.Color");
+            var styleColor = AccessTools.TypeByName("UnityEngine.UIElements.StyleColor");
+            var styleFloat = AccessTools.TypeByName("UnityEngine.UIElements.StyleFloat");
+            if (unityColor is null || styleColor is null || styleFloat is null)
+            {
+                Runtime.Log("UIONLY.HUD skin unavailable: Unity style types not resolved");
+                return;
+            }
+
+            var colorCtor = unityColor.GetConstructor(new[] {
+                typeof(float), typeof(float), typeof(float), typeof(float) });
+            var styleColorCtor = styleColor.GetConstructor(new[] { unityColor });
+            var styleFloatCtor = styleFloat.GetConstructor(new[] { typeof(float) });
+            if (colorCtor is null || styleColorCtor is null || styleFloatCtor is null)
+            {
+                Runtime.Log("UIONLY.HUD skin unavailable: style constructors missing");
+                return;
+            }
+            object Color(float r, float g, float b, float a) =>
+                styleColorCtor.Invoke(new[] {
+                    colorCtor.Invoke(new object[] { r, g, b, a }) });
+            object Float(float value) => styleFloatCtor.Invoke(new object[] { value });
+
+            int applied = 0;
+            void Set(VisualElement element, string property, object value)
+            {
+                var style = element.style;
+                var interfaceType = style.GetType().GetInterfaces()
+                    .FirstOrDefault(t => t.FullName == "UnityEngine.UIElements.IStyle");
+                var prop = (interfaceType ?? style.GetType()).GetProperty(property, All);
+                if (prop?.CanWrite != true) return;
+                try { prop.SetValue(style, value); applied++; }
+                catch (Exception e)
+                {
+                    Runtime.Log("UIONLY.HUD skin property " + property +
+                        " unavailable: " + e.GetBaseException().GetType().Name);
+                }
+            }
+
+            var background = Color(0.055f, 0.16f, 0.13f, 0.96f);
+            var border = Color(0.70f, 0.60f, 0.37f, 1f);
+            var text = Color(0.94f, 0.82f, 0.52f, 1f);
+            Set(panel, "backgroundColor", background);
+            foreach (var side in new[] { "Top", "Right", "Bottom", "Left" })
+            {
+                Set(panel, "border" + side + "Color", border);
+                Set(panel, "border" + side + "Width", Float(2f));
+            }
+            if (toggle is not null) Set(toggle, "color", text);
+            if (label is not null) Set(label, "color", text);
+            Runtime.Log("UIONLY.HUD detached native-style fallback applied properties=" +
+                applied + "; dark-green fill, gold 2px frame, yellow text");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log("UIONLY.HUD skin fallback failed: " +
+                ex.GetBaseException().GetType().Name + ": " + ex.GetBaseException().Message);
+        }
     }
 
     private static void InitializeFrame(VisualElement frame)
