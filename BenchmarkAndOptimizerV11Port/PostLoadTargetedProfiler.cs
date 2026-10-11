@@ -21,6 +21,9 @@ internal static class PostLoadTargetedProfiler
     {
         "Timberborn.WorldPersistence.WorldEntitiesLoader",
         "Timberborn.GameStartup.GameInitializer",
+        // Existing optimizer already resolves this exact Timberborn 1.1 class.
+        // T3MP also wraps its PostLoad; this is the highest-value 226s suspect.
+        "Timberborn.Navigation.NavigationSynchronizer",
         "Timberborn.NavigationSystem.NavigationService",
         "Timberborn.PathSystem.PathService",
         "Timberborn.WaterSystem.WaterService",
