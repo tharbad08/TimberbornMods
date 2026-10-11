@@ -34,8 +34,7 @@ public sealed class GameConfig : Configurator
             .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
             .BindSingleton<OptimizerSettingsBoxWidthService>()
             .BindSingleton<OptimizerOriginRegistryService>()
-            .BindSingleton<OptimizerMenuService>()
-            .BindSingleton<SimulationThroughputService>();
+            .BindSingleton<OptimizerMenuService>();
     }
 }
 
@@ -155,15 +154,6 @@ public sealed class OptimizerPanel : VisualElement
         });
         actions.AddMenuButton("Refresh detected systems", onClick: Rebuild);
         actions.SetMarginBottom(8);
-
-        this.AddGameLabel("Benchmark", bold: true);
-        var benchmarkRow = this.AddRow();
-        benchmarkRow.AddGameLabel($"Fixed duration: {Runtime.BenchmarkDurationSeconds} seconds");
-        benchmarkRow.AddMenuButton("Start 120s benchmark", onClick: () =>
-        {
-            Runtime.StartBenchmark();
-            UpdateStatus();
-        });
 
         _status = this.AddGameLabel("");
         _status.SetMarginBottom(8);
