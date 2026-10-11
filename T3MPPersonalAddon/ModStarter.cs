@@ -26,6 +26,7 @@ namespace T3MPPersonalAddon
 
             Patcher.Patch(onGui, prefix: new HarmonyMethod(typeof(RatePanel), nameof(RatePanel.DrawInstead)));
             HeightShowerAdapter.Install(Patcher);
+            WaterCounterAnchor.Install(Patcher);
             _started = true;
             RemoveT3MPSpeedPatch();
             var policy = AccessTools.TypeByName("T3MP.Runtime.RequestedSpeedPolicy");
@@ -75,6 +76,7 @@ namespace T3MPPersonalAddon
             // Returning false suppresses ONLY original T3MP OnGUI. T3MP's
             // Update and tick observer still calculate values normally.
             if (_label == null) return false;
+            WaterCounterAnchor.Refresh();
             try
             {
                 var raw = (string?)Source.GetValue(__instance) ?? "";
@@ -184,6 +186,7 @@ namespace T3MPPersonalAddon
                 append.Invoke(gameLayout, new object[]{panel,9});
                 Console.WriteLine("[T3MPPersonalAddon] Styled readout element: " + panel.GetType().FullName);
                 RatePanel.Attach(label);
+                WaterCounterAnchor.Attach(panel, oldPanel);
             }
             catch(Exception ex)
             {
