@@ -232,11 +232,11 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             while (root.parent is not null) root = root.parent;
             // Only named UI nodes: do not guess based on translated water text,
             // and never attach to the adjacent badwater resource counter.
-            var candidates = root.Query<VisualElement>().ToList()
+            var candidates = Enumerate(root).ToList()
                 .Where(e => !ReferenceEquals(e, _panel) && !string.IsNullOrEmpty(e.name))
                 .Where(e => e.name.IndexOf("water", StringComparison.OrdinalIgnoreCase) >= 0 &&
                     e.name.IndexOf("badwater", StringComparison.OrdinalIgnoreCase) < 0)
-                .Where(e => e.worldBound.width > 20 && e.worldBound.height > 10)
+                .Where(e => HasUsableBounds(e))
                 .OrderBy(e => e.name.Equals("Water", StringComparison.OrdinalIgnoreCase) ? 0 :
                     e.name.IndexOf("WaterCounter", StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 2)
                 .ToArray();
@@ -258,11 +258,10 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
         if (_overlayRoot is null || _waterAnchor is null) return;
         try
         {
-            var bounds = _waterAnchor.worldBound;
-            var parentBounds = _overlayRoot.worldBound;
-            if (bounds.width <= 0 || bounds.height <= 0) return;
-            _panel.style.left = bounds.xMin - parentBounds.xMin;
-            _panel.style.top = bounds.yMax - parentBounds.yMin + 2f;
+            if (!ReadBounds(_waterAnchor, out var x, out var y, out var width, out var height) ||
+                !ReadBounds(_overlayRoot, out var rootX, out var rootY, out _, out _)) return;
+            _panel.style.left = x - rootX;
+            _panel.style.top = y + height - rootY + 2f;
         }
         catch (Exception ex)
         {
@@ -270,6 +269,37 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             _waterAnchor = null;
             _overlayRoot = null;
         }
+    }
+
+    private static IEnumerable<VisualElement> Enumerate(VisualElement root)
+    {
+        foreach (var child in root.Children())
+        {
+            yield return child;
+            foreach (var nested in Enumerate(child)) yield return nested;
+        }
+    }
+
+    private static bool HasUsableBounds(VisualElement e) =>
+        ReadBounds(e, out _, out _, out var width, out var height) && width > 20 && height > 10;
+
+    private static bool ReadBounds(VisualElement e, out float x, out float y, out float width, out float height)
+    {
+        x = y = width = height = 0f;
+        var bounds = e.GetType().GetProperty("worldBound", All)?.GetValue(e);
+        if (bounds is null) return false;
+        try
+        {
+            var type = bounds.GetType();
+            float Get(string name) => Convert.ToSingle(type.GetProperty(name, All)?.GetValue(bounds)
+                ?? type.GetField(name, All)?.GetValue(bounds) ?? 0f);
+            x = Get("xMin");
+            y = Get("yMin");
+            width = Get("width");
+            height = Get("height");
+            return width > 0 && height > 0;
+        }
+        catch { return false; }
     }
 
     private static void CopyClasses(object source, VisualElement target)
