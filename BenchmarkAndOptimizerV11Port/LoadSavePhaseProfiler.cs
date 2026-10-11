@@ -317,6 +317,9 @@ internal static class LoadSavePhaseProfiler
                 session.LastName = target.Name + " ended";
             }
 
+            if (target.Name == "Lifecycle.PostLoadSingletons")
+                PostLoadTargetedProfiler.Report();
+
             if (target.End || (target.Kind == Category.Save && session.WriterOnly &&
                                target.Name == "SaveWriter.ZIPArchiveAndEntries"))
             {
