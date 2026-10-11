@@ -29,6 +29,11 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
     private static object? _attachedLayout;
     private static bool _lastEnabled;
     private static bool _warned;
+    private static VisualElement? _panel;
+    private static VisualElement? _overlayRoot;
+    private static VisualElement? _waterAnchor;
+    private static int _anchorAttempts;
+    private static long _nextAnchorCheck;
 
     public static void Install(Harmony harmony)
     {
@@ -142,6 +147,11 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             // readout uses order 9. We add the UI-only panel at order 10.
             append.Invoke(layout, new object[] { panel, 10 });
 
+            _panel = panel;
+            _anchorAttempts = 0;
+            _nextAnchorCheck = 0;
+            TryAttachBelowWater(oldRoot as VisualElement);
+
             _attachedLayout = layout;
             _checkbox = checkbox;
             _status = label;
@@ -178,6 +188,12 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
     {
         // The ModSettings control can change the mode. Keep the HUD in
         // sync only on transitions; no per-frame UI writes.
+        // Search for the water resource counter only during initialization,
+        // then occasionally update absolute placement as the HUD changes.
+        if (_panel is not null && (_waterAnchor is null || _overlayRoot is null ||
+            System.Diagnostics.Stopwatch.GetTimestamp() >= _nextAnchorCheck))
+            TryAttachBelowWater(_panel);
+
         var value = UiOnlySimulationService.Enabled;
         if (_checkbox is null || _lastEnabled == value) return;
         _checkbox.SetValueWithoutNotify(value);
@@ -193,6 +209,67 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
         _status = null;
         _attachedLayout = null;
         _lastEnabled = false;
+        _panel = null;
+        _waterAnchor = null;
+        _overlayRoot = null;
+        _anchorAttempts = 0;
+    }
+
+
+    // The top-right HUD wraps/clips on three rows. Place this as an absolute
+    // overlay under the water RESOURCE counter, not another top-right row.
+    // Absolute positioning takes no flex-layout space and does not change
+    // the weather prediction panel's dynamic show/hide behavior.
+    private static void TryAttachBelowWater(VisualElement? reference)
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now < _nextAnchorCheck || _panel is null || reference is null) return;
+        _nextAnchorCheck = now + System.Diagnostics.Stopwatch.Frequency * 2;
+        if (_waterAnchor is null)
+        {
+            if (++_anchorAttempts > 20) return;
+            VisualElement root = reference;
+            while (root.parent is not null) root = root.parent;
+            // Only named UI nodes: do not guess based on translated water text,
+            // and never attach to the adjacent badwater resource counter.
+            var candidates = root.Query<VisualElement>().ToList()
+                .Where(e => !ReferenceEquals(e, _panel) && !string.IsNullOrEmpty(e.name))
+                .Where(e => e.name.IndexOf("water", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    e.name.IndexOf("badwater", StringComparison.OrdinalIgnoreCase) < 0)
+                .Where(e => e.worldBound.width > 20 && e.worldBound.height > 10)
+                .OrderBy(e => e.name.Equals("Water", StringComparison.OrdinalIgnoreCase) ? 0 :
+                    e.name.IndexOf("WaterCounter", StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 2)
+                .ToArray();
+            if (candidates.Length == 0)
+            {
+                if (_anchorAttempts == 20)
+                    Runtime.Log("UIONLY.HUD water resource anchor not found; top-right fallback retained");
+                return;
+            }
+            _waterAnchor = candidates[0];
+            _overlayRoot = root;
+            _panel.RemoveFromClassList("top-right-item");
+            _panel.style.position = Position.Absolute;
+            _overlayRoot.Add(_panel);
+            Runtime.Log("UIONLY.HUD water overlay attached anchor=" + _waterAnchor.name +
+                " absolute positioning; no reserved gap, badwater overlap permitted");
+        }
+
+        if (_overlayRoot is null || _waterAnchor is null) return;
+        try
+        {
+            var bounds = _waterAnchor.worldBound;
+            var parentBounds = _overlayRoot.worldBound;
+            if (bounds.width <= 0 || bounds.height <= 0) return;
+            _panel.style.left = bounds.xMin - parentBounds.xMin;
+            _panel.style.top = bounds.yMax - parentBounds.yMin + 2f;
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log("UIONLY.HUD water position update failed: " + ex.GetType().Name);
+            _waterAnchor = null;
+            _overlayRoot = null;
+        }
     }
 
     private static void CopyClasses(object source, VisualElement target)
