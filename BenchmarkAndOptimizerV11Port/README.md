@@ -143,3 +143,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.88 **startup compatibility fix** for the 2026-10-11 crash: limit load/save probes to curated game phase methods. Remove broad reflection scan over all loaded assemblies and hundreds of per-mod handler Harmony patches; remove instrumented compiler-generated scene coroutine MoveNext. These were introduced in v1.1.86 and are suspected (not conclusively proven) contributors to Bindito's `DMD<> type is not finished` ReflectionTypeLoadException. Preserve phase and total load/save timers, UI-only panel, FPS logging, and gameplay optimizations. See STARTUP-SAFETY-1.1.88.md.
+
+
+- v1.1.89: mitigate reproducible Bindito startup crash (`ReflectionTypeLoadException: DMD<>? is not finished`) by narrowly rewriting only the `Assembly.GetTypes` call in compiler-generated `ContainerDefinition.FindConfigurators` lambda. Skip dynamic Harmony/MonoMod assemblies, keep ordinary game/mod assembly discovery and exceptions unchanged. Fail closed on changed lambda signatures. Retains v1.1.88 load/save, UI-only panel/FPS probes, all gameplay optimizations. See BINDITO-DMD-STARTUP-v1.1.89.md.
