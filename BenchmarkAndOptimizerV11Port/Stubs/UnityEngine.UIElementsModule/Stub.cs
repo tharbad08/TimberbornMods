@@ -47,6 +47,7 @@ namespace UnityEngine.UIElements
     {
         public IStyle style { get; } = null!;
         public void Add(VisualElement child) { }
+        public void AddToClassList(string className) { }
         public void Clear() { }
         public void RegisterCallback<TEventType>(EventCallback<TEventType> callback) where TEventType : EventBase { }
     }
