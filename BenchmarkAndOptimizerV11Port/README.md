@@ -155,3 +155,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.92: in-game HUD checkbox for UI-only simulation, attached through source-verified `UILayout.AddTopRight(VisualElement, 8)` rather than only inside Mod Settings. Synchronizes with existing UI-only camera-mask service; retains FPS logging and all simulation behavior.
+
+
+- v1.1.93: UI-only HUD follows the proven T3MP Personal Companion HeightShower Load-postfix approach. Reuses `_gameLayout`, copies actual HeightShower NineSlice styling and adds at top-right order 10, after HeightShower (8) and rSPD/iSPD (9). Removes fragile direct UILayout container resolution. Logs hook attachment and HUD creation.
