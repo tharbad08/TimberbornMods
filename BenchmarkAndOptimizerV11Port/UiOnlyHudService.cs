@@ -31,9 +31,13 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
     private static bool _warned;
     private static VisualElement? _panel;
     private static VisualElement? _overlayRoot;
-    private static VisualElement? _waterAnchor;
-    private static int _anchorAttempts;
+    // HeightShowerPanel._root is the known working HUD landmark.
+    // Use it instead of guessing the localized resource-counter names.
+    private static VisualElement? _heightAnchor;
     private static long _nextAnchorCheck;
+    private static bool _secondRowAttached;
+    private const float PanelWidth = 205f;
+    private const float PanelGap = 4f;
 
     public static void Install(Harmony harmony)
     {
@@ -148,17 +152,18 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             append.Invoke(layout, new object[] { panel, 10 });
 
             _panel = panel;
-            _anchorAttempts = 0;
+            _heightAnchor = oldRoot as VisualElement;
+            _secondRowAttached = false;
             _nextAnchorCheck = 0;
-            TryAttachBelowWater(oldRoot as VisualElement);
+            PositionSecondRow();
 
             _attachedLayout = layout;
             _checkbox = checkbox;
             _status = label;
             _lastEnabled = UiOnlySimulationService.Enabled;
             Runtime.Log("UIONLY.HUD installed after HeightShower: " +
-                "NineSliceVisualElement, exact HeightShower classes, " +
-                "UILayout.AddTopRight order=10; checkbox live");
+                "NineSliceVisualElement; second-row overlay pending geometry; " +
+                "UILayout.AddTopRight order=10 is temporary fallback");
         }
         catch (Exception ex)
         {
@@ -188,11 +193,10 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
     {
         // The ModSettings control can change the mode. Keep the HUD in
         // sync only on transitions; no per-frame UI writes.
-        // Search for the water resource counter only during initialization,
-        // then occasionally update absolute placement as the HUD changes.
-        if (_panel is not null && (_waterAnchor is null || _overlayRoot is null ||
-            System.Diagnostics.Stopwatch.GetTimestamp() >= _nextAnchorCheck))
-            TryAttachBelowWater(_panel);
+        // Reposition only twice per second. No per-frame tree scans or polling
+        // all HUD children; the saved HeightShower root is our only anchor.
+        if (_panel is not null)
+            PositionSecondRow();
 
         var value = UiOnlySimulationService.Enabled;
         if (_checkbox is null || _lastEnabled == value) return;
@@ -210,94 +214,88 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
         _attachedLayout = null;
         _lastEnabled = false;
         _panel = null;
-        _waterAnchor = null;
+        _heightAnchor = null;
         _overlayRoot = null;
-        _anchorAttempts = 0;
+        _secondRowAttached = false;
+        _nextAnchorCheck = 0;
     }
 
 
-    // The top-right HUD wraps/clips on three rows. Place this as an absolute
-    // overlay under the water RESOURCE counter, not another top-right row.
-    // Absolute positioning takes no flex-layout space and does not change
-    // the weather prediction panel's dynamic show/hide behavior.
-    private static void TryAttachBelowWater(VisualElement? reference)
+    // The top-right container has limited rows and can clip order=10.
+    // Reparent the control into the UI document's overlay and position it
+    // on the second line, directly to the left of the HeightShower landmark.
+    // This occupies no flex-row space and does not create a gap in the
+    // water/badwater counters or disturb conditional weather UI elements.
+    private static void PositionSecondRow()
     {
+        if (_panel is null || _heightAnchor is null) return;
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
-        if (now < _nextAnchorCheck || _panel is null || reference is null) return;
-        _nextAnchorCheck = now + System.Diagnostics.Stopwatch.Frequency * 2;
-        if (_waterAnchor is null)
-        {
-            if (++_anchorAttempts > 20) return;
-            VisualElement root = reference;
-            while (root.parent is not null) root = root.parent;
-            // Only named UI nodes: do not guess based on translated water text,
-            // and never attach to the adjacent badwater resource counter.
-            var candidates = Enumerate(root).ToList()
-                .Where(e => !ReferenceEquals(e, _panel) && !string.IsNullOrEmpty(e.name))
-                .Where(e => e.name.IndexOf("water", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                    e.name.IndexOf("badwater", StringComparison.OrdinalIgnoreCase) < 0)
-                .Where(e => HasUsableBounds(e))
-                .OrderBy(e => e.name.Equals("Water", StringComparison.OrdinalIgnoreCase) ? 0 :
-                    e.name.IndexOf("WaterCounter", StringComparison.OrdinalIgnoreCase) >= 0 ? 1 : 2)
-                .ToArray();
-            if (candidates.Length == 0)
-            {
-                if (_anchorAttempts == 20)
-                    Runtime.Log("UIONLY.HUD water resource anchor not found; top-right fallback retained");
-                return;
-            }
-            _waterAnchor = candidates[0];
-            _overlayRoot = root;
-            _panel.RemoveFromClassList("top-right-item");
-            _panel.style.position = Position.Absolute;
-            _overlayRoot.Add(_panel);
-            Runtime.Log("UIONLY.HUD water overlay attached anchor=" + _waterAnchor.name +
-                " absolute positioning; no reserved gap, badwater overlap permitted");
-        }
+        if (now < _nextAnchorCheck) return;
+        _nextAnchorCheck = now + System.Diagnostics.Stopwatch.Frequency / 2;
 
-        if (_overlayRoot is null || _waterAnchor is null) return;
         try
         {
-            if (!ReadBounds(_waterAnchor, out var x, out var y, out var width, out var height) ||
-                !ReadBounds(_overlayRoot, out var rootX, out var rootY, out _, out _)) return;
-            _panel.style.left = x - rootX;
-            _panel.style.top = y + height - rootY + 2f;
+            VisualElement document = _heightAnchor;
+            while (document.parent is not null) document = document.parent;
+            if (!ReadBounds(_heightAnchor, out var anchorX, out var anchorY,
+                    out var anchorWidth, out var anchorHeight) ||
+                !ReadBounds(document, out var docX, out var docY, out var docWidth, out _))
+                return;
+
+            // If HeightShower is still on the top row, move one row below.
+            // Normally it already occupies the second row, so match its Y.
+            float y = anchorY - docY;
+            float firstRowHeight = Math.Max(anchorHeight, 24f);
+            if (y < firstRowHeight - 2f)
+                y += firstRowHeight + 2f;
+
+            float x = Math.Max(2f, anchorX - docX - PanelWidth - PanelGap);
+            if (x + PanelWidth > docWidth)
+                x = Math.Max(2f, docWidth - PanelWidth - 2f);
+
+            if (!_secondRowAttached || !ReferenceEquals(_overlayRoot, document))
+            {
+                _panel.RemoveFromClassList("top-right-item");
+                _panel.style.position = Position.Absolute;
+                document.Add(_panel); // Unity UI reparent removes it from top-right flex.
+                _overlayRoot = document;
+                _secondRowAttached = true;
+                Runtime.Log($"UIONLY.HUD second-row overlay attached x={x:F0} y={y:F0} " +
+                    $"heightAnchor={anchorX:F0},{anchorY:F0},{anchorWidth:F0},{anchorHeight:F0}; " +
+                    "no extra flex row; 4px horizontal gap");
+            }
+
+            _panel.style.left = x;
+            _panel.style.top = y;
         }
         catch (Exception ex)
         {
-            Runtime.Log("UIONLY.HUD water position update failed: " + ex.GetType().Name);
-            _waterAnchor = null;
-            _overlayRoot = null;
+            if (!_warned)
+            {
+                _warned = true;
+                Runtime.Log("UIONLY.HUD second-row position unavailable: " +
+                    ex.GetBaseException().GetType().Name + ": " +
+                    ex.GetBaseException().Message);
+            }
         }
     }
 
-    private static IEnumerable<VisualElement> Enumerate(VisualElement root)
-    {
-        foreach (var child in root.Children())
-        {
-            yield return child;
-            foreach (var nested in Enumerate(child)) yield return nested;
-        }
-    }
-
-    private static bool HasUsableBounds(VisualElement e) =>
-        ReadBounds(e, out _, out _, out var width, out var height) && width > 20 && height > 10;
-
-    private static bool ReadBounds(VisualElement e, out float x, out float y, out float width, out float height)
+    private static bool ReadBounds(VisualElement e, out float x, out float y,
+        out float width, out float height)
     {
         x = y = width = height = 0f;
         var bounds = e.GetType().GetProperty("worldBound", All)?.GetValue(e);
         if (bounds is null) return false;
         try
         {
-            var type = bounds.GetType();
-            float Get(string name) => Convert.ToSingle(type.GetProperty(name, All)?.GetValue(bounds)
-                ?? type.GetField(name, All)?.GetValue(bounds) ?? 0f);
+            var t = bounds.GetType();
+            float Get(string name) => Convert.ToSingle(t.GetProperty(name, All)?.GetValue(bounds)
+                ?? t.GetField(name, All)?.GetValue(bounds) ?? 0f);
             x = Get("xMin");
             y = Get("yMin");
             width = Get("width");
             height = Get("height");
-            return width > 0 && height > 0;
+            return width > 0f && height > 0f;
         }
         catch { return false; }
     }
