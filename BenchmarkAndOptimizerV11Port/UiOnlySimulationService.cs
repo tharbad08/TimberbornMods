@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
 using Bindito.Core;
 using HarmonyLib;
 using Timberborn.SingletonSystem;
@@ -39,6 +40,23 @@ public sealed class UiOnlySimulationService(IContainer container)
     private object? _speedManager;
     private PropertyInfo? _currentSpeed;
     private string _windowStartSpeed = "unknown";
+    // One counter increment per completed TickableSingletonService.TickSingletons,
+    // shared with the existing freeze-detector postfix; no new Harmony patches.
+    private long _completedSimulationTicks;
+    private long _previousCompletedSimulationTicks;
+    private object? _dayNightCycle;
+    private PropertyInfo? _partialDayNumber;
+    private double? _previousGameDay;
+    private bool _clockAvailabilityLogged;
+
+    // Invoked ONLY on normal completion of the existing TickSingletons postfix.
+    // Does not affect tick order, call frequency, or the game clock.
+    internal static void RecordCompletedSimulationTick()
+    {
+        var active = _current;
+        if (active is not null)
+            Interlocked.Increment(ref active._completedSimulationTicks);
+    }
 
     public static bool Enabled => _enabled;
     public static string Status => _status;
@@ -53,9 +71,14 @@ public sealed class UiOnlySimulationService(IContainer container)
         _previousFrameCount = ReadFrameCount();
         ResolveSpeedManager();
         _windowStartSpeed = ReadGameSpeed();
+        ResolveDayNightCycle();
+        _previousGameDay = ReadPartialDayNumber();
+        _completedSimulationTicks = 0;
+        _previousCompletedSimulationTicks = 0;
         Runtime.Log("UIONLY service loaded: disabled by default; records FPS " +
             "every 15s in BOTH modes using Unity Time.frameCount where available; " +
-            "normal gameplay, native FramesPerSecondPanel, TopBar and all UI retained");
+            "normal gameplay, native FramesPerSecondPanel, TopBar and all UI retained; " +
+            "completed simulation ticks and IDayNightCycle day advancement measured in each FPS window");
     }
 
     public static bool TrySetEnabled(bool enabled)
@@ -141,12 +164,32 @@ public sealed class UiOnlySimulationService(IContainer container)
         var fps = elapsed > 0 ? frames / elapsed : 0;
         var mode = _enabled ? "UI_ONLY" : "NORMAL";
         var speedEnd = ReadGameSpeed();
+        long currentTicks = Interlocked.Read(ref _completedSimulationTicks);
+        long completedTicks = Math.Max(0, currentTicks - _previousCompletedSimulationTicks);
+        double ticksPerRealSec = elapsed > 0 ? completedTicks / elapsed : 0;
+        double? gameDayEnd = ReadPartialDayNumber();
+        double? dayDelta = _previousGameDay.HasValue && gameDayEnd.HasValue
+            ? gameDayEnd.Value - _previousGameDay.Value : null;
+        // PartialDayNumber is monotonically increasing in normal play. A
+        // negative jump is a reload/time-reset, not a negative throughput.
+        if (dayDelta < 0) dayDelta = null;
+        string daysPerRealMin = dayDelta.HasValue && elapsed > 0
+            ? (dayDelta.Value * 60.0 / elapsed).ToString("F5", System.Globalization.CultureInfo.InvariantCulture)
+            : "na";
+        string gameHoursPerRealMin = dayDelta.HasValue && elapsed > 0
+            ? (dayDelta.Value * 24.0 * 60.0 / elapsed).ToString("F3", System.Globalization.CultureInfo.InvariantCulture)
+            : "na";
         Runtime.Log($"UIONLY.FPS mode={mode} interval={elapsed:F2}s " +
             $"fps={fps:F2} frames={frames} speedStart={_windowStartSpeed} speedEnd={speedEnd} " +
+            $"simTicks={completedTicks} simTicksPerRealSecond={ticksPerRealSec:F3} " +
+            $"gameDaysPerRealMinute={daysPerRealMin} gameHoursPerRealMinute={gameHoursPerRealMin} " +
+            $"clock={(gameDayEnd.HasValue ? "IDayNightCycle.PartialDayNumber" : "unavailable")} " +
             $"source={(_useUnityFrameCount ? "Unity.Time.frameCount" : "UpdateSingleton-count")} " +
             $"upTime={(now - _startedTicks) / (double)Stopwatch.Frequency:F0}s; " +
-            "values are overall frame throughput, not in-game simulation ticks/sec");
+            "tick metric counts completed singleton-tick dispatcher calls, not entity ticks");
 
+        _previousCompletedSimulationTicks = currentTicks;
+        _previousGameDay = gameDayEnd;
         _windowStartSpeed = speedEnd;
         _previousLogTicks = now;
         _previousFrameCount = currentFrame;
@@ -329,9 +372,58 @@ public sealed class UiOnlySimulationService(IContainer container)
         catch { return "unknown"; }
     }
 
+    private void ResolveDayNightCycle()
+    {
+        if (_dayNightCycle is not null && _partialDayNumber is not null) return;
+        try
+        {
+            var clockType = AccessTools.TypeByName("Timberborn.TimeSystem.IDayNightCycle");
+            if (clockType is null) return;
+            var get = _container.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "GetInstance" &&
+                    m.IsGenericMethodDefinition && m.GetParameters().Length == 0);
+            if (get is null) return;
+            var cycle = get.MakeGenericMethod(clockType).Invoke(_container, null);
+            var prop = clockType.GetProperty("PartialDayNumber",
+                BindingFlags.Public | BindingFlags.Instance);
+            if (cycle is null || prop is null || !prop.CanRead) return;
+            _dayNightCycle = cycle;
+            _partialDayNumber = prop;
+            if (!_clockAvailabilityLogged)
+            {
+                _clockAvailabilityLogged = true;
+                Runtime.Log("UIONLY.SIM clock resolved IDayNightCycle.PartialDayNumber; read only every 15s");
+            }
+        }
+        catch (Exception e)
+        {
+            if (!_clockAvailabilityLogged)
+            {
+                _clockAvailabilityLogged = true;
+                Runtime.Log("UIONLY.SIM game clock unavailable: " + e.GetType().Name);
+            }
+        }
+    }
+
+    private double? ReadPartialDayNumber()
+    {
+        try
+        {
+            if (_partialDayNumber is null || _dayNightCycle is null) ResolveDayNightCycle();
+            if (_dayNightCycle is null || _partialDayNumber is null) return null;
+            var value = _partialDayNumber.GetValue(_dayNightCycle);
+            if (value is null) return null;
+            var number = Convert.ToDouble(value, System.Globalization.CultureInfo.InvariantCulture);
+            return double.IsNaN(number) || double.IsInfinity(number) ? null : number;
+        }
+        catch { return null; }
+    }
+
     private void ResetFpsWindow()
     {
         _windowStartSpeed = ReadGameSpeed();
+        _previousGameDay = ReadPartialDayNumber();
+        _previousCompletedSimulationTicks = Interlocked.Read(ref _completedSimulationTicks);
         _previousLogTicks = Stopwatch.GetTimestamp();
         _previousFrameCount = ReadFrameCount();
         _fallbackFrameCount = 0;
