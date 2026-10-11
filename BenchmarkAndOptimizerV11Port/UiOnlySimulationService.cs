@@ -36,6 +36,9 @@ public sealed class UiOnlySimulationService(IContainer container)
     private PropertyInfo? _frameCountProperty;
     private bool _useUnityFrameCount;
     private bool _cameraLookupWarned;
+    private object? _speedManager;
+    private PropertyInfo? _currentSpeed;
+    private string _windowStartSpeed = "unknown";
 
     public static bool Enabled => _enabled;
     public static string Status => _status;
@@ -48,6 +51,8 @@ public sealed class UiOnlySimulationService(IContainer container)
         _startedTicks = Stopwatch.GetTimestamp();
         _previousLogTicks = _startedTicks;
         _previousFrameCount = ReadFrameCount();
+        ResolveSpeedManager();
+        _windowStartSpeed = ReadGameSpeed();
         Runtime.Log("UIONLY service loaded: disabled by default; records FPS " +
             "every 15s in BOTH modes using Unity Time.frameCount where available; " +
             "normal gameplay, native FramesPerSecondPanel, TopBar and all UI retained");
@@ -135,12 +140,14 @@ public sealed class UiOnlySimulationService(IContainer container)
 
         var fps = elapsed > 0 ? frames / elapsed : 0;
         var mode = _enabled ? "UI_ONLY" : "NORMAL";
+        var speedEnd = ReadGameSpeed();
         Runtime.Log($"UIONLY.FPS mode={mode} interval={elapsed:F2}s " +
-            $"fps={fps:F2} frames={frames} " +
+            $"fps={fps:F2} frames={frames} speedStart={_windowStartSpeed} speedEnd={speedEnd} " +
             $"source={(_useUnityFrameCount ? "Unity.Time.frameCount" : "UpdateSingleton-count")} " +
             $"upTime={(now - _startedTicks) / (double)Stopwatch.Frequency:F0}s; " +
             "values are overall frame throughput, not in-game simulation ticks/sec");
 
+        _windowStartSpeed = speedEnd;
         _previousLogTicks = now;
         _previousFrameCount = currentFrame;
         _fallbackFrameCount = 0;
@@ -284,8 +291,47 @@ public sealed class UiOnlySimulationService(IContainer container)
         return _fallbackFrameCount;
     }
 
+    // SpeedManager.CurrentSpeed is the same setting used by the game's speed UI.
+    // Read only at window boundaries; never change speed or simulation ticks.
+    private void ResolveSpeedManager()
+    {
+        try
+        {
+            var type = AccessTools.TypeByName("Timberborn.TimeSystem.SpeedManager")
+                ?? AccessTools.TypeByName("SpeedManager");
+            if (type is null) return;
+            var getter = _container.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "GetInstance" &&
+                    m.IsGenericMethodDefinition && m.GetParameters().Length == 0);
+            if (getter is null) return;
+            _speedManager = getter.MakeGenericMethod(type).Invoke(_container, null);
+            _currentSpeed = type.GetProperty("CurrentSpeed",
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+            Runtime.Log("UIONLY.FPS speed probe=" +
+                (_speedManager is not null && _currentSpeed is not null ? "SpeedManager.CurrentSpeed" : "unavailable"));
+        }
+        catch (Exception e)
+        {
+            Runtime.Log("UIONLY.FPS speed probe unavailable: " + e.GetType().Name);
+        }
+    }
+
+    private string ReadGameSpeed()
+    {
+        try
+        {
+            if (_speedManager is null || _currentSpeed is null) ResolveSpeedManager();
+            var value = _currentSpeed?.GetValue(_speedManager);
+            return value is IFormattable formatted
+                ? formatted.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture)
+                : value?.ToString() ?? "unknown";
+        }
+        catch { return "unknown"; }
+    }
+
     private void ResetFpsWindow()
     {
+        _windowStartSpeed = ReadGameSpeed();
         _previousLogTicks = Stopwatch.GetTimestamp();
         _previousFrameCount = ReadFrameCount();
         _fallbackFrameCount = 0;
