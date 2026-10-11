@@ -131,3 +131,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.84: isolate the ~300 ms residual in large preview TemplateInstantiator.Instantiate by timing T3MP PreparedEntityVisuals.Activate (inclusive Unity GameObject.SetActive and lifecycle) and separate T3MP Prepare, in existing block-scope freeze detail plus occasional TEMPLATE.ACTIVATION summaries. Add preview-specific counts of actually accelerated component-list batches, cached specs, and natively constructed live components. No preview lifecycle/validation, T3MP, AutoScaffold, EzTube, SmartPower, EBR, save, soil or scheduling changes. See TEMPLATE-ACTIVATION-PROFILING-v1.1.84.md.
+
+
+- v1.1.85: post-diagnostics normal-play build: removes the now-completed EBR stage profiling and T3MP preview-activation Harmony hooks and the per-preview-batch counters introduced in v1.1.84. All verified gameplay optimizations retained. Full test evidence and remaining work in POST-DIAGNOSTICS-1.1.85.md.
