@@ -41,7 +41,7 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
     private static bool _waterMissingLogged;
     private static long _nextAnchorCheck;
     private static bool _secondRowAttached;
-    private const float PanelWidth = 205f;
+    private const float PanelWidth = 226f;
     private const float PanelGap = 4f;
 
     public static void Install(Harmony harmony)
@@ -117,16 +117,22 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             if (ReferenceEquals(_attachedLayout, layout) && _checkbox is not null)
                 return;
 
+            // Game-native nine-slice FRAME outside a green content panel.
+            // Initialization is necessary for the textures and USS rules.
+            var frame = new NineSliceVisualElement();
+            frame.AddToClassList("top-right-item");
+            frame.AddToClassList("entity-sub-panel");
+            frame.AddToClassList("bg-sub-box--frame");
+            frame.SetWidth(PanelWidth).SetPadding(2f);
+
             var panel = new NineSliceVisualElement();
-            CopyClasses(oldRoot, panel);
-            // The base classes are always required even if HeightShower's
-            // GetClasses is unavailable in a new game version.
-            panel.AddToClassList("top-right-item");
             panel.AddToClassList("square-large--green");
+            CopyClasses(oldRoot, panel);
             CopyInlineStyle(oldRoot, panel, "flexDirection");
             CopyInlineStyle(oldRoot, panel, "flexWrap");
             CopyInlineStyle(oldRoot, panel, "justifyContent");
-            panel.SetWidth(205f).SetPadding(5f);
+            panel.SetWidth(PanelWidth - 4f).SetPadding(5f);
+            frame.Add(panel);
 
             var row = panel.AddRow();
             var checkbox = row.AddToggle("UI-only simulation",
@@ -152,11 +158,11 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
                     method.GetParameters()[1].ParameterType == typeof(int))
                 ?? throw new MissingMethodException("UILayout.AddTopRight(VisualElement,int)");
 
-            // Existing HeightShower uses order 8 and the working T3MP
-            // readout uses order 9. We add the UI-only panel at order 10.
-            append.Invoke(layout, new object[] { panel, 10 });
+            // Initialize new nine-slice subtree before reparenting.
+            InitializeFrame(frame);
+            append.Invoke(layout, new object[] { frame, 10 });
 
-            _panel = panel;
+            _panel = frame;
             _heightAnchor = oldRoot as VisualElement;
             _waterAnchor = null;
             _waterLookupAttempts = 0;
@@ -282,7 +288,8 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
 
             if (!_secondRowAttached || !ReferenceEquals(_overlayRoot, document))
             {
-                _panel.RemoveFromClassList("top-right-item");
+                // Preserve the native class; absolute reparenting already
+                // removes the element from the original flex layout.
                 _panel.style.position = Position.Absolute;
                 document.Add(_panel); // Removes panel from limited top-right flex rows.
                 _overlayRoot = document;
@@ -392,6 +399,40 @@ public sealed class UiOnlyHudService : IUpdatableSingleton, IUnloadableSingleton
             return width > 0f && height > 0f;
         }
         catch { return false; }
+    }
+
+    private static void InitializeFrame(VisualElement frame)
+    {
+        try
+        {
+            var type = AccessTools.TypeByName("Timberborn.CoreUI.VisualElementInitializer")
+                ?? AccessTools.TypeByName("VisualElementInitializer");
+            if (type is null || _container is null)
+            {
+                Runtime.Log("UIONLY.HUD visual initializer unavailable; using USS classes");
+                return;
+            }
+            var get = _container.GetType().GetMethods(BindingFlags.Public | BindingFlags.Instance)
+                .FirstOrDefault(m => m.Name == "GetInstance" &&
+                    m.IsGenericMethodDefinition && m.GetParameters().Length == 0);
+            var instance = get?.MakeGenericMethod(type).Invoke(_container, null);
+            var method = type.GetMethods(All).FirstOrDefault(m =>
+                m.Name == "InitializeVisualElement" &&
+                m.GetParameters().Length == 1 &&
+                m.GetParameters()[0].ParameterType.IsAssignableFrom(typeof(VisualElement)));
+            if (instance is null || method is null)
+            {
+                Runtime.Log("UIONLY.HUD initializer method unavailable; using USS classes");
+                return;
+            }
+            method.Invoke(instance, new object[] { frame });
+            Runtime.Log("UIONLY.HUD frame+green fill initialized with game visual initializer");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log("UIONLY.HUD frame initializer warning: " +
+                ex.GetBaseException().GetType().Name + ": " + ex.GetBaseException().Message);
+        }
     }
 
     private static void CopyClasses(object source, VisualElement target)
