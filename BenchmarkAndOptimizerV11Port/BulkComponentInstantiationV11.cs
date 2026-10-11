@@ -213,20 +213,6 @@ internal static class BulkComponentInstantiationFastPath
         _cachedSpecs += plan.CachedCount;
         _liveComponents += plan.Types.Length - plan.CachedCount;
 
-        if (HotInputDetailProfiler.BlockScopeActive)
-        {
-            // Preview-specific counters: the startup milestones can be 100%
-            // world-load work, so don't mistake them for saved preview work.
-            // These counters only increment when this prefix actually bypasses
-            // the native list constructor, not when T3MP or vanilla handled it.
-            FreezeDetector.RecordHotspotCount("Block.BulkFastPathBatches");
-            FreezeDetector.RecordHotspotCount(
-                "Block.BulkCachedImmutableSpecs", plan.CachedCount);
-            FreezeDetector.RecordHotspotCount(
-                "Block.BulkNativeLiveComponents",
-                plan.Types.Length - plan.CachedCount);
-        }
-
         if (_fastBatches == 100 || _fastBatches == 1000 ||
             _fastBatches == 10000 || _fastBatches == 100000)
             Runtime.Log($"bulk/preview fast path: batches={_fastBatches}, " +
