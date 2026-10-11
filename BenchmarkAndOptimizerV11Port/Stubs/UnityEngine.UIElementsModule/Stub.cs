@@ -25,6 +25,8 @@ namespace UnityEngine.UIElements
         Stretch
     }
     public enum DisplayStyle { Flex, None }
+    public enum Position { Relative, Absolute }
+    public readonly struct StyleLength { public static implicit operator StyleLength(float value) => new StyleLength(); }
     public readonly struct StyleEnum<T> where T : struct
     {
         public static implicit operator StyleEnum<T>(T value) => new StyleEnum<T>();
@@ -32,6 +34,9 @@ namespace UnityEngine.UIElements
     public interface IStyle
     {
         StyleEnum<DisplayStyle> display { get; set; }
+        StyleEnum<Position> position { get; set; }
+        StyleLength left { get; set; }
+        StyleLength top { get; set; }
     }
     public class EventBase { }
     public class DetachFromPanelEvent : EventBase { }
@@ -46,6 +51,10 @@ namespace UnityEngine.UIElements
     public class VisualElement
     {
         public IStyle style { get; } = null!;
+        public string name { get; set; } = "";
+        public VisualElement parent { get; } = null!;
+        public System.Collections.Generic.IEnumerable<VisualElement> Children() => System.Array.Empty<VisualElement>();
+        public void RemoveFromClassList(string className) { }
         public void Add(VisualElement child) { }
         public void AddToClassList(string className) { }
         public void Clear() { }
