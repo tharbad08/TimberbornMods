@@ -35,7 +35,8 @@ public sealed class GameConfig : Configurator
             .BindSingleton<OptimizerSettingsBoxWidthService>()
             .BindSingleton<OptimizerOriginRegistryService>()
             .BindSingleton<OptimizerMenuService>()
-            .BindSingleton<UiOnlySimulationService>();
+            .BindSingleton<UiOnlySimulationService>()
+            .BindSingleton<UiOnlyHudService>();
     }
 }
 

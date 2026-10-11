@@ -152,3 +152,6 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.91: fix v1.1.90 startup guard regression. The compiler-generated `SelectMany` selectors for Bindito configurators and blueprint `SpecTypeCache` can return `IEnumerable<Type>` even though their single internal `Assembly.GetTypes()` call returns `Type[]`. v1.1.90 incorrectly required the enclosing method to return `Type[]`, so its guards could be skipped. Accept only `(Assembly) -> IEnumerable<Type>`-compatible methods and verify exactly one `Assembly.GetTypes` IL call. Report selector signature and successful transpiler application; no gameplay/blueprint changes. See DMD-SELECTOR-SIGNATURE-1.1.91.md.
+
+
+- v1.1.92: in-game HUD checkbox for UI-only simulation, attached through source-verified `UILayout.AddTopRight(VisualElement, 8)` rather than only inside Mod Settings. Synchronizes with existing UI-only camera-mask service; retains FPS logging and all simulation behavior.
