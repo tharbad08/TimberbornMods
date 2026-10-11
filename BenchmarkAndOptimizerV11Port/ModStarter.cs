@@ -111,58 +111,13 @@ internal static class FreezeDetectorPatcher
 
     public static void Patch()
     {
-        if (_patched)
-        {
-            return;
-        }
-
-        foreach (var target in Targets)
-        {
-            var type = AccessTools.TypeByName(target.TypeName);
-            var original = type is null ? null : AccessTools.Method(type, target.MethodName);
-            if (original is null)
-            {
-                Runtime.Log($"warning: freeze detector target not found: {target.TypeName}.{target.MethodName}");
-                continue;
-            }
-
-            FreezeHarmony.Patch(
-                original,
-                prefix: new HarmonyMethod(AccessTools.Method(typeof(FreezeDetectorPatcher), target.PrefixName))
-                {
-                    priority = Priority.First
-                },
-                postfix: new HarmonyMethod(AccessTools.Method(typeof(FreezeDetectorPatcher), nameof(PhasePostfix)))
-                {
-                    priority = Priority.Last
-                });
-
-            Runtime.Log($"freeze detector patch installed: {target.TypeName}.{target.MethodName}");
-        }
-
-        PatchTickSingletonMethods();
-        PatchLifecycleSingletonMethods(
-            "Timberborn.SingletonSystem.IUpdatableSingleton",
-            "UpdateSingleton",
-            UpdateSingletonRuntimeTypes,
-            UpdateSingletonMethods,
-            nameof(UpdateSingletonPrefix),
-            nameof(UpdateSingletonFinalizer),
-            "UpdateSingleton");
-        PatchLifecycleSingletonMethods(
-            "Timberborn.SingletonSystem.ILateUpdatableSingleton",
-            "LateUpdateSingleton",
-            LateUpdateSingletonRuntimeTypes,
-            LateUpdateSingletonMethods,
-            nameof(LateUpdateSingletonPrefix),
-            nameof(LateUpdateSingletonFinalizer),
-            "LateUpdateSingleton");
+        if (_patched) return;
+        // FINAL QUIET BUILD: patch ONLY gameplay-preserving optimizers.
+        // No per-frame freeze detectors, singleton method scans, navigation
+        // profilers, PlayerLoop hooks, allocation samplers, or save/load probes.
         BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
         ExtendedBuilderReachNavOptimizer.Patch(FreezeHarmony);
-        // v1.1.85: EBR stage profiling completed. Keep its thin fallback wrappers
-        // but do not attach timing hooks to 20k+ accessibility listeners.
-        EbrVerifiedNoOpFastPath.Patch(FreezeHarmony);
-        NavigationSynchronizerDetailProfiler.Patch(FreezeHarmony);
+        EbrVerifiedNoOpFastPath.Patch(FreezeHarmony); // strict IL guard; inactive if impure
         PreviewNavMeshBatcher.Patch(FreezeHarmony);
         UnusedPreviewPoolFastPath.Patch(FreezeHarmony);
         FullyBuildablePreviewFastPath.Patch(FreezeHarmony);
@@ -171,43 +126,9 @@ internal static class FreezeDetectorPatcher
         FaunaSpawnBudgetPatcher.Patch(FreezeHarmony);
         FaunaRecipeLookupCachePatcher.Patch(FreezeHarmony);
         KeystoneFaunaTemplatePrewarmer.Patch(FreezeHarmony);
-        // v1.1.86: FaunaInstantiationDetailProfiler load/normal-play hot-loop diagnostics retired.
-        // v1.1.77: This hook targets TickableBucketService.TickBuckets, which is
-        // the GLOBAL simulation scheduler (128 entity buckets + 1 singleton).
-        // Terrain-triggered throttling here postpones unrelated gameplay ticks,
-        // including planting and other entity updates. Leave it unpatched.
-        // NotifyTerrainEdit remains a no-op while _installed is false.
-        Runtime.Log("global TickBuckets terrain recovery limiter disabled: vanilla entity and singleton tick scheduling preserved");
         SoilContaminationResetOptimizer.Patch(FreezeHarmony);
-        SoilContaminationDeepProfiler.Patch(FreezeHarmony);
-        SoilMoistureProfiler.Patch(FreezeHarmony);
-        InputAndFaunaDetailProfiler.Patch(FreezeHarmony);
-        // v1.1.86: InputProcessorDetailProfiler load/normal-play hot-loop diagnostics retired.
-        // v1.1.86: EbbAndFlowDetailProfiler load/normal-play hot-loop diagnostics retired.
-        // v1.1.86: InstantiationHotspotProfiler load/normal-play hot-loop diagnostics retired.
-        // v1.1.86: PreviewComponentBatchCounter load/normal-play hot-loop diagnostics retired.
-        // v1.1.86: HotInputDetailProfiler load/normal-play hot-loop diagnostics retired.
-        // v1.1.86: PreviewServiceMemberDetailProfiler load/normal-play hot-loop diagnostics retired.
-        // v1.1.86: BlockPlacementDetailProfiler load/normal-play hot-loop diagnostics retired.
-        // v1.1.85: TemplateActivation profiler completed (277ms of 540ms
-        // template time in the 899-preview test). Do not hook every activation.
-        // v1.1.86: LevelVisibilityHandlerProfiler load/normal-play hot-loop diagnostics retired.
         SuperCursorRefreshSmoother.Patch(FreezeHarmony);
-        MonoBehaviourLateUpdateProfiler.Patch(FreezeHarmony);
-        // v1.1.86: SmartPowerPreviewWorkProfiler load/normal-play hot-loop diagnostics retired.
-        LoadSavePhaseProfiler.Patch(FreezeHarmony);
-        PostLoadTargetedProfiler.Patch(FreezeHarmony);
-        HarmonyPatchOwnershipAudit.Initialize();
-
         _patched = true;
-        FreezeDetector.Initialize();
-        PlayerLoopPhaseProfiler.Install();
-        Runtime.Log(
-            "performance build: v1.1.100 UI-only experiment removed; v1.1.99 detached HUD skin; v1.1.98 simulation throughput probe; v1.1.97 HUD native frame; v1.1.96 vanilla Water counter anchor; v1.1.95 second-row HUD and NavigationSynchronizer.PostLoad probe; v1.1.94 speed/FPS and targeted PostLoad/save probes; v1.1.93 HeightShower-anchored UI-only HUD panel (same pattern as working T3MP addon); v1.1.91 corrected DMD guards; v1.1.90 guard Bindito and SpecTypeCache; v1.1.89 Bindito-only guard; v1.1.88 startup-safe load/save profiling; v1.1.87 UI-only main-camera rendering mode and 15s FPS logging; v1.1.86 low-overhead loading and saving phase probe; 10 completed hot-loop profilers off; v1.1.85 EBR/activation probes off; v1.1.84 profiling completed; v1.1.83 four-arg reviewed bulk/preview fast path with IL safety proof; v1.1.82 verified EBR no-op guard and bulk signature adaptation; v1.1.81 signature-resilient SetAccesses and rebuild profiling; v1.1.80 EBR stage-only sampled diagnostics; v1.1.79 EBR memory and coordinates; v1.1.78 cached-spec bulk creation and ordered preview invalidation; v1.1.77 global tick fix and v1.1.69 soil behavior unchanged; " +
-            $"allocation metric source={AllocationCounter.Mode}; fallback mode no longer logs routine per-call heap-growth spikes; " +
-            "heap/allocation summaries are wall-clock rate-limited to 10s and low-heap empty reports are suppressed; " +
-            "GC freeze lines include pre/post-frame heap plus gen2 PlayerLoop transitions; lifecycle adapters timed every high-heap frame while other LateUpdates retain 1/8 sampling; immutable Blueprint ComponentSpec memoization avoids repeated spec-array scans during construction/preview instantiation; preview invalidation uses ordered no-allocation sweep for valid mixed brushes; warmed immutable ComponentSpecs are read directly during bulk construction/preview creation; terrain-triggered global TickableBucketService throttling is disabled: all entity/singleton tick buckets run at vanilla cadence; unused preview hide/remove optimization, all validation and third-party callbacks retained; template and batch timing, corrected SmartPower PowerConsumers callback, save callback Gen2/heap snapshots, nested Harmony owner correlation retained; " +
-            "Keystone prewarm, EBR large-update budgeting, protected SoilContamination vanilla cadence, TimberPhysics limits and all prior gameplay optimizations are unchanged");
     }
 
     private static readonly HashSet<Type> TickSingletonRuntimeTypes = new();
@@ -10575,7 +10496,6 @@ internal static class Runtime
         // Preserve FPS and read-only simulation throughput measurement cadence.
         "FramesPerSecondPanel",
         "FramesPerSecondCounter",
-        "SimulationThroughputService"
     };
 
     public static bool Enabled => _settings.Enabled;
@@ -10726,23 +10646,8 @@ internal static class Runtime
 
     public static void StartBenchmark()
     {
-        lock (Sync)
-        {
-            BenchStats.Clear();
-        }
-
-        RemoveDirectThrottlePatches();
-        if (_harmony is not null)
-        {
-            TimberPhysicsCatchUpLimiterPatcher.Patch(_harmony);
-            DispatcherPatcher.Patch(_harmony);
-            TimberPhysicsBenchmarkPatcher.Patch(_harmony);
-        }
-
-        _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
-        _benchmarkCompleted = false;
-        _benchmarkRunning = true;
-        Log($"benchmark started for {BenchmarkDurationSeconds}s; output will be written under {ModPath}");
+        // Retired: profiling was completed. Do not enable benchmark
+        // dispatcher patching or generate CSV output.
     }
 
     private static string ShortTypeName(string value)
@@ -10828,8 +10733,7 @@ internal static class Runtime
         _harmony = harmony;
         ModPath = modPath;
         Directory.CreateDirectory(ModPath);
-        ResetSessionLogs();
-        Log("session log started; previous optimizer and freeze logs cleared");
+        // Quiet release: never create or clear per-session diagnostic files.
 
         if (!File.Exists(ConfigPath))
         {
@@ -11488,12 +11392,7 @@ internal static class Runtime
             AssemblyNameByType[name] = assemblyName;
             DiscoveredTypes[name] = type;
 
-            if (_settings.WriteDiscoveredTypes)
-            {
-                File.AppendAllText(
-                    DiscoveredPath,
-                    $"{name}\t{origin}{Environment.NewLine}");
-            }
+            // Type discovery remains in-memory for live settings; no text dump.
         }
     }
 
@@ -11795,7 +11694,7 @@ internal static class Runtime
             }
         }
 
-        File.WriteAllLines(file, lines);
+        // Diagnostic CSV writing retired in this quiet release.
 
         if (_harmony is not null)
         {
@@ -11954,65 +11853,28 @@ internal static class Runtime
     }
 
 
+    [System.Diagnostics.Conditional("OPTIMIZER_DIAGNOSTICS")]
     public static void Log(string message)
     {
-        try
-        {
-            File.AppendAllText(Path.Combine(ModPath, "optimizer-v11.log"),
-                $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}");
-        }
-        catch
-        {
-            // Logging must never break the simulation.
-        }
+        // Intentionally empty. The Conditional attribute removes all call
+        // sites and their interpolation/formatting work at compile time.
     }
 
+    [System.Diagnostics.Conditional("OPTIMIZER_DIAGNOSTICS")]
     public static void LogFreeze(string message)
     {
-        try
-        {
-            var line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}";
-            File.AppendAllText(FreezeLogPath, line);
-            File.AppendAllText(Path.Combine(ModPath, "optimizer-v11.log"), line);
-        }
-        catch
-        {
-            // Freeze diagnostics must never break the simulation.
-        }
+        // All freeze log writes and detectors are disabled.
     }
 
+    [System.Diagnostics.Conditional("OPTIMIZER_DIAGNOSTICS")]
     private static void LogOnce(string key, string message)
     {
-        lock (Sync)
-        {
-            if (!LoggedWarnings.Add(key))
-            {
-                return;
-            }
-        }
-
-        Log(message);
+        // Diagnostics are retired; no warning tracking or disk I/O.
     }
 
     private static void ResetSessionLogs()
     {
-        try
-        {
-            File.WriteAllText(Path.Combine(ModPath, "optimizer-v11.log"), string.Empty);
-        }
-        catch
-        {
-            // Never block startup because the main diagnostic log cannot be reset.
-        }
-
-        try
-        {
-            File.WriteAllText(FreezeLogPath, string.Empty);
-        }
-        catch
-        {
-            // Freeze logging remains best-effort if the previous log is locked.
-        }
+        // Do not touch pre-existing log files and do not create new ones.
     }
 
     private sealed class CounterState
