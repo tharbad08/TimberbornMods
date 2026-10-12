@@ -1,0 +1,228 @@
+ARCHIVE ONLY / HISTORICAL INSTRUMENTATION NOT COMPILED
+Cropped class from optimizer v1.1.100; not self-contained, do not deploy without review.
+
+internal static class ManagedHeapSampler
+{
+    private const long ArmHeapBytes = 6L * 1024L * 1024L * 1024L;
+    private const int SampleEveryFrames = 30;
+    private const int TopCount = 10;
+    private static readonly long ReportIntervalTicks =
+        10L * System.Diagnostics.Stopwatch.Frequency;
+
+    public readonly struct Sample
+    {
+        public readonly bool Active;
+        public readonly long HeapBefore;
+        public readonly int Gc0;
+        public readonly int Gc1;
+        public readonly int Gc2;
+
+        public Sample(bool active, long heapBefore, int gc0, int gc1, int gc2)
+        {
+            Active = active;
+            HeapBefore = heapBefore;
+            Gc0 = gc0;
+            Gc1 = gc1;
+            Gc2 = gc2;
+        }
+    }
+
+    private static readonly Dictionary<string, long> SingletonGrowth = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> PlayerLoopGrowth = new(StringComparer.Ordinal);
+    private static int _frame;
+    private static int _sampledFrames;
+    private static long _lastReportTicks;
+    private static bool _sampleThisFrame;
+    private static string? _lastLoopMarker;
+    private static long _lastLoopHeap;
+    private static int _lastLoopGc0;
+    private static int _lastLoopGc1;
+    private static int _lastLoopGc2;
+
+    public static Sample BeginSingletonSample()
+    {
+        if (!_sampleThisFrame || Runtime.IsBenchmarking)
+        {
+            return default;
+        }
+
+        return new Sample(
+            true,
+            GC.GetTotalMemory(false),
+            GC.CollectionCount(0),
+            GC.CollectionCount(1),
+            GC.CollectionCount(2));
+    }
+
+    public static Sample BeginNamedScopeSample() => BeginSingletonSample();
+
+    public static void EndNamedScopeSample(string scopeName, Sample sample)
+    {
+        if (!sample.Active)
+        {
+            return;
+        }
+
+        var gc0 = GC.CollectionCount(0);
+        var gc1 = GC.CollectionCount(1);
+        var gc2 = GC.CollectionCount(2);
+        if (gc0 != sample.Gc0 || gc1 != sample.Gc1 || gc2 != sample.Gc2)
+        {
+            return;
+        }
+
+        var delta = GC.GetTotalMemory(false) - sample.HeapBefore;
+        if (delta <= 0)
+        {
+            return;
+        }
+
+        var key = $"Scope.{scopeName}";
+        SingletonGrowth.TryGetValue(key, out var existing);
+        SingletonGrowth[key] = existing + delta;
+    }
+
+    public static void EndSingletonSample(string phase, string typeName, Sample sample)
+    {
+        if (!sample.Active)
+        {
+            return;
+        }
+
+        var gc0 = GC.CollectionCount(0);
+        var gc1 = GC.CollectionCount(1);
+        var gc2 = GC.CollectionCount(2);
+        if (gc0 != sample.Gc0 || gc1 != sample.Gc1 || gc2 != sample.Gc2)
+        {
+            return;
+        }
+
+        var delta = GC.GetTotalMemory(false) - sample.HeapBefore;
+        if (delta <= 0)
+        {
+            return;
+        }
+
+        var key = $"{phase}.{ShortName(typeName)}";
+        SingletonGrowth.TryGetValue(key, out var existing);
+        SingletonGrowth[key] = existing + delta;
+    }
+
+    public static void MarkPlayerLoop(string marker)
+    {
+        if (!_sampleThisFrame || Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        var heap = GC.GetTotalMemory(false);
+        var gc0 = GC.CollectionCount(0);
+        var gc1 = GC.CollectionCount(1);
+        var gc2 = GC.CollectionCount(2);
+
+        if (_lastLoopMarker is not null &&
+            gc0 == _lastLoopGc0 &&
+            gc1 == _lastLoopGc1 &&
+            gc2 == _lastLoopGc2)
+        {
+            var delta = heap - _lastLoopHeap;
+            if (delta > 0)
+            {
+                var key = $"{_lastLoopMarker}->{marker}";
+                PlayerLoopGrowth.TryGetValue(key, out var existing);
+                PlayerLoopGrowth[key] = existing + delta;
+            }
+        }
+
+        _lastLoopMarker = marker;
+        _lastLoopHeap = heap;
+        _lastLoopGc0 = gc0;
+        _lastLoopGc1 = gc1;
+        _lastLoopGc2 = gc2;
+    }
+
+    public static void FrameBoundary(long heapBytes)
+    {
+        if (_sampleThisFrame)
+        {
+            _sampledFrames++;
+        }
+
+        _lastLoopMarker = null;
+        _lastLoopHeap = 0;
+
+        _frame++;
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_lastReportTicks == 0)
+        {
+            _lastReportTicks = now;
+        }
+        else if (now - _lastReportTicks >= ReportIntervalTicks)
+        {
+            if (heapBytes >= ArmHeapBytes ||
+                SingletonGrowth.Count != 0 ||
+                PlayerLoopGrowth.Count != 0)
+            {
+                Report(heapBytes);
+            }
+
+            _lastReportTicks = now;
+            _sampledFrames = 0;
+            SingletonGrowth.Clear();
+            PlayerLoopGrowth.Clear();
+        }
+
+        _sampleThisFrame =
+            heapBytes >= ArmHeapBytes &&
+            (_frame % SampleEveryFrames) == 0;
+    }
+
+    private static void Report(long heapBytes)
+    {
+        if (SingletonGrowth.Count == 0 && PlayerLoopGrowth.Count == 0)
+        {
+            Runtime.Log(
+                $"managed-heap sampler: heap={FormatBytes(heapBytes)}, sampledFrames={_sampledFrames}; " +
+                "no positive managed-heap deltas captured in sampled singleton/player-loop scopes");
+            return;
+        }
+
+        var singletonTop = SingletonGrowth
+            .OrderByDescending(pair => pair.Value)
+            .Take(TopCount)
+            .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}");
+        var loopTop = PlayerLoopGrowth
+            .OrderByDescending(pair => pair.Value)
+            .Take(TopCount)
+            .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}");
+
+        Runtime.Log(
+            $"managed-heap sampler: heap={FormatBytes(heapBytes)}, sampledFrames={_sampledFrames}; " +
+            $"top singleton growth: {(SingletonGrowth.Count == 0 ? "none" : string.Join(", ", singletonTop))}; " +
+            $"top player-loop growth: {(PlayerLoopGrowth.Count == 0 ? "none" : string.Join(", ", loopTop))}");
+    }
+
+    private static string ShortName(string name)
+    {
+        var index = name.LastIndexOf('.');
+        return index >= 0 ? name[(index + 1)..] : name;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024L)
+        {
+            return $"{bytes / 1024.0 / 1024.0:F1}MB";
+        }
+
+        if (bytes >= 1024L)
+        {
+            return $"{bytes / 1024.0:F1}KB";
+        }
+
+        return $"{bytes}B";
+    }
+}
+
+
