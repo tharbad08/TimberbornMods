@@ -115,19 +115,18 @@ internal static class FreezeDetectorPatcher
         // FINAL QUIET BUILD: patch ONLY gameplay-preserving optimizers.
         // No per-frame freeze detectors, singleton method scans, navigation
         // profilers, PlayerLoop hooks, allocation samplers, or save/load probes.
-        BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
-        ExtendedBuilderReachNavOptimizer.Patch(FreezeHarmony);
-        EbrVerifiedNoOpFastPath.Patch(FreezeHarmony); // strict IL guard; inactive if impure
-        PreviewNavMeshBatcher.Patch(FreezeHarmony);
-        UnusedPreviewPoolFastPath.Patch(FreezeHarmony);
-        FullyBuildablePreviewFastPath.Patch(FreezeHarmony);
-        BlueprintSpecInstantiationCache.Patch(FreezeHarmony);
-        BulkComponentInstantiationFastPath.Patch(FreezeHarmony);
-        FaunaSpawnBudgetPatcher.Patch(FreezeHarmony);
-        FaunaRecipeLookupCachePatcher.Patch(FreezeHarmony);
-        KeystoneFaunaTemplatePrewarmer.Patch(FreezeHarmony);
-        SoilContaminationResetOptimizer.Patch(FreezeHarmony);
-        SuperCursorRefreshSmoother.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("BFR")) BfrLocalizedChangeOptimizerPatcher.Patch(FreezeHarmony);
+        // EBR patches belong exclusively to the EBR Optimizations mod.
+        if (OptimizationToggles.Enabled("PreviewNav")) PreviewNavMeshBatcher.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("PreviewPool")) UnusedPreviewPoolFastPath.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("PreviewSweep")) FullyBuildablePreviewFastPath.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("BlueprintCache")) BlueprintSpecInstantiationCache.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("BulkBuild")) BulkComponentInstantiationFastPath.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("FaunaBudget")) FaunaSpawnBudgetPatcher.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("FaunaCache")) FaunaRecipeLookupCachePatcher.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("FaunaPrewarm")) KeystoneFaunaTemplatePrewarmer.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("SoilReset")) SoilContaminationResetOptimizer.Patch(FreezeHarmony);
+        if (OptimizationToggles.Enabled("SuperCursor")) SuperCursorRefreshSmoother.Patch(FreezeHarmony);
         _patched = true;
     }
 
@@ -10496,7 +10495,7 @@ internal static class Runtime
         "FramesPerSecondCounter",
     };
 
-    public static bool Enabled => _settings.Enabled;
+    public static bool Enabled => _settings.Enabled && OptimizationToggles.Enabled("Intervals");
     public static int DefaultInterval => _settings.DefaultInterval;
     public static bool IsProtected(string typeName) =>
         ProtectedTypeNames.Contains(ShortTypeName(typeName));
@@ -10750,13 +10749,14 @@ internal static class Runtime
         // Patch both proven type-discovery crash sites before any scene loads:
         // Bindito FindConfigurators and Timberborn SpecTypeCache.Create.
         // Preserve ordinary assembly.GetTypes behavior for real mod DLLs.
-        BinditoConfiguratorDynamicAssemblyGuard.Patch(harmony);
-        IncrementalGcSmoother.Initialize();
+        OptimizationToggles.Initialize(modPath);
+        if (OptimizationToggles.Enabled("DynamicAssembly")) BinditoConfiguratorDynamicAssemblyGuard.Patch(harmony);
+        if (OptimizationToggles.Enabled("GcSmoother")) IncrementalGcSmoother.Initialize();
         FreezeDetectorPatcher.Patch();
-        TimberPhysicsCatchUpLimiterPatcher.Patch(harmony);
-        TimberPhysicsTerrainColliderMergerPatcher.Patch(harmony);
+        if (OptimizationToggles.Enabled("PhysicsCatchup")) TimberPhysicsCatchUpLimiterPatcher.Patch(harmony);
+        if (OptimizationToggles.Enabled("PhysicsCollider")) TimberPhysicsTerrainColliderMergerPatcher.Patch(harmony);
         DiscoverLoadedOptimizableTypes();
-        RefreshDirectThrottlePatches();
+        if (OptimizationToggles.Enabled("Intervals")) RefreshDirectThrottlePatches();
     }
 
     public static void RefreshDirectThrottlePatches()
