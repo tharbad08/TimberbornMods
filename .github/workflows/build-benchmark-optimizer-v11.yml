@@ -29,8 +29,8 @@ jobs:
           ROOT="${RUNNER_TEMP}/timberborn-artifact/TBOptimizer"
           mkdir -p "$ROOT/version-1.1/Scripts"
           cp BenchmarkAndOptimizerV11Port/manifest.json "$ROOT/version-1.1/manifest.json"
-          cp BenchmarkAndOptimizerV11Port/bin/Release/netstandard2.1/BenchmarkAndOptimizerV11.dll "$ROOT/version-1.1/Scripts/"
-          test -s "$ROOT/version-1.1/Scripts/BenchmarkAndOptimizerV11.dll"
+          cp BenchmarkAndOptimizerV11Port/bin/Release/netstandard2.1/TBOptimizer.dll "$ROOT/version-1.1/Scripts/"
+          test -s "$ROOT/version-1.1/Scripts/TBOptimizer.dll"
       - name: Upload single ready-to-install ZIP
         uses: actions/upload-artifact@v4
         with:
