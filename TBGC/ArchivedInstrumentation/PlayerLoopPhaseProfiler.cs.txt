@@ -1,0 +1,299 @@
+ARCHIVE ONLY / HISTORICAL INSTRUMENTATION NOT COMPILED
+Cropped class from optimizer v1.1.100; not self-contained, do not deploy without review.
+
+internal static class PlayerLoopPhaseProfiler
+{
+    private static readonly string[] PhaseNames =
+    {
+        "UnityEngine.PlayerLoop.EarlyUpdate",
+        "UnityEngine.PlayerLoop.FixedUpdate",
+        "UnityEngine.PlayerLoop.PreUpdate",
+        "UnityEngine.PlayerLoop.Update",
+        "UnityEngine.PlayerLoop.PreLateUpdate",
+        "UnityEngine.PlayerLoop.PostLateUpdate",
+    };
+
+    private static Type? _systemType;
+    private static FieldInfo? _typeField;
+    private static FieldInfo? _subSystemsField;
+    private static FieldInfo? _updateDelegateField;
+    private static bool _installed;
+    private static int _preLateChildCount;
+
+    private sealed class NamedPlayerLoopMarker
+    {
+        private readonly string _name;
+
+        public NamedPlayerLoopMarker(string name)
+        {
+            _name = name;
+        }
+
+        public void Invoke() => Mark(_name);
+    }
+
+    private sealed class EarlyUpdateStartMarker { }
+    private sealed class EarlyUpdateEndMarker { }
+    private sealed class FixedUpdateStartMarker { }
+    private sealed class FixedUpdateEndMarker { }
+    private sealed class PreUpdateStartMarker { }
+    private sealed class PreUpdateEndMarker { }
+    private sealed class UpdateStartMarker { }
+    private sealed class UpdateEndMarker { }
+    private sealed class PreLateUpdateStartMarker { }
+    private sealed class PreLateUpdateEndMarker { }
+    private sealed class PostLateUpdateStartMarker { }
+    private sealed class PostLateUpdateEndMarker { }
+
+    public static void Install()
+    {
+        if (_installed)
+        {
+            return;
+        }
+
+        try
+        {
+            var playerLoopType = AccessTools.TypeByName("UnityEngine.LowLevel.PlayerLoop");
+            _systemType = AccessTools.TypeByName("UnityEngine.LowLevel.PlayerLoopSystem");
+            if (playerLoopType is null || _systemType is null)
+            {
+                Runtime.Log(
+                    "warning: PlayerLoop phase profiler unavailable: UnityEngine.LowLevel.PlayerLoop types not found");
+                return;
+            }
+
+            const BindingFlags flags =
+                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+
+            _typeField = _systemType.GetField("type", flags);
+            _subSystemsField = _systemType.GetField("subSystemList", flags);
+            _updateDelegateField = _systemType.GetField("updateDelegate", flags);
+
+            var getCurrent = AccessTools.Method(playerLoopType, "GetCurrentPlayerLoop");
+            var setCurrent = playerLoopType
+                .GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic)
+                .FirstOrDefault(method =>
+                    method.Name == "SetPlayerLoop" &&
+                    method.GetParameters().Length == 1 &&
+                    method.GetParameters()[0].ParameterType == _systemType);
+
+            if (_typeField is null ||
+                _subSystemsField is null ||
+                _updateDelegateField is null ||
+                getCurrent is null ||
+                setCurrent is null)
+            {
+                Runtime.Log(
+                    "warning: PlayerLoop phase profiler unavailable: required fields/methods not found");
+                return;
+            }
+
+            var root = getCurrent.Invoke(null, null);
+            if (root is null)
+            {
+                Runtime.Log(
+                    "warning: PlayerLoop phase profiler unavailable: GetCurrentPlayerLoop returned null");
+                return;
+            }
+
+            var installedPhases = 0;
+            _preLateChildCount = 0;
+            root = Rewrite(root, ref installedPhases);
+            if (installedPhases == 0)
+            {
+                Runtime.Log(
+                    "warning: PlayerLoop phase profiler found no requested phases; leaving loop unchanged");
+                return;
+            }
+
+            setCurrent.Invoke(null, new[] { root });
+            _installed = true;
+
+            Runtime.Log(
+                $"PlayerLoop phase profiler installed: {installedPhases}/{PhaseNames.Length} " +
+                $"major phases marked; PreLateUpdate children={_preLateChildCount} individually timed");
+        }
+        catch (Exception ex)
+        {
+            Runtime.Log(
+                $"warning: PlayerLoop phase profiler installation failed: " +
+                $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static object Rewrite(object system, ref int installedPhases)
+    {
+        var subs = _subSystemsField!.GetValue(system) as Array;
+        if (subs is null)
+        {
+            return system;
+        }
+
+        for (var i = 0; i < subs.Length; i++)
+        {
+            var child = subs.GetValue(i);
+            if (child is null)
+            {
+                continue;
+            }
+
+            var childType = _typeField!.GetValue(child) as Type;
+            var fullName = childType?.FullName;
+
+            if (fullName is not null && PhaseNames.Contains(fullName))
+            {
+                child = AddMarkers(child, fullName);
+                installedPhases++;
+            }
+            else
+            {
+                child = Rewrite(child, ref installedPhases);
+            }
+
+            subs.SetValue(child, i);
+        }
+
+        _subSystemsField.SetValue(system, subs);
+        return system;
+    }
+
+    private static object AddMarkers(object phase, string phaseName)
+    {
+        var original = _subSystemsField!.GetValue(phase) as Array;
+        var content = original;
+
+        if (phaseName == "UnityEngine.PlayerLoop.PreLateUpdate" && original is not null)
+        {
+            content = AddPreLateChildMarkers(original);
+        }
+
+        var contentLength = content?.Length ?? 0;
+        var replacement = Array.CreateInstance(_systemType!, contentLength + 2);
+
+        var start = CreateMarker(phaseName, isStart: true);
+        var end = CreateMarker(phaseName, isStart: false);
+
+        replacement.SetValue(start, 0);
+        if (content is not null)
+        {
+            for (var i = 0; i < contentLength; i++)
+            {
+                replacement.SetValue(content.GetValue(i), i + 1);
+            }
+        }
+        replacement.SetValue(end, contentLength + 1);
+
+        _subSystemsField.SetValue(phase, replacement);
+        return phase;
+    }
+
+    private static Array AddPreLateChildMarkers(Array original)
+    {
+        var replacement = Array.CreateInstance(_systemType!, original.Length * 3);
+        var output = 0;
+
+        for (var i = 0; i < original.Length; i++)
+        {
+            var child = original.GetValue(i);
+            if (child is null)
+            {
+                continue;
+            }
+
+            var childType = _typeField!.GetValue(child) as Type;
+            var childName = childType?.FullName ?? $"Child{i}";
+            var key = $"PreLateChild[{i}].{childName}";
+
+            replacement.SetValue(CreateNamedMarker(key + ".Start"), output++);
+            replacement.SetValue(child, output++);
+            replacement.SetValue(CreateNamedMarker(key + ".End"), output++);
+            _preLateChildCount++;
+        }
+
+        if (output == replacement.Length)
+        {
+            return replacement;
+        }
+
+        var trimmed = Array.CreateInstance(_systemType!, output);
+        for (var i = 0; i < output; i++)
+        {
+            trimmed.SetValue(replacement.GetValue(i), i);
+        }
+        return trimmed;
+    }
+
+    private static object CreateNamedMarker(string name)
+    {
+        var marker = Activator.CreateInstance(_systemType!)!;
+        var target = new NamedPlayerLoopMarker(name);
+        var invoke = AccessTools.Method(typeof(NamedPlayerLoopMarker), nameof(NamedPlayerLoopMarker.Invoke))!;
+        var callback = Delegate.CreateDelegate(_updateDelegateField!.FieldType, target, invoke);
+
+        _typeField!.SetValue(marker, typeof(NamedPlayerLoopMarker));
+        _updateDelegateField.SetValue(marker, callback);
+        return marker;
+    }
+
+    private static object CreateMarker(string phaseName, bool isStart)
+    {
+        var marker = Activator.CreateInstance(_systemType!)!;
+        var methodName = MarkerMethodName(phaseName, isStart);
+        var method = AccessTools.Method(typeof(PlayerLoopPhaseProfiler), methodName)!;
+        var callback = Delegate.CreateDelegate(_updateDelegateField!.FieldType, method);
+
+        _typeField!.SetValue(marker, MarkerType(phaseName, isStart));
+        _updateDelegateField.SetValue(marker, callback);
+        return marker;
+    }
+
+    private static string MarkerMethodName(string phaseName, bool isStart)
+    {
+        var shortName = phaseName[(phaseName.LastIndexOf('.') + 1)..];
+        return shortName + (isStart ? "Start" : "End");
+    }
+
+    private static Type MarkerType(string phaseName, bool isStart)
+    {
+        var shortName = phaseName[(phaseName.LastIndexOf('.') + 1)..];
+        return (shortName, isStart) switch
+        {
+            ("EarlyUpdate", true) => typeof(EarlyUpdateStartMarker),
+            ("EarlyUpdate", false) => typeof(EarlyUpdateEndMarker),
+            ("FixedUpdate", true) => typeof(FixedUpdateStartMarker),
+            ("FixedUpdate", false) => typeof(FixedUpdateEndMarker),
+            ("PreUpdate", true) => typeof(PreUpdateStartMarker),
+            ("PreUpdate", false) => typeof(PreUpdateEndMarker),
+            ("Update", true) => typeof(UpdateStartMarker),
+            ("Update", false) => typeof(UpdateEndMarker),
+            ("PreLateUpdate", true) => typeof(PreLateUpdateStartMarker),
+            ("PreLateUpdate", false) => typeof(PreLateUpdateEndMarker),
+            ("PostLateUpdate", true) => typeof(PostLateUpdateStartMarker),
+            _ => typeof(PostLateUpdateEndMarker),
+        };
+    }
+
+    private static void Mark(string name)
+    {
+        FreezeDetector.RecordPlayerLoopMarker(
+            name,
+            System.Diagnostics.Stopwatch.GetTimestamp());
+        ManagedHeapSampler.MarkPlayerLoop(name);
+        AllocationTracker.MarkPlayerLoop(name);
+    }
+
+    private static void EarlyUpdateStart() => Mark("EarlyUpdate.Start");
+    private static void EarlyUpdateEnd() => Mark("EarlyUpdate.End");
+    private static void FixedUpdateStart() => Mark("FixedUpdate.Start");
+    private static void FixedUpdateEnd() => Mark("FixedUpdate.End");
+    private static void PreUpdateStart() => Mark("PreUpdate.Start");
+    private static void PreUpdateEnd() => Mark("PreUpdate.End");
+    private static void UpdateStart() => Mark("Update.Start");
+    private static void UpdateEnd() => Mark("Update.End");
+    private static void PreLateUpdateStart() => Mark("PreLateUpdate.Start");
+    private static void PreLateUpdateEnd() => Mark("PreLateUpdate.End");
+    private static void PostLateUpdateStart() => Mark("PostLateUpdate.Start");
+    private static void PostLateUpdateEnd() => Mark("PostLateUpdate.End");
+}
+
