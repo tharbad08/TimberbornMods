@@ -80,7 +80,7 @@ public sealed class TBOptimizerPanel : VisualElement
 }
 
 public sealed class OptimizerUiSetting()
-    : NonPersistentSetting(ModSettingDescriptor.Create("Live optimizer"))
+    : NonPersistentSetting(ModSettingDescriptor.Create("Advanced tick intervals"))
 {
     public override void Reset() => Runtime.ResetIntervals();
 }
@@ -215,12 +215,12 @@ public sealed class OptimizerPanel : VisualElement
         // Unlike TechTree, this list would otherwise shrink to the viewport, so
         // give its content a wider minimum width to create real horizontal overflow.
         var scroll = this.AddScrollView().Initialize(veInit);
-        scroll.mode = ScrollViewMode.VerticalAndHorizontal;
-        scroll.horizontalScrollerVisibility = scroll.verticalScrollerVisibility = ScrollerVisibility.Auto;
+        scroll.mode = ScrollViewMode.Vertical;
+        scroll.horizontalScrollerVisibility = ScrollerVisibility.Hidden;
+        scroll.verticalScrollerVisibility = ScrollerVisibility.Auto;
         scroll.SetMaxHeight(650);
 
-        var scrollContent = scroll.AddChild()
-            .SetMinSize(1200f, null);
+        var scrollContent = scroll.AddChild().SetWidthPercent(100);
 
         _wellKnown = scrollContent.AddChild();
         _others = scrollContent.AddChild();
@@ -276,6 +276,15 @@ public sealed class OptimizerPanel : VisualElement
         }
     }
 
+    private static string WrapLabel(string text, int maxSegmentLength)
+    {
+        if (string.IsNullOrEmpty(text) || text.Length <= maxSegmentLength) return text;
+        var chunks = new System.Collections.Generic.List<string>();
+        for (var i = 0; i < text.Length; i += maxSegmentLength)
+            chunks.Add(text.Substring(i, Math.Min(maxSegmentLength, text.Length - i)));
+        return string.Join("\n", chunks);
+    }
+
     private static VisualElement AddSystemRow(VisualElement parent, string typeName, string origin)
     {
         var current = Runtime.GetInterval(typeName);
@@ -286,13 +295,13 @@ public sealed class OptimizerPanel : VisualElement
         var item = parent.AddChild()
             .SetMarginBottom(10);
 
-        item.AddGameLabel($"{typeName}    [{origin}]")
+        item.AddGameLabel($"{WrapLabel(typeName, 46)}    [{WrapLabel(origin, 25)}]")
             .SetMarginBottom(3);
 
         var ownershipNote = Runtime.GetThrottleOwnershipNote(typeName);
         if (!string.IsNullOrWhiteSpace(ownershipNote))
         {
-            item.AddGameLabel(ownershipNote)
+            item.AddGameLabel(WrapLabel(ownershipNote, 68))
                 .SetMarginBottom(3);
         }
 
