@@ -10496,7 +10496,7 @@ internal static class Runtime
         "FramesPerSecondCounter",
     };
 
-    public static bool Enabled => _settings.Enabled;
+    public static bool Enabled => true;
     public static int DefaultInterval => _settings.DefaultInterval;
     public static bool IsProtected(string typeName) =>
         ProtectedTypeNames.Contains(ShortTypeName(typeName));
@@ -10644,8 +10644,19 @@ internal static class Runtime
 
     public static void StartBenchmark()
     {
-        // Retired: profiling was completed. Do not enable benchmark
-        // dispatcher patching or generate CSV output.
+        if (BenchmarkActive) return;
+        lock (Sync) BenchStats.Clear();
+        // Benchmark dispatcher is observational at protected vanilla cadence:
+        // the per-class interval shortcut is suppressed during benchmarks.
+        RemoveDirectThrottlePatches();
+        if (_harmony is not null)
+        {
+            DispatcherPatcher.Patch(_harmony);
+            TimberPhysicsBenchmarkPatcher.Patch(_harmony);
+        }
+        _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        _benchmarkCompleted = false;
+        _benchmarkRunning = true;
     }
 
     private static string ShortTypeName(string value)
@@ -10731,7 +10742,7 @@ internal static class Runtime
         _harmony = harmony;
         ModPath = modPath;
         Directory.CreateDirectory(ModPath);
-        // Quiet release: never create or clear per-session diagnostic files.
+        // CSV is written only for an explicitly started benchmark.
 
         if (!File.Exists(ConfigPath))
         {
@@ -10750,17 +10761,18 @@ internal static class Runtime
         // Patch both proven type-discovery crash sites before any scene loads:
         // Bindito FindConfigurators and Timberborn SpecTypeCache.Create.
         // Preserve ordinary assembly.GetTypes behavior for real mod DLLs.
+        // Standalone benchmark: no gameplay optimizations or physics limits.
+        // Keep the narrow startup guard for DMD type enumeration only.
         BinditoConfiguratorDynamicAssemblyGuard.Patch(harmony);
-        IncrementalGcSmoother.Initialize();
-        FreezeDetectorPatcher.Patch();
-        TimberPhysicsCatchUpLimiterPatcher.Patch(harmony);
-        TimberPhysicsTerrainColliderMergerPatcher.Patch(harmony);
         DiscoverLoadedOptimizableTypes();
-        RefreshDirectThrottlePatches();
+        // Tick intervals are read as safety metadata, never automatically applied.
     }
 
     public static void RefreshDirectThrottlePatches()
     {
+        // No direct system throttling in the profiler-only mod.
+        return;
+        /*
         if (_harmony is null || BenchmarkActive)
         {
             return;
@@ -10838,6 +10850,7 @@ internal static class Runtime
                     $"warning: direct throttle patch failed for {type.FullName}.{method.Name}: {ex.GetType().Name}: {ex.Message}");
             }
         }
+        */
     }
 
     private static void RemoveDirectThrottlePatches()
@@ -11692,19 +11705,16 @@ internal static class Runtime
             }
         }
 
-        // Diagnostic CSV writing retired in this quiet release.
+        File.WriteAllLines(file, lines);
 
         if (_harmony is not null)
         {
             TimberPhysicsBenchmarkPatcher.Unpatch(_harmony);
             DispatcherPatcher.Unpatch(_harmony);
 
-            // The benchmark cleanup removes all patches under our Harmony ID from
-            // PhysicsSimulator, so restore the persistent catch-up limiter.
-            TimberPhysicsCatchUpLimiterPatcher.Reapply(_harmony);
+            // No physics catch-up limiter is installed by this profiler.
         }
 
-        RefreshDirectThrottlePatches();
         Log($"benchmark complete: {file}");
     }
 
