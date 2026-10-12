@@ -2,7 +2,7 @@ name: Build BenchmarkAndOptimizerV11Port
 on:
   push:
     branches:
-      - chatgpt/BenchmarkAndOptimizerV11Port
+      - BenchmarkAndOptimizerV11Port-Only
     paths:
       - 'BenchmarkAndOptimizerV11Port/**'
       - '.github/workflows/build-benchmark-v11port.yml'
@@ -30,6 +30,6 @@ jobs:
           test -s "$ROOT/version-1.1/Scripts/BenchmarkAndOptimizerV11.dll"
       - uses: actions/upload-artifact@v4
         with:
-          name: BenchmarkAndOptimizerV11Port_1.1.102
+          name: BenchmarkAndOptimizerV11Port_1.1.103
           path: ${{ runner.temp }}/timberborn-artifact/
           if-no-files-found: error
