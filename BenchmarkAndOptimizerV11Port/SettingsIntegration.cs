@@ -71,7 +71,11 @@ public sealed class TBOptimizerPanel : VisualElement
         {
             var group = this.AddChild().SetMarginBottom(11);
             var key = item.Key;
-            var toggle = group.AddToggle(item.Label,
+            // Explicit label-then-checkbox order, with explanation below.
+            // Titles are <=40 characters; no horizontal scroll container.
+            var header = group.AddRow().AlignItems(Align.Center);
+            header.AddGameLabel(item.Label).SetMarginRight(8f);
+            var toggle = header.AddToggle("",
                 onValueChanged: value => OptimizationToggles.Set(key, value));
             toggle.SetValueWithoutNotify(OptimizationToggles.Enabled(key));
             group.AddGameLabel(item.Description).SetMarginBottom(2);
