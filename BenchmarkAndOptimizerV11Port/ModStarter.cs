@@ -10847,7 +10847,6 @@ internal static class Runtime
                     $"warning: direct throttle patch failed for {type.FullName}.{method.Name}: {ex.GetType().Name}: {ex.Message}");
             }
         }
-        */
     }
 
     private static void RemoveDirectThrottlePatches()
