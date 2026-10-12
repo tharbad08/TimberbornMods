@@ -26,6 +26,37 @@
 | **Bober's Laws of Motion / TimberPhysics** (\`PhysicsCatchup\`) | [\`TimberPhysicsCatchUpLimiterPatcher.cs\`](Optimizations/Mods/TimberPhysics/TimberPhysicsCatchUpLimiterPatcher.cs) | Limits physics catch-up to **four 0.02s substeps** with roughly **50 ms wall-clock work budget** for expensive physics steps. **Excess backlog is dropped** under overload: this intentionally trades simulation catch-up for responsiveness, not exact numerical equivalence. |
 | **Bober's Laws of Motion / TimberPhysics** (\`PhysicsCollider\`) | [\`TimberPhysicsTerrainColliderMergerPatcher.cs\`](Optimizations/Mods/TimberPhysics/TimberPhysicsTerrainColliderMergerPatcher.cs) | Merges only conservative **equal floor/ceiling** terrain collider columns in **32×32 chunks**; tracks dirty chunks, batches rebuilds before simulation, and attempts transactional restoration of complete vanilla colliders on failure. Never leave partially merged + vanilla collider sets. |
 
+
+## Simple Workshop Control (SWC) — documented port, **not in this branch's release**
+
+**Provenance:** user-provided `SimpleWorkshopControl_1.1.36.2_HarvestSafety` archive. Its README explicitly says that the SWC performance DLL is **identical to the earlier 1.1.36.1 performance DLL**, while 1.1.36.2 adds a **separate** `SWC.HarvestSafety.dll`. Thus the performance patch and safety patch are distinct deliverables in the reference package, even though they should be installed together for this port.
+
+**Tracking:** [SWC compatibility draft PR #4](https://github.com/tharbad08/TimberbornMods/pull/4) on [`chatgpt/tb-optimizer-swc-compat`](https://github.com/tharbad08/TimberbornMods/tree/chatgpt/tb-optimizer-swc-compat). The **`TB-Optimizer` release does not currently install either SWC patch**. Do not treat this inventory entry as active functionality. On the draft branch the single `SWC` toggle starts safety first, then a limited scan scheduler; the deeper scanner prototype is presently **unwired**, not active.
+
+### Original reference patch: performance and behavior map
+
+| Part | Reference implementation | Behavior that a complete runtime port must preserve |
+| --- | --- | --- |
+| Harvest scan scheduling | `PatchSource/Source/PlantMonitor.cs`: `PerfScanDue`, `Tick`; `MSettings.HarvestScanInterval` | Scan every configurable **1–60 ticks** (initial testing uses 4), distribute the initial phase across buildings, and immediately populate after loading, reactivation, or interval changes. Advance the original `ticks` cooldown counter, `hasFired`, and callback logic on **every active tick**, including skipped scan ticks. |
+| Harvest allocation reduction | `PlantMonitor.PerfRefreshGoods` | Reuse `_perfPreviousGoods` (`HashSet<string>`); clear/update the existing `goods` set instead of building new LINQ sets; traverse `_yieldersInRange` by index; retain **both standing/growing trees and felled-tree inventory stock**, including multiple goods; trigger controller update only when the goods set actually changes. |
+| Planting scan scheduling | `PatchSource/Source/PlantingControler.cs`: `PerfScanDue`, `Tick`; `MSettings.PlantingScanInterval` | Apply the same configurable interval and staggered first scan, but remember the **last computed** empty-spot result between scans. Always advance/reset `cooldownProgress`, update `spotAvailable` and perform transition callbacks every active tick. Reset scan state on setting changes/reactivation. |
+| Planting fast traversal | `PlantingControler.PerfFindEmptySpot` | Cache the optional `Forester` reference, fetch `InRangePlantingCoordinates._plantingService` once, iterate coordinates directly, retain `PlantingSoilValidator.Validate`, `AnyNonOverridableObjectsAt`, and dead-tree replant checks (including `ReplantDeadTrees`, cutting-area membership, and `LivingNaturalResource.IsDead`). |
+| Harvest/workplace safety | `HarvestSafetySource/HarvestSafety.cs`, companion `SWC.HarvestSafety.dll` | Defer and deduplicate `SimpleWorkshopControler.UpdateBlockedState` **only while inside `BehaviorManager.Tick`**; replay after the outermost successful tick. Clear the queue on exceptions and preserve exception propagation. Check worker/workplace at entry to `HarvestStarter.FindYielder` **and after `GetYielders`**; if invalid, clear temporary search results and return a normal empty result before making reservations. Do **not** manually restore workers, workplaces, behavior stacks or reservations. |
+| Persistence | Both reference source files | Keep existing SWC save fields, cooldown persistence, and normal duplication behavior; scheduling caches and buffers are runtime-only. |
+
+### Runtime port ownership and status
+
+| Draft source file | Ownership / current status |
+| --- | --- |
+| [`SWCHarvestSafety.cs`](https://github.com/tharbad08/TimberbornMods/blob/chatgpt/tb-optimizer-swc-compat/BenchmarkAndOptimizerV11Port/Optimizations/Mods/SWC/SWCHarvestSafety.cs) | Safety companion reimplemented as optional Harmony hooks. **Compiled on the draft branch; not proven in-game.** |
+| [`SWCScanOptimizer.cs`](https://github.com/tharbad08/TimberbornMods/blob/chatgpt/tb-optimizer-swc-compat/BenchmarkAndOptimizerV11Port/Optimizations/Mods/SWC/SWCScanOptimizer.cs) | Optional native-Tick staggering and cooldown bookkeeping, **currently fixed to 4 ticks**; conditional on the safety installation. Not yet equivalent to the original configurable 1–60 interval and all inner-scan shortcuts. |
+| [`SWCFastScanner.cs`](https://github.com/tharbad08/TimberbornMods/blob/chatgpt/tb-optimizer-swc-compat/BenchmarkAndOptimizerV11Port/Optimizations/Mods/SWC/SWCFastScanner.cs) | Experimental reusable-buffer and planting inner-loop implementation. **Source/compilation only; not called by `ModStarter` or `SWCScanOptimizer`**, so do not claim active performance or runtime parity. |
+| [`SWC-COMPATIBILITY.md`](https://github.com/tharbad08/TimberbornMods/blob/chatgpt/tb-optimizer-swc-compat/BenchmarkAndOptimizerV11Port/SWC-COMPATIBILITY.md) | Draft compatibility, prerequisites, validation, and manual test checklist. |
+
+**Version policy:** keep the normal/updatable SWC Workshop DLL, and bind dynamically to its installed types/methods rather than distributing a patched SWC DLL. If SWC internals or Timberborn IL change, decline affected patches rather than guessing. Do not stack the old patched performance DLL and its safety companion with the independent optimizer's hooks. Missing SWC is not a required-mod failure.
+
+**Validation:** the reference archive reports **1,019 Mono safety-harness assertions** and static inspection of its game-specific `FindYielder` IL; it explicitly reports **no in-game test**. The separate draft TB Optimizer source has passed CI compilation, but **neither a live game regression test nor measured FPS/game-speed improvement has been established for the port**. Test in-range harvest, felled-tree goods, farms, foresters, dead-tree replanting, soil contamination recovery, workplace pause/resume, save/load, and SWC upgrades at x1 and x3. Record **both FPS and effective game speed**. Do not conflate the original binary's harness results with verification of the new runtime port.
+
 **PR ownership:** copy each mod-specific patch, its entry point and safety constraints to the **corresponding mod repository**. Do not copy the TB Optimizer's unrelated gameplay patches into another mod. The EBR optimizer needs both EBR source files.
 
 ## Base game / common services — active feature registrations
