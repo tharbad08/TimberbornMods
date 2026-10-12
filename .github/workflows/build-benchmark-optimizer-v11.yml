@@ -3,7 +3,7 @@ name: Build TB Optimizer
 on:
   push:
     branches:
-      - chatgpt/benchmark-optimizer-v11
+      - TB-Optimizer
     paths:
       - 'BenchmarkAndOptimizerV11Port/**'
       - '.github/workflows/build-benchmark-optimizer-v11.yml'
