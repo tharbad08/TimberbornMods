@@ -13,6 +13,13 @@ public class SuperCursorTool(EntitySelectionService entitySelectionService, Inpu
     readonly SelectableObjectRaycaster selectableObjectRaycaster = selectableObjectRaycaster;
     readonly InputService inputService = inputService;
 
+    // Only the expensive tooltip contents are rate-limited. Cursor movement,
+    // visibility and input processing continue at the game's normal cadence.
+    const double NormalInfoRefreshMs = 50.0;
+    const double ModerateInfoRefreshMs = 100.0;
+    const double SlowInfoRefreshMs = 250.0;
+    long nextInfoRefreshTimestamp;
+
     static readonly Vector2 MouseMargin = new(10, 10);
 
     public void Load()
@@ -21,6 +28,20 @@ public class SuperCursorTool(EntitySelectionService entitySelectionService, Inpu
     }
 
     void ProcessInfo()
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (now >= nextInfoRefreshTimestamp)
+        {
+            RefreshInfo(now);
+        }
+
+        // The label must follow the mouse every frame, even when its text is
+        // deliberately reused. Do not throttle tool input or hover placement.
+        MoveLabel();
+        label.Visible = true;
+    }
+
+    void RefreshInfo(long startedAt)
     {
         StringBuilder info = new();
 
@@ -34,8 +55,18 @@ public class SuperCursorTool(EntitySelectionService entitySelectionService, Inpu
 
         label.Text = info.ToString();
 
-        MoveLabel();
-        label.Visible = true;
+        var finishedAt = System.Diagnostics.Stopwatch.GetTimestamp();
+        var elapsedMs = (finishedAt - startedAt) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+        var refreshMs = elapsedMs >= 100.0
+            ? SlowInfoRefreshMs
+            : elapsedMs >= 30.0
+                ? ModerateInfoRefreshMs
+                : NormalInfoRefreshMs;
+
+        // Measure from completion, avoiding continuous refreshes when an
+        // unusually expensive sample exceeds the nominal refresh interval.
+        nextInfoRefreshTimestamp = finishedAt +
+            (long)(refreshMs / 1000.0 * System.Diagnostics.Stopwatch.Frequency);
     }
 
     void MoveLabel()
@@ -84,6 +115,7 @@ public class SuperCursorTool(EntitySelectionService entitySelectionService, Inpu
         if (e.Tool == this)
         {
             label.Visible = false;
+            nextInfoRefreshTimestamp = 0;
         }
     }
 
@@ -98,6 +130,9 @@ public class SuperCursorTool(EntitySelectionService entitySelectionService, Inpu
         else
         {
             label.Visible = false;
+            // Show fresh information immediately when Shift is held again or
+            // the pointer returns from UI, not a possibly stale cached value.
+            nextInfoRefreshTimestamp = 0;
         }
 
         return result;
