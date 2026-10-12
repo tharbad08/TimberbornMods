@@ -4,7 +4,7 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>BenchmarkAndOptimizerV11</AssemblyName>
+    <AssemblyName>TBEBROptimizations</AssemblyName>
     <RootNamespace>BenchmarkAndOptimizerV11</RootNamespace>
     <AssemblyVersion>1.1.101.0</AssemblyVersion>
     <FileVersion>1.1.101.0</FileVersion>
