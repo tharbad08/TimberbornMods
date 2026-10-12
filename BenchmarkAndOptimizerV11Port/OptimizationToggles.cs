@@ -15,6 +15,7 @@ internal static class OptimizationToggles
     internal static readonly Entry[] Options =
     {
         new("BFR", "BFR local navigation batching", "Groups sparse terrain changes in 8x8 areas.\nAvoids unnecessary large-area scans."),
+        new("EBR", "EBR spatial navigation updates", "Filters unaffected builders by terrain bounds.\nDefers large notification batches safely."),
         new("PreviewNav", "Preview navigation batching", "Coalesces preview add/remove notifications.\nPreserves validation and navigation results."),
         new("PreviewPool", "Unused preview pool fast path", "Avoids creating previews for a brush\nthat was never displayed."),
         new("PreviewSweep", "Efficient preview hide sweep", "Removes repeated LINQ/HashSet allocations\nwhile keeping preview validation intact."),
