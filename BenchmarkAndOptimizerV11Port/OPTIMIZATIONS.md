@@ -25,9 +25,7 @@ All active gameplay optimizers live in individual files. Every patch is optional
 | Blueprint component caching | BlueprintCache | `Optimizations/BaseGame/Previews/BlueprintSpecInstantiationCache.cs` | Cache immutable blueprint component specifications |
 | Safe bulk construction | BulkBuild | `Optimizations/BaseGame/Previews/BulkComponentInstantiationV11.cs` | Accelerate repeated validated four-argument bulk instantiation, retaining game-native live components and other mods' hooks |
 | Soil contamination reset | SoilReset | `Optimizations/BaseGame/Soil/SoilContaminationResetOptimizer.cs` | Faster contamination clearing/reset; normal moisture and contamination updates are not throttled |
-| Dynamic assembly startup guard | DynamicAssembly | `Optimizations/BaseGame/Startup/BinditoConfiguratorDynamicAssemblyGuard.cs` | Skip incomplete Harmony-generated dynamic assemblies in verified type-discovery startup paths |
 | Incremental GC compatibility | GcSmoother | `Optimizations/BaseGame/GC/IncrementalGcSmoother.cs` | Conditional only; does nothing when Unity reports incremental GC unavailable |
-| Advanced interval controls | Intervals | `ModStarter.cs` and `SettingsIntegration.cs` | Optional intervals for eligible methods; default vanilla 1; physics, navigation, water, work, planting/soil-authority and speed controllers protected |
 
 ## Deliberately excluded from gameplay optimizations
 
@@ -41,6 +39,7 @@ All active gameplay optimizers live in individual files. Every patch is optional
 - No heavy input, PlayerLoop, soil inner-loop or fauna timing probes in the release patch registration.
 - No speculative preview/placement shortcut that bypasses validation or AutoScaffold/EzTube hooks.
 - No terrain-recovery global tick debt intervention; its class remains dormant.
-- No benchmark/CSV profiler in the TB Optimizer release; the separate branch `chatgpt/BenchmarkAndOptimizerV11Port` retains the benchmarking research.
+- No intervals, benchmark/CSV, freeze profiler or tick-throttling engine in TB Optimizer. These are owned by `chatgpt/BenchmarkAndOptimizerV11Port`.
+- No startup dynamic-assembly discovery guard in TB Optimizer; its source and startup research are preserved on `chatgpt/TBSave` (this is a startup crash fix, not save serialization).
 
 **Validation:** CI compilation is required after each modification; GitHub Actions artifacts are build outputs, not proof of in-game behavior. The code reorganizations intentionally preserve individual patch implementation bodies.

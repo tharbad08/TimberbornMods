@@ -28,9 +28,7 @@ internal static class OptimizationToggles
         new("SuperCursor", "SuperCursor update smoothing", "Reduces frequent informational refreshes.\nDoes not delay player tool actions."),
         new("PhysicsCatchup", "TimberPhysics catch-up limiter", "Limits expensive accumulated physics substeps.\nMay drop excess catch-up under overload."),
         new("PhysicsCollider", "TimberPhysics collider merging", "Combines terrain colliders in 32x32 chunks.\nUpdates changed chunks in batches."),
-        new("DynamicAssembly", "Dynamic assembly crash guard", "Skips unfinished Harmony-generated types\nin two verified startup discovery paths."),
         new("GcSmoother", "Incremental GC smoothing", "Applies only when Unity supports incremental GC.\nOtherwise retains vanilla GC."),
-        new("Intervals", "Configurable update intervals", "Allows safe per-system update throttling.\nCritical simulation systems stay protected.")
     };
     private static readonly Dictionary<string, bool> Values = new(StringComparer.Ordinal);
     private static string _path = "";
