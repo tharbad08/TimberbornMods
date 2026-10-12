@@ -1,0 +1,129 @@
+ARCHIVE ONLY / HISTORICAL INSTRUMENTATION NOT COMPILED
+Cropped class from optimizer v1.1.100; not self-contained, do not deploy without review.
+
+internal static class AllocationTracker
+{
+    private const int TopCount = 12;
+    private const long SpikeBytes = 1024L * 1024L;
+    private const long FallbackSpikeBytes = 32L * 1024L * 1024L;
+    private static readonly long ReportIntervalTicks =
+        10L * System.Diagnostics.Stopwatch.Frequency;
+
+    private static readonly Dictionary<string, long> SingletonAllocations = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> LoopAllocations = new(StringComparer.Ordinal);
+    private static long _lastReportTicks;
+    private static string? _lastLoopMarker;
+    private static long _lastLoopAllocated;
+
+    public static void Record(string phase, string typeName, long bytes)
+    {
+        if (Runtime.IsBenchmarking || bytes <= 0)
+        {
+            return;
+        }
+
+        var key = $"{phase}.{ShortName(typeName)}";
+        SingletonAllocations.TryGetValue(key, out var existing);
+        SingletonAllocations[key] = existing + bytes;
+
+        if ((AllocationCounter.IsCumulative && bytes >= SpikeBytes) ||
+            (!AllocationCounter.IsCumulative && bytes >= FallbackSpikeBytes))
+        {
+            Runtime.Log($"{AllocationCounter.MetricLabel} spike: {key}={FormatBytes(bytes)} in one call");
+        }
+    }
+
+    public static void MarkPlayerLoop(string marker)
+    {
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        var allocated = AllocationCounter.Read();
+        if (_lastLoopMarker is not null)
+        {
+            var delta = allocated - _lastLoopAllocated;
+            if (delta > 0)
+            {
+                var key = $"{_lastLoopMarker}->{marker}";
+                LoopAllocations.TryGetValue(key, out var existing);
+                LoopAllocations[key] = existing + delta;
+            }
+        }
+
+        _lastLoopMarker = marker;
+        _lastLoopAllocated = allocated;
+    }
+
+    public static void FrameBoundary()
+    {
+        if (Runtime.IsBenchmarking)
+        {
+            return;
+        }
+
+        _lastLoopMarker = null;
+        _lastLoopAllocated = 0;
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_lastReportTicks == 0)
+        {
+            _lastReportTicks = now;
+            return;
+        }
+
+        if (now - _lastReportTicks < ReportIntervalTicks)
+        {
+            return;
+        }
+
+        _lastReportTicks = now;
+        Report();
+        SingletonAllocations.Clear();
+        LoopAllocations.Clear();
+    }
+
+    private static void Report()
+    {
+        var singletonTop = SingletonAllocations
+            .OrderByDescending(pair => pair.Value)
+            .Take(TopCount)
+            .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}")
+            .ToArray();
+
+        var loopTop = LoopAllocations
+            .OrderByDescending(pair => pair.Value)
+            .Take(TopCount)
+            .Select(pair => $"{pair.Key}={FormatBytes(pair.Value)}")
+            .ToArray();
+
+        Runtime.Log(
+            $"{AllocationCounter.MetricLabel} profiler: top singleton metrics: " +
+            (singletonTop.Length == 0 ? "none" : string.Join(", ", singletonTop)) +
+            "; top PlayerLoop metrics: " +
+            (loopTop.Length == 0 ? "none" : string.Join(", ", loopTop)));
+    }
+
+    private static string ShortName(string name)
+    {
+        var index = name.LastIndexOf('.');
+        return index >= 0 ? name[(index + 1)..] : name;
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024L)
+        {
+            return $"{bytes / 1024.0 / 1024.0:F1}MB";
+        }
+
+        if (bytes >= 1024L)
+        {
+            return $"{bytes / 1024.0:F1}KB";
+        }
+
+        return $"{bytes}B";
+    }
+}
+
