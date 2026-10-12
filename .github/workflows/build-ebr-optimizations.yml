@@ -1,0 +1,35 @@
+name: Build EBR Optimizations
+on:
+  push:
+    branches:
+      - chatgpt/EBR-Optimizations
+    paths:
+      - 'BenchmarkAndOptimizerV11Port/**'
+      - '.github/workflows/build-ebr-optimizations.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Build
+        run: dotnet build BenchmarkAndOptimizerV11Port/BenchmarkAndOptimizerV11Port.csproj -c Release
+      - name: Stage installable mod
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ROOT="${RUNNER_TEMP}/timberborn-artifact/TBEBROptimizations"
+          mkdir -p "$ROOT/version-1.1/Scripts"
+          cp BenchmarkAndOptimizerV11Port/manifest.json "$ROOT/version-1.1/manifest.json"
+          cp BenchmarkAndOptimizerV11Port/bin/Release/netstandard2.1/TBEBROptimizations.dll "$ROOT/version-1.1/Scripts/"
+          test -s "$ROOT/version-1.1/Scripts/TBEBROptimizations.dll"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TBEBROptimizations_1.1.101
+          path: ${{ runner.temp }}/timberborn-artifact/
+          if-no-files-found: error
