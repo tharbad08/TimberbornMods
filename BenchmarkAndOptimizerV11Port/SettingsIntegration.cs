@@ -44,16 +44,31 @@ public sealed class OptimizerSettingsOwner(
     ModRepository repository
 ) : ModSettingsOwner(settings, registry, repository)
 {
-    public override string ModId => "BenchmarkAndOptimizerV11";
+    public override string ModId => "BenchmarkAndOptimizerV11Port";
     public override ModSettingsContext ChangeableOn => ModSettingsContext.All;
 
-    public OptimizerUiSetting Optimizer { get; } = new();
+    public OptimizerUiSetting CsvBenchmark { get; } = new();
 }
 
 public sealed class OptimizerUiSetting()
-    : NonPersistentSetting(ModSettingDescriptor.Create("Live optimizer"))
+    : NonPersistentSetting(ModSettingDescriptor.Create("Benchmark & CSV profiler"))
 {
     public override void Reset() => Runtime.ResetIntervals();
+}
+
+public sealed class CsvBenchmarkPanel : VisualElement
+{
+    public CsvBenchmarkPanel()
+    {
+        this.SetPadding(8);
+        this.AddGameLabel("Timberborn benchmark / CSV", bold: true).SetMarginBottom(6);
+        this.AddGameLabel("Collect per-system timings for 120 seconds.\nSimulation-critical ticks run at vanilla cadence.")
+            .SetMarginBottom(10);
+        this.AddMenuButton("Start 120s CSV benchmark", onClick: Runtime.StartBenchmark)
+            .SetMarginBottom(6);
+        this.AddGameLabel("CSV output: the mod folder.\nBenchmark stops automatically after 120 seconds.")
+            .SetMarginBottom(6);
+    }
 }
 
 public sealed class OptimizerSettingElementFactory(
@@ -66,7 +81,7 @@ public sealed class OptimizerSettingElementFactory(
     {
         if (modSetting is OptimizerUiSetting)
         {
-            element = new ModSettingElement(new OptimizerPanel(veInit), modSetting);
+            element = new ModSettingElement(new CsvBenchmarkPanel(), modSetting);
             return true;
         }
 
