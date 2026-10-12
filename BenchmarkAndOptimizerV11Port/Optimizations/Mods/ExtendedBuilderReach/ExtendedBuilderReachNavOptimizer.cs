@@ -415,9 +415,9 @@ internal static class ExtendedBuilderReachNavOptimizer
             {
                 foreach (var listener in CandidateSet)
                 {
-                    if (_intersects!(listener, __0, _intersects))
+                    if (_intersects!(listener, __0))
                     {
-                        _notify!(listener, __0, _notify);
+                        _notify!(listener, __0);
                         notified++;
                     }
                 }
@@ -437,9 +437,9 @@ internal static class ExtendedBuilderReachNavOptimizer
                 for (var i = 0; i < EbrListeners.Count; i++)
                 {
                     var listener = EbrListeners[i];
-                    if (_intersects!(listener, __0, _intersects))
+                    if (_intersects!(listener, __0))
                     {
-                        _notify!(listener, __0, _notify);
+                        _notify!(listener, __0);
                         notified++;
                     }
                 }
@@ -460,11 +460,7 @@ internal static class ExtendedBuilderReachNavOptimizer
                     $"per-frame budget={DeferredDrainMaxListenersPerFrame} listeners/{DeferredDrainBudgetMs:F0}ms");
             }
 
-            Runtime.Log(
-                $"EBR large nav update queued: registered={total}, candidates={scanned}, " +
-                $"pendingBatches={DeferredBatches.Count}, pendingCandidates={_deferredCandidates}");
-
-            FreezeDetector.RecordNavigationDetail(
+FreezeDetector.RecordNavigationDetail(
                 usedSpatial
                     ? $"EBR.DeferredQueue[{total}~{scanned}]"
                     : $"EBR.DeferredFullQueue[{total}]",
@@ -507,11 +503,7 @@ internal static class ExtendedBuilderReachNavOptimizer
                 DeferredBatches.Dequeue();
                 // Clear references before returning the pool rental.
                 System.Buffers.ArrayPool<object>.Shared.Return(batch.Candidates, clearArray: true);
-                Runtime.Log(
-                    $"EBR deferred batch complete: registered={batch.Total}, scanned={batch.Scanned}, " +
-                    $"notified={batch.Notified}, remainingBatches={DeferredBatches.Count}, " +
-                    $"remainingCandidates={_deferredCandidates}");
-                continue;
+continue;
             }
 
             var listener = batch.Candidates[batch.Index++];
@@ -525,9 +517,9 @@ internal static class ExtendedBuilderReachNavOptimizer
 
             try
             {
-                if (_intersects!(listener, batch.Update, _intersects))
+                if (_intersects!(listener, batch.Update))
                 {
-                    _notify!(listener, batch.Update, _notify);
+                    _notify!(listener, batch.Update);
                     batch.Notified++;
                     notified++;
                 }

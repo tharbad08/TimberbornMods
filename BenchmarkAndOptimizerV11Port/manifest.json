@@ -1,6 +1,6 @@
 {
   "Name": "TB Optimizer",
-  "Version": "1.1.102",
+  "Version": "1.1.103",
   "Id": "TBOptimizer",
   "MinimumGameVersion": "1.1.1.0",
   "Description": "Timberborn 1.1 gameplay optimization fixes with individually configurable startup switches.",
