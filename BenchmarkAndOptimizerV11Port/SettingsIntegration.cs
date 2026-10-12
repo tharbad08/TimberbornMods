@@ -48,10 +48,17 @@ public sealed class OptimizerSettingsOwner(
     public override ModSettingsContext ChangeableOn => ModSettingsContext.All;
 
     public OptimizerUiSetting CsvBenchmark { get; } = new();
+    public IntervalSettingsUiSetting UpdateIntervals { get; } = new();
 }
 
 public sealed class OptimizerUiSetting()
     : NonPersistentSetting(ModSettingDescriptor.Create("Benchmark & CSV profiler"))
+{
+    public override void Reset() { }
+}
+
+public sealed class IntervalSettingsUiSetting()
+    : NonPersistentSetting(ModSettingDescriptor.Create("Advanced update intervals"))
 {
     public override void Reset() => Runtime.ResetIntervals();
 }
@@ -82,6 +89,11 @@ public sealed class OptimizerSettingElementFactory(
         if (modSetting is OptimizerUiSetting)
         {
             element = new ModSettingElement(new CsvBenchmarkPanel(), modSetting);
+            return true;
+        }
+        if (modSetting is IntervalSettingsUiSetting)
+        {
+            element = new ModSettingElement(new OptimizerPanel(veInit), modSetting);
             return true;
         }
 
@@ -146,7 +158,7 @@ public sealed class OptimizerPanel : VisualElement
         // use AddToggle/AddSliderInt/RegisterChange instead of raw UIElements callbacks.
         this.SetPadding(8);
 
-        this.AddGameLabel("Benchmark & Optimizer — live controls", bold: true);
+        this.AddGameLabel("Benchmark & Optimizer — safe update intervals", bold: true);
         this.AddGameLabel("1 = vanilla frequency. Higher values run that system once every N dispatcher calls. Changes apply immediately.")
             .SetMarginBottom(8);
 

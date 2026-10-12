@@ -158,3 +158,7 @@ The runtime package requires the normal Timberborn Harmony mod.
 
 
 - v1.1.93: UI-only HUD follows the proven T3MP Personal Companion HeightShower Load-postfix approach. Reuses `_gameLayout`, copies actual HeightShower NineSlice styling and adds at top-right order 10, after HeightShower (8) and rSPD/iSPD (9). Removes fragile direct UILayout container resolution. Logs hook attachment and HUD creation.
+
+## Benchmark branch ownership (v1.1.102)
+
+This branch owns CSV sampling, 120s opt-in benchmark, and per-system update intervals (disabled by default at interval 1). Protected global dispatchers/soil, planting, physics and work services remain vanilla. Configured intervals are temporarily suspended during the observational CSV benchmark and restored after it ends. TB Optimizer has no interval engine or CSV profiling.

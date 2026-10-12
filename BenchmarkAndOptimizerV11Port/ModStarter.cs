@@ -10496,7 +10496,7 @@ internal static class Runtime
         "FramesPerSecondCounter",
     };
 
-    public static bool Enabled => true;
+    public static bool Enabled => _settings.Enabled;
     public static int DefaultInterval => _settings.DefaultInterval;
     public static bool IsProtected(string typeName) =>
         ProtectedTypeNames.Contains(ShortTypeName(typeName));
@@ -10765,14 +10765,11 @@ internal static class Runtime
         // Keep the narrow startup guard for DMD type enumeration only.
         BinditoConfiguratorDynamicAssemblyGuard.Patch(harmony);
         DiscoverLoadedOptimizableTypes();
-        // Tick intervals are read as safety metadata, never automatically applied.
+        RefreshDirectThrottlePatches();
     }
 
     public static void RefreshDirectThrottlePatches()
     {
-        // No direct system throttling in the profiler-only mod.
-        return;
-        /*
         if (_harmony is null || BenchmarkActive)
         {
             return;
@@ -11714,7 +11711,8 @@ internal static class Runtime
             TimberPhysicsBenchmarkPatcher.Unpatch(_harmony);
             DispatcherPatcher.Unpatch(_harmony);
 
-            // No physics catch-up limiter is installed by this profiler.
+            // Return to the configured interval patches after observational CSV benchmarking.
+            RefreshDirectThrottlePatches();
         }
 
         Log($"benchmark complete: {file}");
