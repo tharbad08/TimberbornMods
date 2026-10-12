@@ -1,4 +1,4 @@
-name: Build Benchmark Optimizer v1.1 Port
+name: Build TB Optimizer
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          ROOT="${RUNNER_TEMP}/timberborn-artifact/BenchmarkAndOptimizerV11"
+          ROOT="${RUNNER_TEMP}/timberborn-artifact/TBOptimizer"
           mkdir -p "$ROOT/version-1.1/Scripts"
           cp BenchmarkAndOptimizerV11Port/manifest.json "$ROOT/version-1.1/manifest.json"
           cp BenchmarkAndOptimizerV11Port/bin/Release/netstandard2.1/BenchmarkAndOptimizerV11.dll "$ROOT/version-1.1/Scripts/"
@@ -34,6 +34,6 @@ jobs:
       - name: Upload single ready-to-install ZIP
         uses: actions/upload-artifact@v4
         with:
-          name: BenchmarkAndOptimizerV11_1.1.101
+          name: TBOptimizer_1.1.101
           path: ${{ runner.temp }}/timberborn-artifact/
           if-no-files-found: error
