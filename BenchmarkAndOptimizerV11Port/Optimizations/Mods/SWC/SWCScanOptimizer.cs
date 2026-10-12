@@ -214,7 +214,7 @@ internal static class SWCScanOptimizer
             if (plantingChange is not null)
                 harmony.Patch(plantingChange, postfix:
                     new HarmonyMethod(AccessTools.Method(typeof(SWCScanOptimizer), nameof(ResetPlant))));
-            UnityEngine.Debug.Log("[TB Optimizer] SWC harvest and planting scans staggered (every 4 ticks)");
+            System.Console.WriteLine("[TB Optimizer] SWC harvest and planting scans staggered (every 4 ticks)");
             return true;
         }
         catch (Exception ex)
@@ -225,7 +225,7 @@ internal static class SWCScanOptimizer
             if (plantingChange is not null) harmony.Unpatch(plantingChange, HarmonyPatchType.All, harmony.Id);
             _harvest = null;
             _plant = null;
-            UnityEngine.Debug.LogWarning("[TB Optimizer] SWC scan optimization skipped: " + ex.Message);
+            System.Console.WriteLine("[TB Optimizer] SWC scan optimization skipped: " + ex.Message);
             return false;
         }
     }
