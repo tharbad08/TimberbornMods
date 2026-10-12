@@ -160,7 +160,8 @@ internal static class SWCFastScanner
             _yieldersList, _getRange, _yield, _cutYielder, _specYielder, _stock,
             _inventory, _cutStock;
         private readonly Action<object, bool> _updateYielders;
-        private readonly Func<object, object?, object?> _validYielder, _inArea, _anyObject,
+        private readonly Func<object, object?, object?, object?> _validYielder;
+        private readonly Func<object, object?, object?> _inArea, _anyObject,
             _grownAt, _cuttableAt, _treeSpec, _cuttable, _cutSpec;
         private readonly Func<object, bool> _isYielding, _isGrown, _removed;
         private readonly Func<object, string?> _goodId, _cutGoodId, _stockGoodId;
@@ -291,9 +292,9 @@ internal static class SWCFastScanner
     internal sealed class Plant
     {
         private readonly Func<object, object?> _coordinates, _plantingService, _soil, _blocks,
-            _treeCutting, _getCoords, _forester, _livingDead, _treeAt, _livingAt;
+            _treeCutting, _getCoords, _forester, _treeAt, _livingAt;
         private readonly Func<object, object?, object?> _resource, _inCuttingArea,
-            _nonOverridable, _validate;
+            _nonOverridable;
         private readonly Func<object, object?, object?, object?> _plantingValid;
         private readonly Func<object, bool> _replant, _dead;
         private readonly object _bottom;
@@ -328,14 +329,12 @@ internal static class SWCFastScanner
             _plantingValid = Expression.Lambda<Func<object, object?, object?, object?>>(
                 Expression.Convert(Expression.Call(Expression.Convert(owner, soilType),
                     validateMethod, context), typeof(object)), owner, pos, resource).Compile();
-            _validate = Call1(validateMethod); // for preflight; not used in the hot loop
 
             var block = Field(component, "blockService").FieldType;
             var nonOverridable = Method(block, "AnyNonOverridableObjectsAt", 2);
-            _nonOverridable = Call2(nonOverridable) is { } any
-                ? (obj, position) => any(obj, position, _bottom)
-                : throw new MissingMethodException("AnyNonOverridableObjectsAt");
             _bottom = Enum.Parse(nonOverridable.GetParameters()[1].ParameterType, "Bottom");
+            var any = Call2(nonOverridable);
+            _nonOverridable = (obj, position) => any(obj, position, _bottom);
             var forester = TypeNamed("Timberborn.Forestry.Forester");
             _forester = Call0(GenericZero(component, "GetComponent", forester));
             _replant = Bool(Member(forester, "ReplantDeadTrees"));
@@ -345,7 +344,6 @@ internal static class SWCFastScanner
             _treeAt = Call1(Generic(block, "GetFirstObjectWithComponentAt", tree));
             _livingAt = Call1(Generic(block, "GetFirstObjectWithComponentAt", living));
             _dead = Bool(Member(living, "IsDead"));
-            _livingDead = _livingAt;
         }
 
         internal bool Scan(object component)
