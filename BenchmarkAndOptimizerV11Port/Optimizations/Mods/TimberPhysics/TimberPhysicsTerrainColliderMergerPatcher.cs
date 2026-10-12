@@ -622,7 +622,6 @@ internal static class TimberPhysicsTerrainColliderMergerPatcher
         var originY = y / ChunkSize * ChunkSize;
 
         state.DirtyChunks.Add(ChunkKey(originX, originY));
-        TerrainRecoveryTickLimiter.NotifyTerrainEdit();
     }
 
     private static void TrackService(object service, TerrainState state)

@@ -216,20 +216,17 @@ internal static class KeystoneFaunaTemplatePrewarmer
                 }
 
                 var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                var allocationBefore = AllocationCounter.Read();
 
                 cacheInstance.Invoke(instantiator, new[] { blueprint });
 
                 var elapsedMs =
                     (System.Diagnostics.Stopwatch.GetTimestamp() - started) *
                     1000.0 / System.Diagnostics.Stopwatch.Frequency;
-                var allocationDelta =
-                    Math.Max(0, AllocationCounter.Read() - allocationBefore);
 
                 warmed++;
                 Runtime.Log(
                     $"Keystone fauna template prewarmed: {targetName}; " +
-                    $"elapsed={elapsedMs:F1}ms, allocationDelta={FormatBytes(allocationDelta)}");
+                    $"elapsed={elapsedMs:F1}ms");
             }
 
             state.Done = true;
