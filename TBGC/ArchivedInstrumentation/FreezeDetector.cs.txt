@@ -1,0 +1,863 @@
+ARCHIVE ONLY / HISTORICAL INSTRUMENTATION NOT COMPILED
+Cropped class from optimizer v1.1.100; not self-contained, do not deploy without review.
+
+internal static class FreezeDetector
+{
+    private const double SlowFrameMs = 250.0;
+    private const double SevereFrameMs = 500.0;
+    private const double FreezeFrameMs = 1000.0;
+    private const int TopSystemCount = 8;
+
+    private static readonly object Gate = new();
+    private static readonly Dictionary<string, long> SectionTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> SystemTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> TickSingletonTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> UpdateSingletonTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> LateUpdateSingletonTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> EntityDispatcherTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> SlowEntityTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> EntityComponentTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> BfrDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> NavigationDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> InputDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, int> HotspotCalls = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> FaunaDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> LateBehaviourTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, KeystoneProfileRecord> KeystoneProfiles = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> PlayerLoopMarkers = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, int> PlayerLoopGen2Counts = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> PhaseGapTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> SoilDetailTicks = new(StringComparer.Ordinal);
+    private static readonly Dictionary<string, long> TargetDetailTicks = new(StringComparer.Ordinal);
+
+    private static bool _initialized;
+    private static long _lastPhaseEndTicks;
+    private static string? _lastPhaseName;
+    private static int _soilGc0;
+    private static int _soilGc1;
+    private static int _soilGc2;
+    private static long _soilMoistureTicks;
+    private static long _soilMoistureAllocatedBytes;
+    private static int _soilMoistureGc0;
+    private static int _soilMoistureGc1;
+    private static int _soilMoistureGc2;
+    private static long _frameStartTicks;
+    private static long _frameNumber;
+
+    private sealed class KeystoneProfileRecord
+    {
+        public long TotalTicks;
+        public long MaxTicks;
+        public long TotalAllocatedBytes;
+        public long MaxAllocatedBytes;
+        public int Calls;
+        public int Gc0;
+        public int Gc1;
+        public int Gc2;
+    }
+
+    private static int _gc0;
+    private static int _gc1;
+    private static int _gc2;
+    private static long _totalAllocatedBytes;
+
+    public static void Initialize()
+    {
+        lock (Gate)
+        {
+            if (_initialized)
+            {
+                return;
+            }
+
+            _initialized = true;
+            _frameStartTicks = 0;
+            _frameNumber = 0;
+            _gc0 = GC.CollectionCount(0);
+            _gc1 = GC.CollectionCount(1);
+            _gc2 = GC.CollectionCount(2);
+            _totalAllocatedBytes = AllocationCounter.Read();
+            SectionTicks.Clear();
+            SystemTicks.Clear();
+            TickSingletonTicks.Clear();
+            UpdateSingletonTicks.Clear();
+            LateUpdateSingletonTicks.Clear();
+            EntityDispatcherTicks.Clear();
+            SlowEntityTicks.Clear();
+            EntityComponentTicks.Clear();
+            BfrDetailTicks.Clear();
+            NavigationDetailTicks.Clear();
+            InputDetailTicks.Clear();
+            HotspotCalls.Clear();
+            FaunaDetailTicks.Clear();
+            LateBehaviourTicks.Clear();
+            KeystoneProfiles.Clear();
+            PlayerLoopMarkers.Clear();
+            PlayerLoopGen2Counts.Clear();
+            PhaseGapTicks.Clear();
+            SoilDetailTicks.Clear();
+            TargetDetailTicks.Clear();
+            _lastPhaseEndTicks = 0;
+            _lastPhaseName = null;
+            _soilGc0 = 0;
+            _soilGc1 = 0;
+            _soilGc2 = 0;
+            _soilMoistureTicks = 0;
+            _soilMoistureAllocatedBytes = 0;
+            _soilMoistureGc0 = 0;
+            _soilMoistureGc1 = 0;
+            _soilMoistureGc2 = 0;
+        }
+
+        Runtime.Log(
+            $"freeze detector enabled: slow>={SlowFrameMs:F0}ms, " +
+            $"severe>={SevereFrameMs:F0}ms, freeze>={FreezeFrameMs:F0}ms");
+    }
+
+    public static void FrameBoundary(long now, string nextPhase)
+    {
+        MonoBehaviourLateUpdateProfiler.FlushFrame();
+        string? freezeLine = null;
+
+        lock (Gate)
+        {
+            if (!_initialized)
+            {
+                return;
+            }
+
+            if (_frameStartTicks != 0)
+            {
+                RecordGapLocked(nextPhase, now);
+
+                var elapsedTicks = now - _frameStartTicks;
+                var elapsedMs = ToMs(elapsedTicks);
+
+                var nextGc0 = GC.CollectionCount(0);
+                var nextGc1 = GC.CollectionCount(1);
+                var nextGc2 = GC.CollectionCount(2);
+                var nextAllocatedBytes = AllocationCounter.Read();
+                var allocatedBytesDelta = Math.Max(0, nextAllocatedBytes - _totalAllocatedBytes);
+
+                if (elapsedMs >= SlowFrameMs)
+                {
+                    var dispatcherTicks =
+                        SectionTicks.GetValueOrDefault("UpdateSingletons") +
+                        SectionTicks.GetValueOrDefault("LateUpdateSingletons") +
+                        SectionTicks.GetValueOrDefault("TickSingletons");
+                    var externalOrLoadGap =
+                        elapsedMs >= 30000.0 &&
+                        ToMs(dispatcherTicks) < 1000.0;
+
+                    if (!externalOrLoadGap)
+                    {
+                        freezeLine = BuildFreezeLine(
+                            elapsedMs,
+                            nextGc0 - _gc0,
+                            nextGc1 - _gc1,
+                            nextGc2 - _gc2,
+                            allocatedBytesDelta,
+                            _totalAllocatedBytes,
+                            nextAllocatedBytes);
+                    }
+                    else
+                    {
+                        Runtime.Log(
+                            $"freeze detector skipped external/load gap: " +
+                            $"elapsed={elapsedMs:F1}ms, dispatcher={ToMs(dispatcherTicks):F1}ms");
+                    }
+                }
+
+                _gc0 = nextGc0;
+                _gc1 = nextGc1;
+                _gc2 = nextGc2;
+                _totalAllocatedBytes = nextAllocatedBytes;
+            }
+
+            _frameNumber++;
+            _frameStartTicks = now;
+            SectionTicks.Clear();
+            SystemTicks.Clear();
+            TickSingletonTicks.Clear();
+            UpdateSingletonTicks.Clear();
+            LateUpdateSingletonTicks.Clear();
+            EntityDispatcherTicks.Clear();
+            SlowEntityTicks.Clear();
+            EntityComponentTicks.Clear();
+            BfrDetailTicks.Clear();
+            NavigationDetailTicks.Clear();
+            InputDetailTicks.Clear();
+            HotspotCalls.Clear(); // Per-frame counts; v1.1.67 incorrectly left them cumulative.
+            FaunaDetailTicks.Clear();
+            LateBehaviourTicks.Clear();
+            KeystoneProfiles.Clear();
+            PlayerLoopMarkers.Clear();
+            PlayerLoopGen2Counts.Clear();
+            PhaseGapTicks.Clear();
+            SoilDetailTicks.Clear();
+            TargetDetailTicks.Clear();
+            _soilGc0 = 0;
+            _soilGc1 = 0;
+            _soilGc2 = 0;
+            _soilMoistureTicks = 0;
+            _soilMoistureAllocatedBytes = 0;
+            _soilMoistureGc0 = 0;
+            _soilMoistureGc1 = 0;
+            _soilMoistureGc2 = 0;
+            _lastPhaseEndTicks = 0;
+            _lastPhaseName = null;
+        }
+
+        if (freezeLine is not null)
+        {
+            Runtime.LogFreeze(freezeLine);
+        }
+
+        var heapBytes = GC.GetTotalMemory(false);
+        HarmonyPatchOwnershipAudit.Pulse(heapBytes);
+        MonoBehaviourLateUpdateProfiler.ArmForUpcomingFrame(heapBytes);
+        ManagedHeapSampler.FrameBoundary(heapBytes);
+        IncrementalGcSmoother.Pulse(heapBytes);
+        ExtendedBuilderReachNavOptimizer.DrainDeferred();
+    }
+
+    public static void BeginPhase(string phaseName, long now)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            RecordGapLocked(phaseName, now);
+        }
+    }
+
+    public static void EndPhase(string phaseName, long now)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            _lastPhaseName = phaseName;
+            _lastPhaseEndTicks = now;
+        }
+    }
+
+    private static void RecordGapLocked(string nextPhase, long now)
+    {
+        if (_lastPhaseEndTicks == 0 || string.IsNullOrEmpty(_lastPhaseName) || now <= _lastPhaseEndTicks)
+        {
+            return;
+        }
+
+        var key = $"{_lastPhaseName}->{nextPhase}";
+        PhaseGapTicks.TryGetValue(key, out var existing);
+        PhaseGapTicks[key] = existing + (now - _lastPhaseEndTicks);
+    }
+
+    public static void RecordSection(string name, long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            SectionTicks.TryGetValue(name, out var existing);
+            SectionTicks[name] = existing + elapsedTicks;
+        }
+    }
+
+    public static void RecordSystem(string name, long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            SystemTicks.TryGetValue(name, out var existing);
+            SystemTicks[name] = existing + elapsedTicks;
+        }
+    }
+
+    public static void RecordTickSingleton(string name, long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            TickSingletonTicks.TryGetValue(name, out var existing);
+            TickSingletonTicks[name] = existing + elapsedTicks;
+        }
+    }
+
+    public static void RecordUpdateSingleton(string name, long elapsedTicks) =>
+        RecordNamedTicks(UpdateSingletonTicks, name, elapsedTicks);
+
+    public static void RecordLateUpdateSingleton(string name, long elapsedTicks) =>
+        RecordNamedTicks(LateUpdateSingletonTicks, name, elapsedTicks);
+
+    public static void RecordEntityDispatcher(string name, long elapsedTicks) =>
+        RecordNamedTicks(EntityDispatcherTicks, name, elapsedTicks);
+
+    public static void RecordSlowEntityTick(string name, long elapsedTicks) =>
+        RecordNamedTicks(SlowEntityTicks, name, elapsedTicks);
+
+    public static void RecordEntityComponent(string name, long elapsedTicks) =>
+        RecordNamedTicks(EntityComponentTicks, name, elapsedTicks);
+
+    public static void RecordBfrDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(BfrDetailTicks, name, elapsedTicks);
+
+    public static void RecordNavigationDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(NavigationDetailTicks, name, elapsedTicks);
+
+    public static void RecordInputDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(InputDetailTicks, name, elapsedTicks);
+
+    public static void RecordHotspotCount(string name, int amount = 1)
+    {
+        if (amount <= 0) return;
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+                return;
+
+            HotspotCalls.TryGetValue(name, out var count);
+            HotspotCalls[name] = count + amount;
+        }
+    }
+
+    public static void RecordFaunaDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(FaunaDetailTicks, name, elapsedTicks);
+
+    public static void RecordLateBehaviour(string name, long elapsedTicks) =>
+        RecordNamedTicks(LateBehaviourTicks, name, elapsedTicks);
+
+    public static void RecordSoilMoistureProfile(
+        long elapsedTicks,
+        long allocatedBytes,
+        int gc0,
+        int gc1,
+        int gc2)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            _soilMoistureTicks += Math.Max(0, elapsedTicks);
+            _soilMoistureAllocatedBytes += Math.Max(0, allocatedBytes);
+            _soilMoistureGc0 += gc0;
+            _soilMoistureGc1 += gc1;
+            _soilMoistureGc2 += gc2;
+        }
+    }
+
+    public static void RecordKeystoneProfile(
+        string name,
+        long totalTicks,
+        long maxTicks,
+        long totalAllocatedBytes,
+        long maxAllocatedBytes,
+        int calls,
+        int gc0,
+        int gc1,
+        int gc2)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            if (!KeystoneProfiles.TryGetValue(name, out var record))
+            {
+                record = new KeystoneProfileRecord();
+                KeystoneProfiles[name] = record;
+            }
+
+            record.TotalTicks += Math.Max(0, totalTicks);
+            record.MaxTicks = Math.Max(record.MaxTicks, maxTicks);
+            record.TotalAllocatedBytes += Math.Max(0, totalAllocatedBytes);
+            record.MaxAllocatedBytes = Math.Max(record.MaxAllocatedBytes, maxAllocatedBytes);
+            record.Calls += Math.Max(0, calls);
+            record.Gc0 += gc0;
+            record.Gc1 += gc1;
+            record.Gc2 += gc2;
+        }
+    }
+
+    public static void RecordPlayerLoopMarker(string name, long timestamp)
+    {
+        var gen2Count = GC.CollectionCount(2);
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0 || timestamp <= 0)
+            {
+                return;
+            }
+
+            PlayerLoopMarkers[name] = timestamp;
+            PlayerLoopGen2Counts[name] = gen2Count;
+        }
+    }
+
+    private static void RecordNamedTicks(
+        Dictionary<string, long> destination,
+        string name,
+        long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            destination.TryGetValue(name, out var existing);
+            destination[name] = existing + elapsedTicks;
+        }
+    }
+
+    public static void RecordTargetDetail(string name, long elapsedTicks) =>
+        RecordNamedTicks(TargetDetailTicks, name, elapsedTicks);
+
+    public static void RecordSoilDetail(string name, long elapsedTicks)
+    {
+        if (elapsedTicks <= 0)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            SoilDetailTicks.TryGetValue(name, out var existing);
+            SoilDetailTicks[name] = existing + elapsedTicks;
+        }
+    }
+
+    public static void RecordSoilGc(int gen0, int gen1, int gen2)
+    {
+        lock (Gate)
+        {
+            if (!_initialized || _frameStartTicks == 0)
+            {
+                return;
+            }
+
+            _soilGc0 += gen0;
+            _soilGc1 += gen1;
+            _soilGc2 += gen2;
+        }
+    }
+
+    private static string BuildFreezeLine(
+        double elapsedMs,
+        int gc0Delta,
+        int gc1Delta,
+        int gc2Delta,
+        long allocatedBytesDelta,
+        long metricBeforeFrame,
+        long metricAfterFrame)
+    {
+        var severity = elapsedMs >= FreezeFrameMs
+            ? "FREEZE"
+            : elapsedMs >= SevereFrameMs
+                ? "SEVERE"
+                : "SLOW";
+
+        SectionTicks.TryGetValue("UpdateSingletons", out var updateTicks);
+        SectionTicks.TryGetValue("LateUpdateSingletons", out var lateTicks);
+        SectionTicks.TryGetValue("TickSingletons", out var tickTicks);
+        SystemTicks.TryGetValue("TimberPhysics.Core.PhysicsSimulator", out var physicsTicks);
+
+        var dispatcherTicks = updateTicks + lateTicks + tickTicks;
+        var unattributedTicks = Math.Max(
+            0,
+            (long)(elapsedMs * System.Diagnostics.Stopwatch.Frequency / 1000.0) - dispatcherTicks);
+
+        var topSystems = SystemTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+
+        var topText = topSystems.Length == 0
+            ? "none (run benchmark for per-system detail)"
+            : string.Join(", ", topSystems);
+
+        var topTickSingletons = TickSingletonTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+
+        var topTickText = topTickSingletons.Length == 0
+            ? "none"
+            : string.Join(", ", topTickSingletons);
+
+        var topUpdates = UpdateSingletonTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var topUpdateText = topUpdates.Length == 0 ? "none" : string.Join(", ", topUpdates);
+
+        var topLateUpdates = LateUpdateSingletonTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var topLateUpdateText = topLateUpdates.Length == 0 ? "none" : string.Join(", ", topLateUpdates);
+
+        var entityDispatchers = EntityDispatcherTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortMethodName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var entityDispatcherText = entityDispatchers.Length == 0
+            ? "none"
+            : string.Join(", ", entityDispatchers);
+
+        var slowEntities = SlowEntityTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var slowEntityText = slowEntities.Length == 0
+            ? "none >=20ms"
+            : string.Join(", ", slowEntities);
+
+        var componentSamples = EntityComponentTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var componentSampleText = componentSamples.Length == 0
+            ? "none"
+            : string.Join(", ", componentSamples);
+
+        var bfrDetails = BfrDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var bfrDetailText = bfrDetails.Length == 0
+            ? "none"
+            : string.Join(", ", bfrDetails);
+
+        var navigationDetails = NavigationDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var navigationDetailText = navigationDetails.Length == 0
+            ? "none"
+            : string.Join(", ", navigationDetails);
+
+        var inputDetails = InputDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(20)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var inputDetailText = inputDetails.Length == 0
+            ? "none"
+            : string.Join(", ", inputDetails);
+
+        var hotspotCounts = HotspotCalls.Count == 0
+            ? "none"
+            : string.Join(", ", HotspotCalls.OrderByDescending(x => x.Value)
+                .Select(x => $"{x.Key}={x.Value}"));
+
+        var faunaDetails = FaunaDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var faunaDetailText = faunaDetails.Length == 0
+            ? "none"
+            : string.Join(", ", faunaDetails);
+
+        var lateBehaviours = LateBehaviourTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var lateBehaviourText = lateBehaviours.Length == 0
+            ? "none"
+            : string.Join(", ", lateBehaviours);
+
+        var keystoneProfiles = KeystoneProfiles
+            .OrderByDescending(pair => pair.Value.MaxTicks)
+            .Take(TopSystemCount)
+            .Select(pair =>
+                $"{ShortName(pair.Key)}:calls={pair.Value.Calls}," +
+                $"total={ToMs(pair.Value.TotalTicks):F1}ms,max={ToMs(pair.Value.MaxTicks):F1}ms," +
+                $"alloc={FormatBytes(pair.Value.TotalAllocatedBytes)},maxAlloc={FormatBytes(pair.Value.MaxAllocatedBytes)}," +
+                $"GC={pair.Value.Gc0}/{pair.Value.Gc1}/{pair.Value.Gc2}")
+            .ToArray();
+        var keystoneProfileText = keystoneProfiles.Length == 0
+            ? "none"
+            : string.Join(", ", keystoneProfiles);
+
+        var playerLoop = BuildPlayerLoopText();
+
+        var gcMarkerText = "outside instrumented markers";
+        if (gc2Delta > 0 && PlayerLoopGen2Counts.Count > 1)
+        {
+            var orderedGcMarkers = PlayerLoopMarkers
+                .OrderBy(pair => pair.Value)
+                .Where(pair => PlayerLoopGen2Counts.ContainsKey(pair.Key))
+                .ToArray();
+            var changed = new List<string>();
+            for (var index = 1; index < orderedGcMarkers.Length; index++)
+            {
+                var prior = orderedGcMarkers[index - 1].Key;
+                var current = orderedGcMarkers[index].Key;
+                var delta = PlayerLoopGen2Counts[current] - PlayerLoopGen2Counts[prior];
+                if (delta > 0)
+                    changed.Add($"{prior}->{current}:+{delta}");
+            }
+
+            if (changed.Count != 0)
+                gcMarkerText = string.Join(", ", changed.Take(4));
+        }
+
+        var phaseGaps = PhaseGapTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var phaseGapText = phaseGaps.Length == 0 ? "none" : string.Join(", ", phaseGaps);
+
+        var soilDetails = SoilDetailTicks
+            .OrderByDescending(x => x.Value)
+            .Take(TopSystemCount)
+            .Select(x => $"{ShortMethodName(x.Key)}={ToMs(x.Value):F1}ms")
+            .ToArray();
+        var soilText = soilDetails.Length == 0 ? "none" : string.Join(", ", soilDetails);
+
+        var targetDetails = TargetDetailTicks.OrderByDescending(x => x.Value).Take(TopSystemCount)
+            .Select(x => $"{x.Key}={ToMs(x.Value):F1}ms").ToArray();
+        var targetDetailText = targetDetails.Length == 0 ? "none" : string.Join(", ", targetDetails);
+
+        // Include nested input targets: otherwise a >400ms preview creation only
+        // shows InputService, and misses patches on PreviewPlacer/BaseInstantiator.
+        var patchOwnerCandidates = HarmonyPatchOwnershipAudit.DescribeCandidates(
+            TickSingletonTicks.Concat(UpdateSingletonTicks).Concat(LateUpdateSingletonTicks)
+                .OrderByDescending(pair => pair.Value)
+                .Select(pair => ShortName(pair.Key))
+                .Take(10)
+                .Concat(InputDetailTicks
+                    .Where(pair => ToMs(pair.Value) >= 5.0)
+                    .OrderByDescending(pair => pair.Value)
+                    .Select(pair => HarmonyPatchOwnershipAudit.DetailType(pair.Key))
+                    .Where(name => !string.IsNullOrEmpty(name))
+                    .Select(name => name!))
+                .Concat(TargetDetailTicks
+                    .Where(pair => ToMs(pair.Value) >= 5.0)
+                    .OrderByDescending(pair => pair.Value)
+                    .Select(pair => HarmonyPatchOwnershipAudit.DetailType(pair.Key))
+                    .Where(name => !string.IsNullOrEmpty(name))
+                    .Select(name => name!)));
+
+        var heapTransitionText =
+            !AllocationCounter.IsCumulative && (gc0Delta != 0 || gc1Delta != 0 || gc2Delta != 0)
+                ? $"heapBeforeFrame={FormatBytes(metricBeforeFrame)}, heapAfterFrame={FormatBytes(metricAfterFrame)}; "
+                : string.Empty;
+
+        return
+            $"{severity} frame={_frameNumber} elapsed={elapsedMs:F1}ms; " +
+            $"dispatch: UpdateSingletons={ToMs(updateTicks):F1}ms, " +
+            $"LateUpdateSingletons={ToMs(lateTicks):F1}ms, " +
+            $"TickSingletons={ToMs(tickTicks):F1}ms, " +
+            $"unattributed={ToMs(unattributedTicks):F1}ms; " +
+            $"physics={ToMs(physicsTicks):F1}ms; " +
+            $"heap={FormatBytes(GC.GetTotalMemory(false))}; " +
+            heapTransitionText +
+            $"GC delta=[gen0:{gc0Delta}, gen1:{gc1Delta}, gen2:{gc2Delta}]; " +
+            (gc2Delta > 0 ? $"gen2 PlayerLoop transition: {gcMarkerText}; " : string.Empty) +
+            $"phase gaps: {phaseGapText}; " +
+            $"top update singletons: {topUpdateText}; " +
+            $"top late-update singletons: {topLateUpdateText}; " +
+            $"entity tick dispatchers: {entityDispatcherText}; " +
+            $"slow entity ticks: {slowEntityText}; " +
+            $"sampled entity components: {componentSampleText}; " +
+            $"BFR detail: {bfrDetailText}; " +
+            $"navigation detail: {navigationDetailText}; " +
+            $"input detail: {inputDetailText}; " +
+            $"instantiation/placement calls: {hotspotCounts}; " +
+            $"fauna detail: {faunaDetailText}; " +
+            $"target detail: {targetDetailText}; " +
+            $"patched vanilla candidates (not attribution): {patchOwnerCandidates}; " +
+            $"LateUpdate behaviours: {lateBehaviourText}; " +
+            $"Keystone profile: {keystoneProfileText}; " +
+            $"PlayerLoop: {playerLoop}; " +
+            $"top tick singletons: {topTickText}; " +
+            $"soil detail: {soilText}; " +
+            $"soil GC=[gen0:{_soilGc0}, gen1:{_soilGc1}, gen2:{_soilGc2}]; " +
+            $"soil moisture=[time:{ToMs(_soilMoistureTicks):F1}ms, alloc:{FormatBytes(_soilMoistureAllocatedBytes)}, " +
+            $"GC:{_soilMoistureGc0}/{_soilMoistureGc1}/{_soilMoistureGc2}]; " +
+            $"top systems: {topText}";
+    }
+
+    private static string BuildPlayerLoopText()
+    {
+        if (PlayerLoopMarkers.Count == 0)
+        {
+            return "none";
+        }
+
+        var ordered = new[]
+        {
+            "EarlyUpdate",
+            "FixedUpdate",
+            "PreUpdate",
+            "Update",
+            "PreLateUpdate",
+            "PostLateUpdate",
+        };
+
+        var parts = new List<string>();
+        foreach (var phase in ordered)
+        {
+            if (PlayerLoopMarkers.TryGetValue(phase + ".Start", out var start) &&
+                PlayerLoopMarkers.TryGetValue(phase + ".End", out var end) &&
+                end >= start)
+            {
+                parts.Add($"{phase}={ToMs(end - start):F1}ms");
+            }
+        }
+
+        for (var i = 0; i < ordered.Length - 1; i++)
+        {
+            var left = ordered[i];
+            var right = ordered[i + 1];
+            if (PlayerLoopMarkers.TryGetValue(left + ".End", out var leftEnd) &&
+                PlayerLoopMarkers.TryGetValue(right + ".Start", out var rightStart) &&
+                rightStart >= leftEnd)
+            {
+                var gap = rightStart - leftEnd;
+                if (ToMs(gap) >= 1.0)
+                {
+                    parts.Add($"{left}->{right}={ToMs(gap):F1}ms");
+                }
+            }
+        }
+
+        var childSpans = PlayerLoopMarkers
+            .Where(pair =>
+                pair.Key.StartsWith("PreLateChild[", StringComparison.Ordinal) &&
+                pair.Key.EndsWith(".Start", StringComparison.Ordinal))
+            .Select(pair =>
+            {
+                var baseKey = pair.Key[..^6];
+                return PlayerLoopMarkers.TryGetValue(baseKey + ".End", out var end) && end >= pair.Value
+                    ? (Name: baseKey, Ticks: end - pair.Value)
+                    : (Name: baseKey, Ticks: 0L);
+            })
+            .Where(item => item.Ticks > 0)
+            .OrderByDescending(item => item.Ticks)
+            .Take(8)
+            .ToArray();
+
+        foreach (var child in childSpans)
+        {
+            var name = child.Name;
+            var separator = name.LastIndexOf('.');
+            if (separator >= 0)
+            {
+                name = name[(separator + 1)..];
+            }
+            parts.Add($"PreLate.{name}={ToMs(child.Ticks):F1}ms");
+        }
+
+        return parts.Count == 0 ? "markers present, no complete spans" : string.Join(", ", parts);
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        if (bytes >= 1024L * 1024L)
+        {
+            return $"{bytes / (1024.0 * 1024.0):F1}MB";
+        }
+
+        if (bytes >= 1024L)
+        {
+            return $"{bytes / 1024.0:F1}KB";
+        }
+
+        return $"{bytes}B";
+    }
+
+    private static string ShortMethodName(string value)
+    {
+        var separator = value.LastIndexOf("::", StringComparison.Ordinal);
+        if (separator >= 0)
+        {
+            var typePart = value[..separator];
+            var typeSeparator = typePart.LastIndexOf('.');
+            var shortType = typeSeparator >= 0 ? typePart[(typeSeparator + 1)..] : typePart;
+            return shortType + "." + value[(separator + 2)..];
+        }
+
+        return ShortName(value);
+    }
+
+    private static string ShortName(string value)
+    {
+        const string timberPrefix = "TimberPhysics.Core.PhysicsSimulator::";
+        if (value.StartsWith(timberPrefix, StringComparison.Ordinal))
+        {
+            return "PhysicsSimulator::" + value[timberPrefix.Length..];
+        }
+
+        var index = value.LastIndexOf('.');
+        return index >= 0 ? value[(index + 1)..] : value;
+    }
+
+    private static double ToMs(long ticks) =>
+        ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+}
+
