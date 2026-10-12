@@ -162,7 +162,8 @@ internal static class SWCFastScanner
         private readonly Action<object, bool> _updateYielders;
         private readonly Func<object, object?, object?, object?> _validYielder;
         private readonly Func<object, object?, object?> _inArea, _anyObject,
-            _grownAt, _cuttableAt, _treeSpec, _cuttable, _cutSpec;
+            _grownAt, _cuttableAt; 
+        private readonly Func<object, object?> _treeSpec, _cuttable, _cutSpec;
         private readonly Func<object, bool> _isYielding, _isGrown, _removed;
         private readonly Func<object, string?> _goodId, _cutGoodId, _stockGoodId;
         private readonly Func<object, int> _stockAmount;
@@ -292,7 +293,8 @@ internal static class SWCFastScanner
     internal sealed class Plant
     {
         private readonly Func<object, object?> _coordinates, _plantingService, _soil, _blocks,
-            _treeCutting, _getCoords, _forester, _treeAt, _livingAt;
+            _treeCutting, _getCoords, _forester; 
+        private readonly Func<object, object?, object?> _treeAt, _livingAt;
         private readonly Func<object, object?, object?> _resource, _inCuttingArea,
             _nonOverridable;
         private readonly Func<object, object?, object?, object?> _plantingValid;
