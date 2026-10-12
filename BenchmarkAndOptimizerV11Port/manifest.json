@@ -1,12 +1,20 @@
 {
-  "Name": "Benchmark & Optimizer (v1.1 Port)",
+  "Name": "TB Optimizer",
   "Version": "1.1.101",
-  "Id": "BenchmarkAndOptimizerV11",
+  "Id": "TBOptimizer",
   "MinimumGameVersion": "1.1.1.0",
-  "Description": "Timberborn v1.1 port of Benchmark & Optimizer with live ModSettings + TimberUi controls and protected core simulation systems.",
+  "Description": "Timberborn 1.1 gameplay optimization fixes with individually configurable startup switches.",
   "RequiredMods": [
-    { "Id": "Harmony" },
-    { "Id": "eMka.ModSettings", "MinimumVersion": "1.1.1.0" },
-    { "Id": "TimberUi", "MinimumVersion": "11.0.1" }
+    {
+      "Id": "Harmony"
+    },
+    {
+      "Id": "eMka.ModSettings",
+      "MinimumVersion": "1.1.1.0"
+    },
+    {
+      "Id": "TimberUi",
+      "MinimumVersion": "11.0.1"
+    }
   ]
 }
