@@ -92,7 +92,7 @@ internal static class SWCHarvestSafety
                 prefix: new HarmonyMethod(AccessTools.Method(typeof(SWCHarvestSafety), nameof(DeferUpdate)))
                 { priority = Priority.First });
             _installed = true;
-            UnityEngine.Debug.Log("[TB Optimizer] SWC harvest/workplace safety enabled");
+            System.Console.WriteLine("[TB Optimizer] SWC harvest/workplace safety enabled");
             return true;
         }
         catch (Exception ex)
@@ -100,7 +100,7 @@ internal static class SWCHarvestSafety
             harmony.Unpatch(find, HarmonyPatchType.All, harmony.Id);
             harmony.Unpatch(tick, HarmonyPatchType.All, harmony.Id);
             harmony.Unpatch(update, HarmonyPatchType.All, harmony.Id);
-            UnityEngine.Debug.LogWarning("[TB Optimizer] SWC safety unavailable; SWC performance patch not installed: " + ex.Message);
+            System.Console.WriteLine("[TB Optimizer] SWC safety unavailable; SWC performance patch not installed: " + ex.Message);
             return false;
         }
     }
