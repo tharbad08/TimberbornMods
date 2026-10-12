@@ -12,7 +12,7 @@ public sealed class ModStarter : IModStarter
 {
     public void StartMod(IModEnvironment modEnvironment)
     {
-        var harmony = new Harmony("tharbad08.BenchmarkAndOptimizerV11");
+        var harmony = new Harmony("tharbad08.TBOptimizer");
         Runtime.Initialize(modEnvironment.ModPath, harmony);
 
         Runtime.Log($"loaded; config={Runtime.ConfigPath}; normal throttling uses direct method patches");
@@ -97,7 +97,7 @@ internal static class DispatcherPatcher
 
 internal static class FreezeDetectorPatcher
 {
-    private static readonly Harmony FreezeHarmony = new("tharbad08.BenchmarkAndOptimizerV11.FreezeDetector");
+    private static readonly Harmony FreezeHarmony = new("tharbad08.TBOptimizer.FeaturePatches");
     private static bool _patched;
 
     private sealed record Target(string TypeName, string MethodName, string PrefixName);
