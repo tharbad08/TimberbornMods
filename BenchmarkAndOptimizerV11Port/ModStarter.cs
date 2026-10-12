@@ -12,7 +12,7 @@ public sealed class ModStarter : IModStarter
 {
     public void StartMod(IModEnvironment modEnvironment)
     {
-        var harmony = new Harmony("tharbad08.BenchmarkAndOptimizerV11");
+        var harmony = new Harmony("tharbad08.BenchmarkAndOptimizerV11Port");
         Runtime.Initialize(modEnvironment.ModPath, harmony);
 
         Runtime.Log($"loaded; config={Runtime.ConfigPath}; normal throttling uses direct method patches");
@@ -11027,7 +11027,9 @@ internal static class Runtime
                     continue;
                 }
 
-                if (!ShouldRun(entry.Actual))
+                // Benchmarking must never skip a tick, even if an old config
+                // contains non-vanilla intervals.
+                if (!BenchmarkActive && !ShouldRun(entry.Actual))
                 {
                     continue;
                 }
