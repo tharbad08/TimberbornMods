@@ -8,14 +8,6 @@ using Timberborn.ModManagerScene;
 
 namespace BenchmarkAndOptimizerV11;
 
-using System.Collections;
-using System.Reflection;
-using System.Linq.Expressions;
-using System.Runtime.CompilerServices;
-using Newtonsoft.Json;
-using HarmonyLib;
-using Timberborn.ModManagerScene;
-
 internal static class TimberPhysicsBenchmarkPatcher
 {
     private const string SimulatorTypeName = "TimberPhysics.Core.PhysicsSimulator";
