@@ -26,6 +26,7 @@ internal static class OptimizationToggles
         new("FaunaPrewarm", "Keystone fauna prewarming", "Prewarms Cow, Bull and Deer templates\nafter game loading."),
         new("SoilReset", "Soil contamination reset", "Optimizes contamination cleanup work.\nDoes not throttle soil simulation ticks."),
         new("SuperCursor", "SuperCursor update smoothing", "Reduces frequent informational refreshes.\nDoes not delay player tool actions."),
+        new("SWC", "SWC scans + harvest safety", "Spreads harvest/planting scans over 4 ticks.\nProtects workplace changes during harvesting."),
         new("PhysicsCatchup", "TimberPhysics catch-up limiter", "Limits expensive accumulated physics substeps.\nMay drop excess catch-up under overload."),
         new("PhysicsCollider", "TimberPhysics collider merging", "Combines terrain colliders in 32x32 chunks.\nUpdates changed chunks in batches."),
         new("GcSmoother", "Incremental GC smoothing", "Applies only when Unity supports incremental GC.\nOtherwise retains vanilla GC."),
