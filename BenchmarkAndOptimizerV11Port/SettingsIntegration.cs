@@ -47,7 +47,36 @@ public sealed class OptimizerSettingsOwner(
     public override string ModId => "BenchmarkAndOptimizerV11";
     public override ModSettingsContext ChangeableOn => ModSettingsContext.All;
 
-    public OptimizerUiSetting Optimizer { get; } = new();
+    public TBOptimizerUiSetting Optimizations { get; } = new();
+    public OptimizerUiSetting LegacyIntervals { get; } = new();
+}
+
+public sealed class TBOptimizerUiSetting()
+    : NonPersistentSetting(ModSettingDescriptor.Create("TB Optimizer"))
+{
+    public override void Reset() { }
+}
+
+public sealed class TBOptimizerPanel : VisualElement
+{
+    public TBOptimizerPanel()
+    {
+        this.SetPadding(8);
+        this.AddGameLabel("TB Optimizer — optimizations", bold: true).SetMarginBottom(6);
+        this.AddGameLabel("All changes take effect after restarting Timberborn.")
+            .SetMarginBottom(10);
+        // Keep content at natural width; no explicit minimum width or
+        // horizontal scroller. Explanations are intentionally short.
+        foreach (var item in OptimizationToggles.Options)
+        {
+            var group = this.AddChild().SetMarginBottom(11);
+            var key = item.Key;
+            var toggle = group.AddToggle(item.Label,
+                onValueChanged: value => OptimizationToggles.Set(key, value));
+            toggle.SetValueWithoutNotify(OptimizationToggles.Enabled(key));
+            group.AddGameLabel(item.Description).SetMarginBottom(2);
+        }
+    }
 }
 
 public sealed class OptimizerUiSetting()
@@ -64,6 +93,12 @@ public sealed class OptimizerSettingElementFactory(
 
     public bool TryCreateElement(ModSetting modSetting, out IModSettingElement? element)
     {
+        if (modSetting is TBOptimizerUiSetting)
+        {
+            element = new ModSettingElement(new TBOptimizerPanel(), modSetting);
+            return true;
+        }
+
         if (modSetting is OptimizerUiSetting)
         {
             element = new ModSettingElement(new OptimizerPanel(veInit), modSetting);
