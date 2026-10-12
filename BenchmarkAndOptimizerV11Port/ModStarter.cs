@@ -15,6 +15,8 @@ public sealed class ModStarter : IModStarter
         // Separate EBR-only runtime: no general optimizer setup, UI, logging,
         // GC/physics/preview hooks or broad profiling.
         var harmony = new Harmony("tharbad08.EBROptimizations");
+        if (!EbrDeferredDrainHook.Install(harmony))
+            return; // Fail closed: deferred nav updates would otherwise never drain.
         ExtendedBuilderReachNavOptimizer.Patch(harmony);
         EbrVerifiedNoOpFastPath.Patch(harmony);
     }
