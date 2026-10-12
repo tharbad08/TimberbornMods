@@ -12,10 +12,11 @@ public sealed class ModStarter : IModStarter
 {
     public void StartMod(IModEnvironment modEnvironment)
     {
-        var harmony = new Harmony("tharbad08.BenchmarkAndOptimizerV11");
-        Runtime.Initialize(modEnvironment.ModPath, harmony);
-
-        Runtime.Log($"loaded; config={Runtime.ConfigPath}; normal throttling uses direct method patches");
+        // Separate EBR-only runtime: no general optimizer setup, UI, logging,
+        // GC/physics/preview hooks or broad profiling.
+        var harmony = new Harmony("tharbad08.EBROptimizations");
+        ExtendedBuilderReachNavOptimizer.Patch(harmony);
+        EbrVerifiedNoOpFastPath.Patch(harmony);
     }
 }
 
