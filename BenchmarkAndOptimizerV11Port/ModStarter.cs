@@ -9926,6 +9926,13 @@ internal static class Runtime
 
     public static void RefreshDirectThrottlePatches()
     {
+        // A disabled advanced-interval feature must remain disabled even
+        // after a settings reload or a UI control changes.
+        if (!OptimizationToggles.Enabled("Intervals"))
+        {
+            RemoveDirectThrottlePatches();
+            return;
+        }
         if (_harmony is null || BenchmarkActive)
         {
             return;
