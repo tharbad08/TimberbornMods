@@ -44,7 +44,7 @@ public sealed class OptimizerSettingsOwner(
     ModRepository repository
 ) : ModSettingsOwner(settings, registry, repository)
 {
-    public override string ModId => "BenchmarkAndOptimizerV11";
+    public override string ModId => "TBOptimizer";
     public override ModSettingsContext ChangeableOn => ModSettingsContext.All;
 
     public TBOptimizerUiSetting Optimizations { get; } = new();
