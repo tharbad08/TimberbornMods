@@ -1,12 +1,20 @@
 {
-  "Name": "Benchmark & Optimizer (v1.1 Port)",
+  "Name": "EBR Optimizations",
   "Version": "1.1.101",
-  "Id": "BenchmarkAndOptimizerV11",
+  "Id": "TBEBROptimizations",
   "MinimumGameVersion": "1.1.1.0",
-  "Description": "Timberborn v1.1 port of Benchmark & Optimizer with live ModSettings + TimberUi controls and protected core simulation systems.",
+  "Description": "Extended Builder Reach 8x8 spatial navigation filtering and safe large-update batching.",
   "RequiredMods": [
-    { "Id": "Harmony" },
-    { "Id": "eMka.ModSettings", "MinimumVersion": "1.1.1.0" },
-    { "Id": "TimberUi", "MinimumVersion": "11.0.1" }
+    {
+      "Id": "Harmony"
+    },
+    {
+      "Id": "eMka.ModSettings",
+      "MinimumVersion": "1.1.1.0"
+    },
+    {
+      "Id": "TimberUi",
+      "MinimumVersion": "11.0.1"
+    }
   ]
 }
