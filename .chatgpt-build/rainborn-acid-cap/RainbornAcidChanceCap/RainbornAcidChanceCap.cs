@@ -10,12 +10,12 @@ using Timberborn.ModManagerScene;
 using Timberborn.Modding;
 using Timberborn.SettingsSystem;
 
-namespace Shay.RainbornAcidChanceCap
+namespace tharbad08.RainbornAcidChanceCap
 {
     // Built against Timberborn 1.1 API surface.
     public sealed class ModStarter : IModStarter
     {
-        private const string HarmonyId = "Shay.RainbornAcidChanceCap";
+        private const string HarmonyId = "tharbad08.RainbornAcidChanceCap";
 
         public void StartMod(IModEnvironment modEnvironment)
         {
@@ -53,8 +53,8 @@ namespace Shay.RainbornAcidChanceCap
             0,
             100,
             ModSettingDescriptor
-                .CreateLocalized("Shay.RainbornAcidChanceCap.Settings.MaxChance")
-                .SetLocalizedTooltip("Shay.RainbornAcidChanceCap.Settings.MaxChance.Tooltip"));
+                .CreateLocalized("tharbad08.RainbornAcidChanceCap.Settings.MaxChance")
+                .SetLocalizedTooltip("tharbad08.RainbornAcidChanceCap.Settings.MaxChance.Tooltip"));
 
         public AcidChanceCapSettings(
             ISettings settings,
@@ -65,9 +65,9 @@ namespace Shay.RainbornAcidChanceCap
             MaxChancePercent.ValueChanged += (_, value) => CurrentPercent = value;
         }
 
-        public override string HeaderLocKey => "Shay.RainbornAcidChanceCap.Settings.Header";
+        public override string HeaderLocKey => "tharbad08.RainbornAcidChanceCap.Settings.Header";
         public override ModSettingsContext ChangeableOn => ModSettingsContext.All;
-        protected override string ModId => "Shay.RainbornAcidChanceCap";
+        protected override string ModId => "tharbad08.RainbornAcidChanceCap";
 
         internal static float CurrentFraction()
         {
