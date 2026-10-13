@@ -1,7 +1,7 @@
 {
   "Name": "Rainborn Acid Chance Cap",
-  "Version": "0.1.2",
-  "Id": "Shay.RainbornAcidChanceCap",
+  "Version": "0.1.3",
+  "Id": "tharbad08.RainbornAcidChanceCap",
   "MinimumGameVersion": "1.1.0.0",
   "Description": "Temporary compatibility add-on for Academic's Rainborn. Adds a configurable maximum acid-rain probability while preserving Rainborn's escalation timing.",
   "RequiredMods": [
