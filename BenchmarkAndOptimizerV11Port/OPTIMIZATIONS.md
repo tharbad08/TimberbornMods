@@ -93,3 +93,18 @@
 4. Separate **compilation**, **installed patch**, **equivalent gameplay semantics**, and **measured FPS/game-speed gain**; no one implies the others.
 
 **Historical evidence:** [original development notes and diagnostic sources](https://github.com/tharbad08/TimberbornMods/tree/chatgpt/BenchmarkAndOptimizerV11Port/BenchmarkAndOptimizerV11Port). The branch's legacy source contains experiments, including unsafe/dormant paths; do not ship it as a replacement for the maintained \`TB-Optimizer\` source.
+
+### EBR PR parity and test build (2026-10-13)
+
+The TB Optimizer EBR dispatcher is based on the independent upstream-facing
+`pr/ebr-maintainer-friendly-v11` implementation. The Optimizer version needs
+an additional **postfix on EBR's existing `UpdateAccesses` method** to keep its
+spatial index current without modifying the installed EBR DLL. In contrast,
+upstream EBR calls `BoundsChanged` directly. It is skipped if EBR is absent,
+if disabled in TB Optimizer settings, or if an upstream EBR DLL already includes
+its own navigation optimizer. Never use the standalone EBR dispatcher concurrently.
+
+The component postfix only changes the index; EBR still generates real accesses.
+The 1,024-candidate deferral changes notification timing and needs explicit
+in-game validation (stalled demolition jobs, x1/x3 achieved simulation speed,
+large navmesh rebuilds and save/load). No benchmark logging is enabled.
