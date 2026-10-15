@@ -8,13 +8,13 @@ using Timberborn.ModManagerScene;
 
 namespace BenchmarkAndOptimizerV11;
 
-internal static class DispatcherPatcher
+static class DispatcherPatcher
 {
-    private static bool _patched;
+    static bool isPatched;
 
-    private sealed record Target(string TypeName, string MethodName, string PrefixName);
+    readonly record struct Target(string TypeName, string MethodName, string PrefixName);
 
-    private static readonly Target[] Targets =
+    static readonly Target[] Targets =
     {
         new("Timberborn.TickSystem.TickableSingletonService", "TickSingletons", nameof(PrefixTickSingletons)),
         new("Timberborn.TickSystem.TickableEntity", "TickTickableComponents", nameof(PrefixTickableComponents)),
@@ -24,7 +24,7 @@ internal static class DispatcherPatcher
 
     public static void Patch(Harmony harmony)
     {
-        if (_patched)
+        if (isPatched)
         {
             return;
         }
@@ -45,12 +45,12 @@ internal static class DispatcherPatcher
             Runtime.Log($"benchmark patch installed: {target.TypeName}.{target.MethodName}");
         }
 
-        _patched = true;
+        isPatched = true;
     }
 
     public static void Unpatch(Harmony harmony)
     {
-        if (!_patched)
+        if (!isPatched)
         {
             return;
         }
@@ -65,7 +65,7 @@ internal static class DispatcherPatcher
             }
         }
 
-        _patched = false;
+        isPatched = false;
         Runtime.Log("benchmark dispatcher patches removed");
     }
 

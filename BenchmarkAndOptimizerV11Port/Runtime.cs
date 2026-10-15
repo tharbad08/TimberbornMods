@@ -8,44 +8,44 @@ using Timberborn.ModManagerScene;
 
 namespace BenchmarkAndOptimizerV11;
 
-internal static class Runtime
+static class Runtime
 {
-    private static readonly object Sync = new();
-    private static readonly ConditionalWeakTable<object, CounterState> Counters = new();
-    private static readonly ConditionalWeakTable<object, OwnerDispatchPlans> DispatchPlans = new();
-    private static readonly Dictionary<string, ItemAdapter> AdapterCache = new(StringComparer.Ordinal);
-    private static readonly HashSet<string> UnsupportedAdapters = new(StringComparer.Ordinal);
-    private static readonly HashSet<string> LoggedWarnings = new(StringComparer.Ordinal);
-    private static readonly Dictionary<string, BenchStat> BenchStats = new(StringComparer.Ordinal);
-    private static readonly HashSet<string> Discovered = new(StringComparer.Ordinal);
-    private static readonly Dictionary<string, string> OriginByType = new(StringComparer.Ordinal);
-    private static readonly Dictionary<string, string> AssemblyNameByType = new(StringComparer.Ordinal);
-    private static readonly Dictionary<string, string> OriginByAssemblyPath = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, string> OriginByAssemblyName = new(StringComparer.OrdinalIgnoreCase);
-    private static readonly Dictionary<string, Type> DiscoveredTypes = new(StringComparer.Ordinal);
-    private static readonly Dictionary<string, MethodInfo> DirectMethodsByType = new(StringComparer.Ordinal);
-    private static readonly HashSet<MethodBase> DirectPatchedMethods = new();
-    private static Harmony? _harmony;
-    private static bool _benchmarkRunning;
-    private static int _settingsGeneration;
+    static readonly object Sync = new();
+    static readonly ConditionalWeakTable<object, CounterState> Counters = new();
+    static readonly ConditionalWeakTable<object, OwnerDispatchPlans> DispatchPlans = new();
+    static readonly Dictionary<string, ItemAdapter> AdapterCache = new(StringComparer.Ordinal);
+    static readonly HashSet<string> UnsupportedAdapters = new(StringComparer.Ordinal);
+    static readonly HashSet<string> LoggedWarnings = new(StringComparer.Ordinal);
+    static readonly Dictionary<string, BenchStat> BenchStats = new(StringComparer.Ordinal);
+    static readonly HashSet<string> Discovered = new(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> OriginByType = new(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> AssemblyNameByType = new(StringComparer.Ordinal);
+    static readonly Dictionary<string, string> OriginByAssemblyPath = new(StringComparer.OrdinalIgnoreCase);
+    static readonly Dictionary<string, string> OriginByAssemblyName = new(StringComparer.OrdinalIgnoreCase);
+    static readonly Dictionary<string, Type> DiscoveredTypes = new(StringComparer.Ordinal);
+    static readonly Dictionary<string, MethodInfo> DirectMethodsByType = new(StringComparer.Ordinal);
+    static readonly HashSet<MethodBase> DirectPatchedMethods = [];
+    static Harmony? harmonyInstance;
+    static bool benchmarkRunning;
+    static int settingsGeneration;
 
-    private static Settings _settings = new();
-    private static DateTime _nextReloadUtc = DateTime.MinValue;
-    private static DateTime _configWriteUtc = DateTime.MinValue;
-    private static long _benchmarkStart;
-    private static bool _benchmarkCompleted;
+    static Settings currentSettings = new();
+    static DateTime nextReloadUtc = DateTime.MinValue;
+    static DateTime configWriteUtc = DateTime.MinValue;
+    static long benchmarkStart;
+    static bool benchmarkCompleted;
 
     public static string ModPath { get; private set; } = "";
     public static string ConfigPath => Path.Combine(ModPath, "optimizer-v11.json");
-    private static string DiscoveredPath => Path.Combine(ModPath, "optimizer-v11-discovered.txt");
-    private static string FreezeLogPath => Path.Combine(ModPath, "optimizer-v11-freezes.log");
+    static string DiscoveredPath => Path.Combine(ModPath, "optimizer-v11-discovered.txt");
+    static string FreezeLogPath => Path.Combine(ModPath, "optimizer-v11-freezes.log");
 
     public const int BenchmarkDurationSeconds = 120;
 
     // These systems own or synchronize authoritative simulation state. Skipping
     // their updates can break ordering assumptions and leave the world in a
     // partially-updated state, so they are permanently pinned to vanilla cadence.
-    private static readonly HashSet<string> ProtectedTypeNames = new(StringComparer.Ordinal)
+    static readonly HashSet<string> ProtectedTypeNames = new(StringComparer.Ordinal)
     {
         "TickableBucketService",
         "TickableEntity",
@@ -69,8 +69,8 @@ internal static class Runtime
         "FramesPerSecondCounter",
     };
 
-    public static bool Enabled => _settings.Enabled;
-    public static int DefaultInterval => _settings.DefaultInterval;
+    public static bool Enabled => currentSettings.Enabled;
+    public static int DefaultInterval => currentSettings.DefaultInterval;
     public static bool IsProtected(string typeName) =>
         ProtectedTypeNames.Contains(ShortTypeName(typeName));
     public static IReadOnlyCollection<string> KnownTypes
@@ -139,8 +139,8 @@ internal static class Runtime
     {
         get
         {
-            if (!BenchmarkActive) return 0;
-            var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp() - _benchmarkStart)
+            if (!BenchmarkActive) { return 0; }
+            var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp() - benchmarkStart)
                           / (double)System.Diagnostics.Stopwatch.Frequency;
             return Math.Max(0, BenchmarkDurationSeconds - elapsed);
         }
@@ -148,17 +148,17 @@ internal static class Runtime
 
     public static void SetEnabled(bool value)
     {
-        _settings.Enabled = value;
-        _settingsGeneration++;
-        SaveSettings(_settings);
+        currentSettings.Enabled = value;
+        settingsGeneration++;
+        SaveSettings(currentSettings);
         RefreshDirectThrottlePatches();
     }
 
     public static void SetDefaultInterval(int value)
     {
-        _settings.DefaultInterval = Math.Clamp(value, 1, 1000);
-        _settingsGeneration++;
-        SaveSettings(_settings);
+        currentSettings.DefaultInterval = Math.Clamp(value, 1, 1000);
+        settingsGeneration++;
+        SaveSettings(currentSettings);
         RefreshDirectThrottlePatches();
     }
 
@@ -169,18 +169,18 @@ internal static class Runtime
             return 1;
         }
 
-        if (_settings.Intervals.TryGetValue(typeName, out var value))
+        if (currentSettings.Intervals.TryGetValue(typeName, out var value))
         {
             return Math.Clamp(value, 1, 1000);
         }
 
         var full = Discovered.FirstOrDefault(x => ShortTypeName(x) == typeName);
-        if (full is not null && _settings.Intervals.TryGetValue(full, out value))
+        if (full is not null && currentSettings.Intervals.TryGetValue(full, out value))
         {
             return Math.Clamp(value, 1, 1000);
         }
 
-        return _settings.DefaultInterval;
+        return currentSettings.DefaultInterval;
     }
 
     public static void SetInterval(string typeName, int value)
@@ -189,9 +189,9 @@ internal static class Runtime
 
         if (IsProtected(typeName))
         {
-            _settings.Intervals[key] = 1;
-            _settingsGeneration++;
-            SaveSettings(_settings);
+            currentSettings.Intervals[key] = 1;
+            settingsGeneration++;
+            SaveSettings(currentSettings);
             RefreshDirectThrottlePatches();
             LogOnce($"protected-set:{ShortTypeName(typeName)}",
                 $"protected system {typeName} is permanently pinned to interval=1");
@@ -199,47 +199,47 @@ internal static class Runtime
         }
 
         value = Math.Clamp(value, 1, 1000);
-        _settings.Intervals[key] = value;
-        _settingsGeneration++;
-        SaveSettings(_settings);
+        currentSettings.Intervals[key] = value;
+        settingsGeneration++;
+        SaveSettings(currentSettings);
         RefreshDirectThrottlePatches();
     }
 
     public static void ResetIntervals()
     {
-        _settings.DefaultInterval = 1;
-        _settings.Intervals.Clear();
-        _settingsGeneration++;
-        SaveSettings(_settings);
+        currentSettings.DefaultInterval = 1;
+        currentSettings.Intervals.Clear();
+        settingsGeneration++;
+        SaveSettings(currentSettings);
         RefreshDirectThrottlePatches();
         Log("all optimizer intervals reset to vanilla (1)");
     }
 
     public static void StartBenchmark()
     {
-        if (BenchmarkActive) return;
+        if (BenchmarkActive) { return; }
         lock (Sync) BenchStats.Clear();
         // Benchmark dispatcher is observational at protected vanilla cadence:
         // the per-class interval shortcut is suppressed during benchmarks.
         RemoveDirectThrottlePatches();
-        if (_harmony is not null)
+        if (harmonyInstance is not null)
         {
-            DispatcherPatcher.Patch(_harmony);
-            TimberPhysicsBenchmarkPatcher.Patch(_harmony);
-            FrameProfileSampler.Patch(_harmony);
+            DispatcherPatcher.Patch(harmonyInstance);
+            TimberPhysicsBenchmarkPatcher.Patch(harmonyInstance);
+            FrameProfileSampler.Patch(harmonyInstance);
         }
-        _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
-        _benchmarkCompleted = false;
-        _benchmarkRunning = true;
+        benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        benchmarkCompleted = false;
+        benchmarkRunning = true;
     }
 
-    private static string ShortTypeName(string value)
+    static string ShortTypeName(string value)
     {
         var i = value.LastIndexOf('.');
         return i < 0 ? value : value[(i + 1)..];
     }
 
-    private static Type? ResolveDiscoveredTypeLocked(string typeName)
+    static Type? ResolveDiscoveredTypeLocked(string typeName)
     {
         if (DiscoveredTypes.TryGetValue(typeName, out var exact))
         {
@@ -257,7 +257,7 @@ internal static class Runtime
         return null;
     }
 
-    private static int InheritanceDepth(Type concreteType, Type declaringType)
+    static int InheritanceDepth(Type concreteType, Type declaringType)
     {
         var depth = 0;
         for (var current = concreteType; current is not null; current = current.BaseType)
@@ -273,7 +273,7 @@ internal static class Runtime
         return -1;
     }
 
-    private static string FormatMethodTarget(MethodInfo method)
+    static string FormatMethodTarget(MethodInfo method)
     {
         var declaring = method.DeclaringType;
         return declaring is null
@@ -281,7 +281,7 @@ internal static class Runtime
             : $"{FormatTypeName(declaring)}.{method.Name}";
     }
 
-    private static string FormatTypeName(Type type)
+    static string FormatTypeName(Type type)
     {
         if (type.IsByRef)
         {
@@ -313,24 +313,24 @@ internal static class Runtime
 
     public static void Initialize(string modPath, Harmony harmony)
     {
-        _harmony = harmony;
+        harmonyInstance = harmony;
         ModPath = modPath;
         Directory.CreateDirectory(ModPath);
         // CSV and frame samples are written only for an explicitly started benchmark.
 
         if (!File.Exists(ConfigPath))
         {
-            _settings = Settings.CreateDefault();
-            SaveSettings(_settings);
+            currentSettings = Settings.CreateDefault();
+            SaveSettings(currentSettings);
         }
 
         ReloadConfig(force: true);
 
         // Benchmarks are session-only and must never be resumed from persisted settings.
-        _settings.BenchmarkSeconds = 0;
-        _benchmarkRunning = false;
-        _benchmarkCompleted = true;
-        _benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
+        currentSettings.BenchmarkSeconds = 0;
+        benchmarkRunning = false;
+        benchmarkCompleted = true;
+        benchmarkStart = System.Diagnostics.Stopwatch.GetTimestamp();
 
         // Benchmark-only startup: no game optimizers, startup type-discovery
         // hooks, GC interventions, save hooks or broad profiler scans.
@@ -340,14 +340,14 @@ internal static class Runtime
 
     public static void RefreshDirectThrottlePatches()
     {
-        if (_harmony is null || BenchmarkActive)
+        if (harmonyInstance is null || BenchmarkActive)
         {
             return;
         }
 
         RemoveDirectThrottlePatches();
 
-        if (!_settings.Enabled)
+        if (!currentSettings.Enabled)
         {
             return;
         }
@@ -393,7 +393,7 @@ internal static class Runtime
                 // so each concrete sibling still gets its own configured interval.
                 if (DirectPatchedMethods.Add(method))
                 {
-                    _harmony.Patch(
+                    harmonyInstance.Patch(
                         method,
                         prefix: new HarmonyMethod(prefix) { priority = Priority.First });
 
@@ -419,9 +419,9 @@ internal static class Runtime
         }
     }
 
-    private static void RemoveDirectThrottlePatches()
+    static void RemoveDirectThrottlePatches()
     {
-        if (_harmony is null || DirectPatchedMethods.Count == 0)
+        if (harmonyInstance is null || DirectPatchedMethods.Count == 0)
         {
             return;
         }
@@ -430,7 +430,7 @@ internal static class Runtime
         {
             try
             {
-                _harmony.Unpatch(method, HarmonyPatchType.Prefix, _harmony.Id);
+                harmonyInstance.Unpatch(method, HarmonyPatchType.Prefix, harmonyInstance.Id);
             }
             catch
             {
@@ -444,7 +444,7 @@ internal static class Runtime
 
     public static bool DirectThrottlePrefix(object __instance, MethodBase __originalMethod)
     {
-        if (!_settings.Enabled || BenchmarkActive || IsProtected(__instance.GetType()))
+        if (!currentSettings.Enabled || BenchmarkActive || IsProtected(__instance.GetType()))
         {
             return true;
         }
@@ -452,7 +452,7 @@ internal static class Runtime
         return ShouldRun(__instance);
     }
 
-    private static MethodInfo ResolveImplementedMethod(MethodInfo method)
+    static MethodInfo ResolveImplementedMethod(MethodInfo method)
     {
         var declaringType = method.DeclaringType;
         if (declaringType is null || method.ReflectedType == declaringType)
@@ -468,7 +468,7 @@ internal static class Runtime
             ?? method;
     }
 
-    private static MethodInfo? FindDirectTickMethod(Type type)
+    static MethodInfo? FindDirectTickMethod(Type type)
     {
         foreach (var methodName in new[] { "Tick", "UpdateSingleton", "LateUpdateSingleton", "StartAndTick" })
         {
@@ -482,7 +482,7 @@ internal static class Runtime
         return null;
     }
 
-    private static void DiscoverLoadedOptimizableTypes()
+    static void DiscoverLoadedOptimizableTypes()
     {
         foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
         {
@@ -544,7 +544,7 @@ internal static class Runtime
     {
         ReloadConfig(force: false);
 
-        if (!_settings.Enabled)
+        if (!currentSettings.Enabled)
         {
             return true;
         }
@@ -629,7 +629,7 @@ internal static class Runtime
         }
     }
 
-    private static DispatchPlan? GetDispatchPlan(
+    static DispatchPlan? GetDispatchPlan(
         object owner,
         IList list,
         string listFieldName,
@@ -642,7 +642,7 @@ internal static class Runtime
         lock (ownerPlans.Gate)
         {
             if (ownerPlans.Plans.TryGetValue(listFieldName, out var cached)
-                && cached.SettingsGeneration == _settingsGeneration
+                && cached.SettingsGeneration == settingsGeneration
                 && cached.ListCount == list.Count
                 && SameBoundaryItems(cached, list))
             {
@@ -692,7 +692,7 @@ internal static class Runtime
             }
 
             var plan = new DispatchPlan(
-                _settingsGeneration,
+                settingsGeneration,
                 list.Count,
                 list.Count > 0 ? list[0] : null,
                 list.Count > 1 ? list[list.Count - 1] : null,
@@ -704,7 +704,7 @@ internal static class Runtime
         }
     }
 
-    private static bool SameBoundaryItems(DispatchPlan plan, IList list)
+    static bool SameBoundaryItems(DispatchPlan plan, IList list)
     {
         if (list.Count == 0)
         {
@@ -719,7 +719,7 @@ internal static class Runtime
         return list.Count <= 1 || ReferenceEquals(plan.LastItem, list[list.Count - 1]);
     }
 
-    private static ItemAdapter? GetAdapter(Type itemType, string? actualFieldName, string methodName, string? enabledMemberName)
+    static ItemAdapter? GetAdapter(Type itemType, string? actualFieldName, string methodName, string? enabledMemberName)
     {
         var cacheKey = $"{itemType.AssemblyQualifiedName}|{actualFieldName}|{methodName}|{enabledMemberName}";
 
@@ -818,7 +818,7 @@ internal static class Runtime
         }
     }
 
-    private static bool ShouldRun(object actual)
+    static bool ShouldRun(object actual)
     {
         if (IsProtected(actual.GetType()))
         {
@@ -842,10 +842,10 @@ internal static class Runtime
         return false;
     }
 
-    private static bool IsProtected(Type type) =>
+    static bool IsProtected(Type type) =>
         ProtectedTypeNames.Contains(type.Name);
 
-    private static bool NormalizeProtectedIntervals(Settings settings)
+    static bool NormalizeProtectedIntervals(Settings settings)
     {
         var changed = false;
 
@@ -861,17 +861,17 @@ internal static class Runtime
         return changed;
     }
 
-    private static bool HasActiveThrottles()
+    static bool HasActiveThrottles()
     {
-        if (_settings.DefaultInterval > 1)
+        if (currentSettings.DefaultInterval > 1)
         {
             return true;
         }
 
-        return _settings.Intervals.Values.Any(value => value > 1);
+        return currentSettings.Intervals.Values.Any(value => value > 1);
     }
 
-    private static int GetInterval(Type type)
+    static int GetInterval(Type type)
     {
         if (IsProtected(type))
         {
@@ -880,20 +880,20 @@ internal static class Runtime
 
         var full = type.FullName ?? type.Name;
 
-        if (_settings.Intervals.TryGetValue(full, out var exact))
+        if (currentSettings.Intervals.TryGetValue(full, out var exact))
         {
             return Math.Clamp(exact, 1, 1000);
         }
 
-        if (_settings.Intervals.TryGetValue(type.Name, out var shortName))
+        if (currentSettings.Intervals.TryGetValue(type.Name, out var shortName))
         {
             return Math.Clamp(shortName, 1, 1000);
         }
 
-        return Math.Clamp(_settings.DefaultInterval, 1, 1000);
+        return Math.Clamp(currentSettings.DefaultInterval, 1, 1000);
     }
 
-    private static void Discover(Type type)
+    static void Discover(Type type)
     {
         var name = type.FullName ?? type.Name;
 
@@ -968,7 +968,7 @@ internal static class Runtime
         }
     }
 
-    private static string ResolveOrigin(Type type)
+    static string ResolveOrigin(Type type)
     {
         string location;
         try
@@ -1064,7 +1064,7 @@ internal static class Runtime
         return origin;
     }
 
-    private static string? FindNearestManifest(string assemblyPath)
+    static string? FindNearestManifest(string assemblyPath)
     {
         try
         {
@@ -1086,7 +1086,7 @@ internal static class Runtime
         return null;
     }
 
-    private static string DescribeModOrigin(string manifestPath, string normalizedAssemblyPath)
+    static string DescribeModOrigin(string manifestPath, string normalizedAssemblyPath)
     {
         try
         {
@@ -1140,10 +1140,10 @@ internal static class Runtime
         }
     }
 
-    private static bool BenchmarkActive =>
-        _benchmarkRunning && !_benchmarkCompleted;
+    static bool BenchmarkActive =>
+        benchmarkRunning && !benchmarkCompleted;
 
-    private static void RecordBenchmark(Type type, long elapsedTicks)
+    static void RecordBenchmark(Type type, long elapsedTicks)
     {
         var name = type.FullName ?? type.Name;
 
@@ -1188,22 +1188,22 @@ internal static class Runtime
 
     }
 
-    private static void FinishBenchmarkIfNeeded()
+    static void FinishBenchmarkIfNeeded()
     {
         if (!BenchmarkActive)
         {
             return;
         }
 
-        var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp() - _benchmarkStart)
+        var elapsed = (System.Diagnostics.Stopwatch.GetTimestamp() - benchmarkStart)
                       / (double)System.Diagnostics.Stopwatch.Frequency;
         if (elapsed < BenchmarkDurationSeconds)
         {
             return;
         }
 
-        _benchmarkCompleted = true;
-        _benchmarkRunning = false;
+        benchmarkCompleted = true;
+        benchmarkRunning = false;
 
         var file = Path.Combine(ModPath, $"optimizer-v11-benchmark-{DateTime.Now:yyyyMMdd-HHmmss}.csv");
         var lines = new List<string> { "Type,Origin,TotalMs,Count,AverageMs,MinMs,MaxMs" };
@@ -1223,12 +1223,12 @@ internal static class Runtime
 
         File.WriteAllLines(file, lines);
 
-        FrameProfileSampler.StopAndWrite(_harmony, ModPath);
+        FrameProfileSampler.StopAndWrite(harmonyInstance, ModPath);
 
-        if (_harmony is not null)
+        if (harmonyInstance is not null)
         {
-            TimberPhysicsBenchmarkPatcher.Unpatch(_harmony);
-            DispatcherPatcher.Unpatch(_harmony);
+            TimberPhysicsBenchmarkPatcher.Unpatch(harmonyInstance);
+            DispatcherPatcher.Unpatch(harmonyInstance);
 
             // Return to the configured interval patches after observational CSV benchmarking.
             RefreshDirectThrottlePatches();
@@ -1237,21 +1237,21 @@ internal static class Runtime
         Log($"benchmark complete: {file}");
     }
 
-    private static double TicksToMs(long ticks) =>
+    static double TicksToMs(long ticks) =>
         ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
 
-    private static string Csv(string value) =>
+    static string Csv(string value) =>
         "\"" + value.Replace("\"", "\"\"") + "\"";
 
-    private static void ReloadConfig(bool force)
+    static void ReloadConfig(bool force)
     {
         var now = DateTime.UtcNow;
-        if (!force && now < _nextReloadUtc)
+        if (!force && now < nextReloadUtc)
         {
             return;
         }
 
-        _nextReloadUtc = now.AddSeconds(Math.Max(1, _settings.ReloadSeconds));
+        nextReloadUtc = now.AddSeconds(Math.Max(1, currentSettings.ReloadSeconds));
 
         try
         {
@@ -1261,7 +1261,7 @@ internal static class Runtime
             }
 
             var writeUtc = File.GetLastWriteTimeUtc(ConfigPath);
-            if (!force && writeUtc == _configWriteUtc)
+            if (!force && writeUtc == configWriteUtc)
             {
                 return;
             }
@@ -1277,13 +1277,13 @@ internal static class Runtime
             var soilGcReliefApplied = ApplySoilContaminationGcReliefMigration(loaded);
             var soilGcReliefV2Applied = ApplySoilContaminationGcReliefV2Migration(loaded);
             var protectedValuesCorrected = NormalizeProtectedIntervals(loaded);
-            _settings = loaded;
-            _settingsGeneration++;
-            _configWriteUtc = writeUtc;
+            currentSettings = loaded;
+            settingsGeneration++;
+            configWriteUtc = writeUtc;
 
             if (protectedValuesCorrected || soilGcReliefApplied || soilGcReliefV2Applied)
             {
-                SaveSettings(_settings);
+                SaveSettings(currentSettings);
                 if (protectedValuesCorrected)
                 {
                     Log("protected optimizer intervals found in config and reset to 1");
@@ -1305,7 +1305,7 @@ internal static class Runtime
             {
                 RefreshDirectThrottlePatches();
             }
-            Log($"config reloaded: {_settings.Intervals.Count} explicit interval(s)");
+            Log($"config reloaded: {currentSettings.Intervals.Count} explicit interval(s)");
         }
         catch (Exception ex)
         {
@@ -1313,7 +1313,7 @@ internal static class Runtime
         }
     }
 
-    private static bool ApplySoilContaminationGcReliefMigration(Settings settings)
+    static bool ApplySoilContaminationGcReliefMigration(Settings settings)
     {
         if (settings.SoilContaminationGcReliefApplied)
         {
@@ -1341,7 +1341,7 @@ internal static class Runtime
         return true;
     }
 
-    private static bool ApplySoilContaminationGcReliefV2Migration(Settings settings)
+    static bool ApplySoilContaminationGcReliefV2Migration(Settings settings)
     {
         if (settings.SoilContaminationGcReliefV2Applied)
         {
@@ -1371,12 +1371,12 @@ internal static class Runtime
         return true;
     }
 
-    private static void SaveSettings(Settings settings)
+    static void SaveSettings(Settings settings)
     {
         NormalizeProtectedIntervals(settings);
         var json = JsonConvert.SerializeObject(settings, Formatting.Indented);
         File.WriteAllText(ConfigPath, json + Environment.NewLine);
-        _configWriteUtc = File.GetLastWriteTimeUtc(ConfigPath);
+        configWriteUtc = File.GetLastWriteTimeUtc(ConfigPath);
     }
 
 
@@ -1394,28 +1394,28 @@ internal static class Runtime
     }
 
     [System.Diagnostics.Conditional("OPTIMIZER_DIAGNOSTICS")]
-    private static void LogOnce(string key, string message)
+    static void LogOnce(string key, string message)
     {
         // Diagnostics are retired; no warning tracking or disk I/O.
     }
 
-    private static void ResetSessionLogs()
+    static void ResetSessionLogs()
     {
         // Do not touch pre-existing log files and do not create new ones.
     }
 
-    private sealed class CounterState
+    sealed class CounterState
     {
         public int Remaining;
     }
 
-    private sealed class OwnerDispatchPlans
+    sealed class OwnerDispatchPlans
     {
         public object Gate { get; } = new();
         public Dictionary<string, DispatchPlan> Plans { get; } = new(StringComparer.Ordinal);
     }
 
-    private sealed record DispatchPlan(
+    sealed record DispatchPlan(
         int SettingsGeneration,
         int ListCount,
         object? FirstItem,
@@ -1423,13 +1423,13 @@ internal static class Runtime
         bool HasThrottle,
         DispatchEntry[] Entries);
 
-    private sealed record DispatchEntry(
+    sealed record DispatchEntry(
         object Item,
         ItemAdapter Adapter,
         object Actual,
         Type ActualType);
 
-    private sealed class BenchStat
+    sealed class BenchStat
     {
         public string Origin = "UNKNOWN";
         public long Count;
@@ -1438,7 +1438,7 @@ internal static class Runtime
         public long MaxTicks;
     }
 
-    private sealed record ItemAdapter(
+    sealed record ItemAdapter(
         string? ActualFieldName,
         string? EnabledMemberName,
         Func<object, object?> ActualGetter,
@@ -1449,7 +1449,7 @@ internal static class Runtime
         public bool IsEnabled(object item) => Enabled(item);
     }
 }
-internal sealed class Settings
+sealed class Settings
 {
     public bool Enabled { get; set; } = true;
     public int DefaultInterval { get; set; } = 1;

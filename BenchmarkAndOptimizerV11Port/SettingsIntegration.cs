@@ -132,14 +132,14 @@ public sealed class OptimizerSettingsBoxWidthService(
 
 public sealed class OptimizerPanel : VisualElement
 {
-    private readonly VisualElement _wellKnown;
-    private readonly VisualElement _others;
-    private readonly Label _status;
-    private string _filter = "";
+    readonly VisualElement wellKnownPanel;
+    readonly VisualElement otherSystemsPanel;
+    readonly Label statusLabel;
+    string filterText = "";
     // Cache rendered controls: filtering must not tear down a focused UI tree.
-    private readonly List<(VisualElement Element, string Name, string Origin)> _rows = new();
+    readonly List<(VisualElement Element, string Name, string Origin)> systemRows = [];
 
-    private static readonly string[] WellKnown =
+    static readonly string[] WellKnown =
     {
         "PhysicsSimulator",
         "BehaviorManager",
@@ -182,14 +182,14 @@ public sealed class OptimizerPanel : VisualElement
         actions.AddMenuButton("Refresh detected systems", onClick: Rebuild);
         actions.SetMarginBottom(8);
 
-        _status = this.AddGameLabel("");
-        _status.SetMarginBottom(8);
+        statusLabel = this.AddGameLabel("");
+        statusLabel.SetMarginBottom(8);
 
         // Never Clear()/recreate UI controls during a text-field change callback.
         // The input event may run inside Unity's LateUpdate/UI dispatch.
         this.AddTextField("Filter", keyword =>
         {
-            _filter = keyword?.Trim() ?? "";
+            filterText = keyword?.Trim() ?? "";
             try
             {
                 ApplyFilter();
@@ -214,28 +214,28 @@ public sealed class OptimizerPanel : VisualElement
         var scrollContent = scroll.AddChild()
             .SetMinSize(1200f, null);
 
-        _wellKnown = scrollContent.AddChild();
-        _others = scrollContent.AddChild();
+        wellKnownPanel = scrollContent.AddChild();
+        otherSystemsPanel = scrollContent.AddChild();
 
         Rebuild();
     }
 
-    private void UpdateStatus()
+    void UpdateStatus()
     {
-        _status.text = Runtime.IsBenchmarking
+        statusLabel.text = Runtime.IsBenchmarking
             ? $"Mode: {Runtime.Mode} — {Runtime.BenchmarkRemainingSeconds:F1}s remaining"
             : $"Mode: {Runtime.Mode} — Detected systems: {Runtime.KnownTypes.Count}";
     }
 
-    private void Rebuild()
+    void Rebuild()
     {
         UpdateStatus();
-        _wellKnown.Clear();
-        _others.Clear();
-        _rows.Clear();
+        wellKnownPanel.Clear();
+        otherSystemsPanel.Clear();
+        systemRows.Clear();
 
-        _wellKnown.AddGameLabel("Well-known systems", bold: true).SetMarginBottom(5);
-        _others.AddGameLabel("Other detected systems", bold: true).SetMargin(10, 0, 5, 0);
+        wellKnownPanel.AddGameLabel("Well-known systems", bold: true).SetMarginBottom(5);
+        otherSystemsPanel.AddGameLabel("Other detected systems", bold: true).SetMargin(10, 0, 5, 0);
 
         var names = WellKnown
             .Concat(Runtime.KnownTypes)
@@ -247,28 +247,28 @@ public sealed class OptimizerPanel : VisualElement
         {
             var origin = Runtime.GetOrigin(name);
             var row = AddSystemRow(
-                Array.IndexOf(WellKnown, name) >= 0 ? _wellKnown : _others,
+                Array.IndexOf(WellKnown, name) >= 0 ? wellKnownPanel : otherSystemsPanel,
                 name, origin);
-            _rows.Add((row, name, origin));
+            systemRows.Add((row, name, origin));
         }
 
         ApplyFilter();
     }
 
-    private void ApplyFilter()
+    void ApplyFilter()
     {
         // Hiding existing rows is safe even during a UI text-change callback.
         // Refresh/reset buttons may still explicitly rebuild the list.
-        foreach (var row in _rows)
+        foreach (var row in systemRows)
         {
-            var matches = string.IsNullOrEmpty(_filter)
-                || row.Name.Contains(_filter, StringComparison.OrdinalIgnoreCase)
-                || row.Origin.Contains(_filter, StringComparison.OrdinalIgnoreCase);
+            var matches = string.IsNullOrEmpty(filterText)
+                || row.Name.Contains(filterText, StringComparison.OrdinalIgnoreCase)
+                || row.Origin.Contains(filterText, StringComparison.OrdinalIgnoreCase);
             row.Element.style.display = matches ? DisplayStyle.Flex : DisplayStyle.None;
         }
     }
 
-    private static VisualElement AddSystemRow(VisualElement parent, string typeName, string origin)
+    static VisualElement AddSystemRow(VisualElement parent, string typeName, string origin)
     {
         var current = Runtime.GetInterval(typeName);
         var isProtected = Runtime.IsProtected(typeName);
@@ -417,7 +417,7 @@ public sealed class OptimizerOriginRegistryService(
         }
     }
 
-    private static string? ExtractWorkshopId(string path)
+    static string? ExtractWorkshopId(string path)
     {
         var normalized = path.Replace('\\', '/');
         const string marker = "/steamapps/workshop/content/1062090/";
@@ -439,21 +439,21 @@ public sealed class OptimizerMenuService(
     ModRepository repository
 ) : ILoadableSingleton
 {
-    private readonly GameOptionsBox _optionsBox = (GameOptionsBox)optionsBox;
-    private Mod? _mod;
+    readonly GameOptionsBox settingsOptionsBox = (GameOptionsBox)optionsBox;
+    Mod? currentMod;
 
     public void Load()
     {
         try
         {
-            _mod = ResolveMod(repository, "BenchmarkAndOptimizerV11");
-            if (_mod is null)
+            currentMod = ResolveMod(repository, "BenchmarkAndOptimizerV11");
+            if (currentMod is null)
             {
                 Runtime.Log("warning: pause-menu button could not resolve BenchmarkAndOptimizerV11 in ModRepository");
                 return;
             }
 
-            var root = ResolveOptionsRoot(_optionsBox);
+            var root = ResolveOptionsRoot(settingsOptionsBox);
             if (root is null)
             {
                 Runtime.Log("warning: pause-menu root not found; optimizer menu entry not added");
@@ -472,7 +472,7 @@ public sealed class OptimizerMenuService(
 
             var button = root.AddMenuButton(
                 "Benchmark & Optimizer",
-                onClick: () => modSettingsBox.Open(_mod),
+                onClick: () => modSettingsBox.Open(currentMod),
                 name: "BenchmarkAndOptimizerButton",
                 stretched: true);
 
@@ -487,14 +487,14 @@ public sealed class OptimizerMenuService(
         }
     }
 
-    private static VisualElement? ResolveOptionsRoot(GameOptionsBox optionsBox)
+    static VisualElement? ResolveOptionsRoot(GameOptionsBox optionsBox)
     {
         try
         {
             var type = optionsBox.GetType();
 
             var field = type.GetField(
-                "_root",
+                "rootElement",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
             if (field?.GetValue(optionsBox) is VisualElement fieldRoot)
@@ -506,7 +506,7 @@ public sealed class OptimizerMenuService(
                 "Root",
                 BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
                 ?? type.GetProperty(
-                    "_root",
+                    "rootElement",
                     BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
 
             return property?.GetValue(optionsBox) as VisualElement;
@@ -518,7 +518,7 @@ public sealed class OptimizerMenuService(
         }
     }
 
-    private static Mod? ResolveMod(ModRepository repository, string id)
+    static Mod? ResolveMod(ModRepository repository, string id)
     {
         try
         {
