@@ -22,7 +22,9 @@ Mod source code and donation: https://github.com/datvm/TimberbornMods (feel free
 
 # Versioning
 
-Do not bump a mod's `manifest.json` version, `ChangeLog.txt` version heading, or `IModUpdateNotifier2` version / loc key unless the user explicitly asks to bump the version. Fold new notes into the current version entry.
+For **tharbad08-owned Timberborn mods**, use `<game version>.<build number>` (for example, `1.1.104` for game 1.1, build 104). Increment the build number every time we produce an updated installable DLL/ZIP, including test builds and hotfixes. Keep the game-version prefix unchanged until targeting a different game version. Synchronize the manifest `Version`, project `AssemblyVersion`/`FileVersion` (append `.0` where required), release/build artifact naming, and any intentionally versioned user-facing strings. Do not bump for documentation-only commits or rebuilds of unchanged code. Never reuse a version for a materially different delivered binary.
+
+When contributing to **another mod author's upstream project**, defer to that maintainer's own `Agents.MD`/`AGENTS.md`. In particular, datvm's upstream guide says not to bump a manifest/ChangeLog/update notifier version unless the user explicitly asks; preserve that rule for upstream PRs unless the maintainer approves otherwise. Do not edit `ChangeLog.txt` unless requested.
 
 # Code Style
 
