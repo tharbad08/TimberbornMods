@@ -446,27 +446,26 @@ public sealed class OptimizerMenuService(
     {
         try
         {
-            currentMod = ResolveMod(repository, "BenchmarkAndOptimizerV11");
+            currentMod = ResolveMod(repository, "BenchmarkAndOptimizerV11Port");
             if (currentMod is null)
             {
-                Runtime.Log("warning: pause-menu button could not resolve BenchmarkAndOptimizerV11 in ModRepository");
+                Runtime.Log("warning: pause-menu button could not resolve BenchmarkAndOptimizerV11Port in ModRepository");
                 return;
             }
 
-            var root = ResolveOptionsRoot(settingsOptionsBox);
-            if (root is null)
-            {
-                Runtime.Log("warning: pause-menu root not found; optimizer menu entry not added");
-                return;
-            }
-
-            // Match MapTransformer exactly: use Unity's non-generic Q extension and
-            // support both names used by different Timberborn menu revisions.
+            // Follow the original BenchmarkMenu and MapTransformer implementations.
+            // GameOptionsBox._root is a publicized Timberborn field; it must not be
+            // renamed as part of local code-style cleanup.
+            var root = settingsOptionsBox._root;
             var resumeButton = root.Q("ResumeButton") ?? root.Q("Resume");
-
             if (resumeButton is null)
             {
                 Runtime.Log("warning: pause-menu ResumeButton/Resume not found; optimizer menu entry not added");
+                return;
+            }
+
+            if (root.Q("BenchmarkAndOptimizerButton") is not null)
+            {
                 return;
             }
 
@@ -481,40 +480,8 @@ public sealed class OptimizerMenuService(
         }
         catch (Exception ex)
         {
-            // The menu shortcut is convenience-only. It must never be allowed to
-            // abort singleton loading or corrupt a save if Timberborn/TimberUi UI APIs change.
+            // The shortcut must not abort scene loading if a dependency changes.
             Runtime.Log($"warning: pause-menu integration disabled after {ex.GetType().Name}: {ex.Message}");
-        }
-    }
-
-    static VisualElement? ResolveOptionsRoot(GameOptionsBox optionsBox)
-    {
-        try
-        {
-            var type = optionsBox.GetType();
-
-            var field = type.GetField(
-                "rootElement",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
-            if (field?.GetValue(optionsBox) is VisualElement fieldRoot)
-            {
-                return fieldRoot;
-            }
-
-            var property = type.GetProperty(
-                "Root",
-                BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
-                ?? type.GetProperty(
-                    "rootElement",
-                    BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-
-            return property?.GetValue(optionsBox) as VisualElement;
-        }
-        catch (Exception ex)
-        {
-            Runtime.Log($"warning: failed to resolve pause-menu root: {ex.GetType().Name}: {ex.Message}");
-            return null;
         }
     }
 
