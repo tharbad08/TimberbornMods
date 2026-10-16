@@ -10,6 +10,17 @@ This branch is based on `chatgpt/BenchmarkAndOptimizerV11Port`. It retains only 
 
 The benchmark's existing dispatcher instrumentation calls original tick/update methods via validated reflected dispatch. In-game verification is still required even if GitHub Actions succeeds.
 
+## Running alongside TB Optimizer
+
+**Keep both mods enabled.** This port profiles the running colony, while [TB Optimizer](https://github.com/tharbad08/TB-Optimizer) applies stable, individually configurable fixes. Their mod IDs, DLL assembly names and Harmony owners are distinct.
+
+- During benchmarking, this mod temporarily disables **only its own optional update-interval throttles**. TB Optimizer remains active and the CSV measures the actual optimized configuration, not a vanilla baseline.
+- At the default interval **1**, Benchmark & Optimizer does not throttle game systems between benchmark sessions. Avoid increasing intervals when comparing the stable TB Optimizer fixes: skipped callbacks can change simulation behavior.
+- The mods intentionally share observation/optimization targets without sharing ownership: `SingletonLifecycleService.UpdateSingletons` (benchmark dispatcher and frame/GC sampling versus TB Optimizer's optional GC postfix), and TimberPhysics `PhysicsSimulator.UpdateSingleton` (read-only split timings versus TB Optimizer's optional catch-up limiter).
+- This has been checked at the source and Harmony patch-owner level. Full in-game concurrency and benchmark results still require validation.
+
+
+
 ## System discovery, filter, and future improvements
 
 **Existing behavior**
