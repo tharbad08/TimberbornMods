@@ -16,5 +16,10 @@
       "Id": "TimberUi",
       "MinimumVersion": "11.0.1"
     }
+  ],
+  "OptionalMods": [
+    {
+      "Id": "TBOptimizer"
+    }
   ]
 }
