@@ -1274,31 +1274,15 @@ static class Runtime
             }
 
             loaded.Normalize();
-            var soilGcReliefApplied = ApplySoilContaminationGcReliefMigration(loaded);
-            var soilGcReliefV2Applied = ApplySoilContaminationGcReliefV2Migration(loaded);
             var protectedValuesCorrected = NormalizeProtectedIntervals(loaded);
             currentSettings = loaded;
             settingsGeneration++;
             configWriteUtc = writeUtc;
 
-            if (protectedValuesCorrected || soilGcReliefApplied || soilGcReliefV2Applied)
+            if (protectedValuesCorrected)
             {
                 SaveSettings(currentSettings);
-                if (protectedValuesCorrected)
-                {
-                    Log("protected optimizer intervals found in config and reset to 1");
-                }
-                if (soilGcReliefApplied)
-                {
-                    Log("v1.1.62 soil-GC relief migration applied as compatibility step");
-                }
-                if (soilGcReliefV2Applied)
-                {
-                    var interval = GetInterval("Timberborn.SoilContaminationSystem.SoilContaminationService");
-                    Log(
-                        $"v1.1.63 soil-GC relief migration finalized: SoilContaminationService interval={interval}; " +
-                        "only the v1.1.62 default value of 2 is upgraded to 4; other user-selected values are preserved");
-                }
+                Log("protected optimizer intervals found in config and reset to 1");
             }
 
             if (!BenchmarkActive)
@@ -1311,64 +1295,6 @@ static class Runtime
         {
             Log($"warning: config reload failed: {ex.GetType().Name}: {ex.Message}; keeping previous settings");
         }
-    }
-
-    static bool ApplySoilContaminationGcReliefMigration(Settings settings)
-    {
-        if (settings.SoilContaminationGcReliefApplied)
-        {
-            return false;
-        }
-
-        const string fullName = "Timberborn.SoilContaminationSystem.SoilContaminationService";
-        const string shortName = "SoilContaminationService";
-
-        var existingKey = settings.Intervals.Keys.FirstOrDefault(key =>
-            string.Equals(key, fullName, StringComparison.Ordinal) ||
-            string.Equals(key, shortName, StringComparison.Ordinal) ||
-            key.EndsWith("." + shortName, StringComparison.Ordinal));
-
-        if (existingKey is null)
-        {
-            settings.Intervals[fullName] = 2;
-        }
-        else if (settings.Intervals[existingKey] <= 1)
-        {
-            settings.Intervals[existingKey] = 2;
-        }
-
-        settings.SoilContaminationGcReliefApplied = true;
-        return true;
-    }
-
-    static bool ApplySoilContaminationGcReliefV2Migration(Settings settings)
-    {
-        if (settings.SoilContaminationGcReliefV2Applied)
-        {
-            return false;
-        }
-
-        const string fullName = "Timberborn.SoilContaminationSystem.SoilContaminationService";
-        const string shortName = "SoilContaminationService";
-
-        var existingKey = settings.Intervals.Keys.FirstOrDefault(key =>
-            string.Equals(key, fullName, StringComparison.Ordinal) ||
-            string.Equals(key, shortName, StringComparison.Ordinal) ||
-            key.EndsWith("." + shortName, StringComparison.Ordinal));
-
-        // Upgrade only the v1.1.62 default. A user who already changed the value
-        // explicitly keeps that value.
-        if (existingKey is not null && settings.Intervals[existingKey] == 2)
-        {
-            settings.Intervals[existingKey] = 4;
-        }
-        else if (existingKey is null && !settings.SoilContaminationGcReliefApplied)
-        {
-            settings.Intervals[fullName] = 4;
-        }
-
-        settings.SoilContaminationGcReliefV2Applied = true;
-        return true;
     }
 
     static void SaveSettings(Settings settings)
@@ -1456,12 +1382,6 @@ sealed class Settings
     public int ReloadSeconds { get; set; } = 2;
     public bool WriteDiscoveredTypes { get; set; } = true;
 
-    // One-time v1.1.62 migration.
-    public bool SoilContaminationGcReliefApplied { get; set; } = false;
-
-    // One-time v1.1.63 migration. Only upgrades the previous default of 2 -> 4.
-    public bool SoilContaminationGcReliefV2Applied { get; set; } = false;
-
     // 0 = disabled. Set e.g. 30 to benchmark the first 30 real seconds after loading a game.
     public int BenchmarkSeconds { get; set; } = 0;
 
@@ -1475,17 +1395,8 @@ sealed class Settings
         DefaultInterval = 1,
         ReloadSeconds = 2,
         WriteDiscoveredTypes = true,
-        SoilContaminationGcReliefApplied = true,
-        SoilContaminationGcReliefV2Applied = true,
         BenchmarkSeconds = 0,
         Intervals = new Dictionary<string, int>(StringComparer.Ordinal)
-        {
-            ["Timberborn.SoilContaminationSystem.SoilContaminationService"] = 4,
-            ["ConstructionSite"] = 1,
-            ["ResourceCountingService"] = 1,
-            ["BehaviorManager"] = 1,
-            ["NavMeshObserver"] = 1
-        }
     };
 
     public void Normalize()
