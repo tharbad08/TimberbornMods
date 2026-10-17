@@ -1,0 +1,59 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>BenchmarkAndOptimizerV11</AssemblyName>
+    <RootNamespace>BenchmarkAndOptimizerV11</RootNamespace>
+    <AssemblyVersion>1.1.108.0</AssemblyVersion>
+    <FileVersion>1.1.108.0</FileVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="References/**/*.cs" />
+    <Compile Remove="Stubs/**/*.cs" />
+  </ItemGroup>
+  <PropertyGroup>
+    <UseRealReferences Condition="'$(UseRealReferences)' == ''">false</UseRealReferences>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Lib.Harmony" Version="2.4.1" />
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+  </ItemGroup>
+  <!-- The public workflow runs smoke compilation against stub projects. -->
+  <ItemGroup Condition="'$(UseRealReferences)' != 'true'">
+    <ProjectReference Include="Stubs/Timberborn.Modding/Timberborn.Modding.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/Timberborn.ModManagerScene/Timberborn.ModManagerScene.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/Timberborn.SettingsSystem/Timberborn.SettingsSystem.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/Timberborn.Options/Timberborn.Options.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/Timberborn.OptionsGame/Timberborn.OptionsGame.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/Timberborn.SingletonSystem/Timberborn.SingletonSystem.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/Bindito.Core/Bindito.Core.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/UnityEngine.UIElementsModule/UnityEngine.UIElementsModule.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/Timberborn.CoreUI/Timberborn.CoreUI.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/ModSettings.Core/ModSettings.Core.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/ModSettings.CoreUI/ModSettings.CoreUI.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/ModSettings.CommonUI/ModSettings.CommonUI.Stub.csproj" Private="false" />
+    <ProjectReference Include="Stubs/TimberUi/TimberUi.Stub.csproj" Private="false" />
+  </ItemGroup>
+  <!-- The PRIVATE TB-dlls workflow builds releases using real assemblies. -->
+  <ItemGroup Condition="'$(UseRealReferences)' == 'true'">
+    <Reference Include="$(RealRefsRoot)/game/Timberborn.*.dll"
+               Exclude="$(RealRefsRoot)/game/Timberborn.OptionsGame.dll" Private="false" />
+    <Reference Include="$(RealRefsRoot)/game/Bindito.*.dll" Private="false" />
+    <Reference Include="$(RealRefsRoot)/game/UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="$(RealRefsRoot)/game/System.Collections.Immutable.dll" Private="false" />
+    <Reference Include="$(RealRefsRoot)/modsettings/ModSettings.*.dll" Private="false" />
+    <Reference Include="$(RealRefsRoot)/publicized/TimberUi.dll" Private="false" />
+    <Reference Include="$(RealRefsRoot)/unity/UnityEngine.UIElementsModule.dll" Private="false" />
+    <Reference Include="$(RealRefsRoot)/publicized/Timberborn.OptionsGame.dll" Private="false" />
+  </ItemGroup>
+  <Target Name="RequireRealReferences" BeforeTargets="ResolveReferences" Condition="'$(UseRealReferences)' == 'true'">
+    <Error Condition="'$(RealRefsRoot)' == ''" Text="RealRefsRoot is required with UseRealReferences=true." />
+    <Error Condition="!Exists('$(RealRefsRoot)/game/Timberborn.Modding.dll')" Text="Real Timberborn.Modding.dll missing." />
+    <Error Condition="!Exists('$(RealRefsRoot)/modsettings/ModSettings.Core.dll')" Text="Real ModSettings.Core.dll missing." />
+    <Error Condition="!Exists('$(RealRefsRoot)/timberui/TimberUi.dll')" Text="Real TimberUi.dll missing." />
+    <Error Condition="!Exists('$(RealRefsRoot)/publicized/Timberborn.OptionsGame.dll')" Text="Publicized GameOptionsBox assembly missing." />
+    <Error Condition="!Exists('$(RealRefsRoot)/unity/UnityEngine.UIElementsModule.dll')" Text="UnityEngine.UIElementsModule.dll missing." />
+  </Target>
+</Project>
