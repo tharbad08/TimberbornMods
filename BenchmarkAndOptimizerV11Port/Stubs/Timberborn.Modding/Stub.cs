@@ -7,8 +7,8 @@ namespace Timberborn.Modding
 
     public class Mod
     {
-        public ModManifest Manifest { get; } = new();
-        public ModDirectory ModDirectory { get; } = new();
+        public ModManifest Manifest { get; } = new ModManifest();
+        public ModDirectory ModDirectory { get; } = new ModDirectory();
     }
 
     public class ModManifest
