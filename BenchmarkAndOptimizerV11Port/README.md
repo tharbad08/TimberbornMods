@@ -8,7 +8,7 @@ This branch is based on `chatgpt/BenchmarkAndOptimizerV11Port`. It retains only 
 - **No gameplay optimizations** (BFR, EBR, preview, fauna, soil, SuperCursor, TimberPhysics catch-up/collider, GC tweaks), no startup guard or save serialization patches.
 - **No always-on tracing:** profiler hooks are installed only during a requested benchmark. The full historical diagnostic and experiment sources remain on the original parent branch; heavy legacy profilers are not installed in the isolated branch.
 
-The benchmark no longer reads or replays private dispatcher lists. During a requested session, it attaches observational Harmony timings to discovered tick/update implementations and leaves Timberborn's dispatchers in control. Ordinary profiling callbacks do not use reflected invocation. Harmony method discovery and patch installation still rely on runtime metadata to support arbitrary third-party systems; the pause-menu root also currently requires access to a non-public game field. In-game verification remains required even after GitHub Actions succeeds.
+The benchmark no longer reads or replays private dispatcher lists. During a requested session, it attaches observational Harmony timings to discovered tick/update implementations and leaves Timberborn's dispatchers in control. Ordinary profiling callbacks do not use reflected invocation. Harmony method discovery and patch installation still rely on runtime metadata to support arbitrary third-party systems; the pause-menu root uses direct access to the non-public game field, following ModdableWeathers and an assembly-level runtime access-check exemption. In-game verification remains required even after GitHub Actions succeeds.
 
 ## Running alongside TB Optimizer
 
