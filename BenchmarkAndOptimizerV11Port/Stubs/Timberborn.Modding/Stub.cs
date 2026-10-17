@@ -17,8 +17,10 @@ namespace Timberborn.Modding
         public string Name { get; } = "";
     }
 
-    public class ModDirectory
+    // The actual Timberborn.Modding.ModDirectory is a value type, not a class.
+    // This matters to Mod.get_ModDirectory's CLR method signature.
+    public struct ModDirectory
     {
-        public string OriginPath { get; } = "";
+        public string OriginPath => "";
     }
 }
