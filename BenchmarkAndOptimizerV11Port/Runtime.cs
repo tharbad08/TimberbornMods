@@ -1,6 +1,4 @@
-using System.Collections;
 using System.Reflection;
-using System.Linq.Expressions;
 using System.Runtime.CompilerServices;
 using Newtonsoft.Json;
 using HarmonyLib;
@@ -12,9 +10,6 @@ static class Runtime
 {
     static readonly object Sync = new();
     static readonly ConditionalWeakTable<object, CounterState> Counters = new();
-    static readonly ConditionalWeakTable<object, OwnerDispatchPlans> DispatchPlans = new();
-    static readonly Dictionary<string, ItemAdapter> AdapterCache = new(StringComparer.Ordinal);
-    static readonly HashSet<string> UnsupportedAdapters = new(StringComparer.Ordinal);
     static readonly HashSet<string> LoggedWarnings = new(StringComparer.Ordinal);
     static readonly Dictionary<string, BenchStat> BenchStats = new(StringComparer.Ordinal);
     static readonly HashSet<string> Discovered = new(StringComparer.Ordinal);
@@ -27,7 +22,6 @@ static class Runtime
     static readonly HashSet<MethodBase> DirectPatchedMethods = [];
     static Harmony? harmonyInstance;
     static bool benchmarkRunning;
-    static int settingsGeneration;
 
     static Settings currentSettings = new();
     static DateTime nextReloadUtc = DateTime.MinValue;
@@ -149,7 +143,6 @@ static class Runtime
     public static void SetEnabled(bool value)
     {
         currentSettings.Enabled = value;
-        settingsGeneration++;
         SaveSettings(currentSettings);
         RefreshDirectThrottlePatches();
     }
@@ -157,7 +150,6 @@ static class Runtime
     public static void SetDefaultInterval(int value)
     {
         currentSettings.DefaultInterval = Math.Clamp(value, 1, 1000);
-        settingsGeneration++;
         SaveSettings(currentSettings);
         RefreshDirectThrottlePatches();
     }
@@ -190,8 +182,7 @@ static class Runtime
         if (IsProtected(typeName))
         {
             currentSettings.Intervals[key] = 1;
-            settingsGeneration++;
-            SaveSettings(currentSettings);
+                SaveSettings(currentSettings);
             RefreshDirectThrottlePatches();
             LogOnce($"protected-set:{ShortTypeName(typeName)}",
                 $"protected system {typeName} is permanently pinned to interval=1");
@@ -200,7 +191,6 @@ static class Runtime
 
         value = Math.Clamp(value, 1, 1000);
         currentSettings.Intervals[key] = value;
-        settingsGeneration++;
         SaveSettings(currentSettings);
         RefreshDirectThrottlePatches();
     }
@@ -209,7 +199,6 @@ static class Runtime
     {
         currentSettings.DefaultInterval = 1;
         currentSettings.Intervals.Clear();
-        settingsGeneration++;
         SaveSettings(currentSettings);
         RefreshDirectThrottlePatches();
         Log("all optimizer intervals reset to vanilla (1)");
@@ -219,12 +208,14 @@ static class Runtime
     {
         if (BenchmarkActive) { return; }
         lock (Sync) BenchStats.Clear();
-        // Benchmark dispatcher is observational at protected vanilla cadence:
-        // the per-class interval shortcut is suppressed during benchmarks.
+        // Profile actual implementation methods. Never replace a game's dispatcher:
+        // the original tick ordering, exception handling, and TB Optimizer patches remain intact.
+        ReloadConfig(force: true);
         RemoveDirectThrottlePatches();
+        DiscoverLoadedOptimizableTypes();
         if (harmonyInstance is not null)
         {
-            DispatcherPatcher.Patch(harmonyInstance);
+            BenchmarkMethodPatcher.Patch(harmonyInstance, DiscoveredTypes.Values.ToArray());
             TimberPhysicsBenchmarkPatcher.Patch(harmonyInstance);
             FrameProfileSampler.Patch(harmonyInstance);
         }
@@ -533,289 +524,6 @@ static class Runtime
         }
 
         Log($"direct throttle discovery complete: {DiscoveredTypes.Count} type(s)");
-    }
-
-    public static bool TryDispatch(
-        object owner,
-        string listFieldName,
-        string? actualFieldName,
-        string invokeMethodName,
-        string? enabledMemberName = null)
-    {
-        ReloadConfig(force: false);
-
-        if (!currentSettings.Enabled)
-        {
-            return true;
-        }
-
-        if (!BenchmarkActive && !HasActiveThrottles())
-        {
-            return true;
-        }
-
-        try
-        {
-            var listField = AccessTools.Field(owner.GetType(), listFieldName);
-            if (listField?.GetValue(owner) is not IList list)
-            {
-                LogOnce(
-                    $"missing-list:{owner.GetType().FullName}:{listFieldName}",
-                    $"warning: {owner.GetType().FullName}.{listFieldName} unavailable; falling back to vanilla");
-                return true;
-            }
-
-            var plan = GetDispatchPlan(
-                owner,
-                list,
-                listFieldName,
-                actualFieldName,
-                invokeMethodName,
-                enabledMemberName);
-
-            if (plan is null)
-            {
-                return true;
-            }
-
-            // Critical fast path: an active optimization elsewhere must not force this
-            // owner through our dispatcher. Let Timberborn run it natively unless this
-            // exact owner contains a throttled type.
-            if (!BenchmarkActive && !plan.HasThrottle)
-            {
-                return true;
-            }
-
-            foreach (var entry in plan.Entries)
-            {
-                if (!entry.Adapter.IsEnabled(entry.Item))
-                {
-                    continue;
-                }
-
-                // Benchmarking must never skip a tick, even if an old config
-                // contains non-vanilla intervals.
-                if (!BenchmarkActive && !ShouldRun(entry.Actual))
-                {
-                    continue;
-                }
-
-                if (BenchmarkActive)
-                {
-                    var started = System.Diagnostics.Stopwatch.GetTimestamp();
-                    entry.Adapter.Invoke(entry.Item);
-                    RecordBenchmark(entry.ActualType, System.Diagnostics.Stopwatch.GetTimestamp() - started);
-                }
-                else
-                {
-                    entry.Adapter.Invoke(entry.Item);
-                }
-            }
-
-            FinishBenchmarkIfNeeded();
-            return false;
-        }
-        catch (TargetInvocationException ex) when (ex.InnerException is not null)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-            throw;
-        }
-        catch (Exception ex)
-        {
-            LogOnce(
-                $"dispatch:{owner.GetType().FullName}:{listFieldName}:{ex.GetType().FullName}:{ex.Message}",
-                $"warning: optimizer dispatch failed before safe completion: {ex.GetType().Name}: {ex.Message}; falling back to vanilla");
-            return true;
-        }
-    }
-
-    static DispatchPlan? GetDispatchPlan(
-        object owner,
-        IList list,
-        string listFieldName,
-        string? actualFieldName,
-        string invokeMethodName,
-        string? enabledMemberName)
-    {
-        var ownerPlans = DispatchPlans.GetOrCreateValue(owner);
-
-        lock (ownerPlans.Gate)
-        {
-            if (ownerPlans.Plans.TryGetValue(listFieldName, out var cached)
-                && cached.SettingsGeneration == settingsGeneration
-                && cached.ListCount == list.Count
-                && SameBoundaryItems(cached, list))
-            {
-                return cached;
-            }
-
-            var entries = new List<DispatchEntry>(list.Count);
-            var hasThrottle = false;
-
-            for (var i = 0; i < list.Count; i++)
-            {
-                var item = list[i];
-                if (item is null)
-                {
-                    continue;
-                }
-
-                var adapter = GetAdapter(
-                    item.GetType(),
-                    actualFieldName,
-                    invokeMethodName,
-                    enabledMemberName);
-
-                if (adapter is null)
-                {
-                    LogOnce(
-                        $"unsupported:{item.GetType().FullName}:{listFieldName}",
-                        $"warning: cannot adapt {item.GetType().FullName} in {listFieldName}; falling back to vanilla");
-                    return null;
-                }
-
-                var actual = adapter.GetActual(item);
-                if (actual is null)
-                {
-                    continue;
-                }
-
-                var actualType = actual.GetType();
-                Discover(actualType);
-
-                if (GetInterval(actualType) > 1)
-                {
-                    hasThrottle = true;
-                }
-
-                entries.Add(new DispatchEntry(item, adapter, actual, actualType));
-            }
-
-            var plan = new DispatchPlan(
-                settingsGeneration,
-                list.Count,
-                list.Count > 0 ? list[0] : null,
-                list.Count > 1 ? list[list.Count - 1] : null,
-                hasThrottle,
-                entries.ToArray());
-
-            ownerPlans.Plans[listFieldName] = plan;
-            return plan;
-        }
-    }
-
-    static bool SameBoundaryItems(DispatchPlan plan, IList list)
-    {
-        if (list.Count == 0)
-        {
-            return true;
-        }
-
-        if (!ReferenceEquals(plan.FirstItem, list[0]))
-        {
-            return false;
-        }
-
-        return list.Count <= 1 || ReferenceEquals(plan.LastItem, list[list.Count - 1]);
-    }
-
-    static ItemAdapter? GetAdapter(Type itemType, string? actualFieldName, string methodName, string? enabledMemberName)
-    {
-        var cacheKey = $"{itemType.AssemblyQualifiedName}|{actualFieldName}|{methodName}|{enabledMemberName}";
-
-        lock (Sync)
-        {
-            if (AdapterCache.TryGetValue(cacheKey, out var cached))
-            {
-                return cached;
-            }
-
-            if (UnsupportedAdapters.Contains(cacheKey))
-            {
-                return null;
-            }
-
-            FieldInfo? actualField = null;
-            if (!string.IsNullOrEmpty(actualFieldName))
-            {
-                actualField = AccessTools.Field(itemType, actualFieldName);
-                if (actualField is null)
-                {
-                    UnsupportedAdapters.Add(cacheKey);
-                    return null;
-                }
-            }
-
-            var method = AccessTools.Method(itemType, methodName, Type.EmptyTypes);
-            if (method is null && methodName == "StartAndTick")
-            {
-                method = AccessTools.Method(itemType, "Tick", Type.EmptyTypes);
-            }
-
-            if (method is null)
-            {
-                UnsupportedAdapters.Add(cacheKey);
-                return null;
-            }
-
-            try
-            {
-                var itemParameter = Expression.Parameter(typeof(object), "item");
-                var typedItem = Expression.Convert(itemParameter, itemType);
-
-                Func<object, object?> getActual;
-                if (actualField is not null)
-                {
-                    var fieldAccess = Expression.Field(typedItem, actualField);
-                    var boxedField = Expression.Convert(fieldAccess, typeof(object));
-                    getActual = Expression.Lambda<Func<object, object?>>(boxedField, itemParameter).Compile();
-                }
-                else
-                {
-                    getActual = item => item;
-                }
-
-                var call = Expression.Call(typedItem, method);
-                var invoke = Expression.Lambda<Action<object>>(call, itemParameter).Compile();
-
-                Func<object, bool> enabled = _ => true;
-                if (!string.IsNullOrEmpty(enabledMemberName))
-                {
-                    var prop = AccessTools.Property(itemType, enabledMemberName);
-                    var field = AccessTools.Field(itemType, enabledMemberName);
-                    Expression? enabledExpression = null;
-
-                    if (prop?.PropertyType == typeof(bool) && prop.GetMethod is not null)
-                    {
-                        enabledExpression = Expression.Property(typedItem, prop);
-                    }
-                    else if (field?.FieldType == typeof(bool))
-                    {
-                        enabledExpression = Expression.Field(typedItem, field);
-                    }
-
-                    if (enabledExpression is not null)
-                    {
-                        enabled = Expression.Lambda<Func<object, bool>>(enabledExpression, itemParameter).Compile();
-                    }
-                }
-
-                var adapter = new ItemAdapter(
-                    actualFieldName,
-                    enabledMemberName,
-                    getActual,
-                    invoke,
-                    enabled);
-
-                AdapterCache[cacheKey] = adapter;
-                return adapter;
-            }
-            catch
-            {
-                UnsupportedAdapters.Add(cacheKey);
-                return null;
-            }
-        }
     }
 
     static bool ShouldRun(object actual)
@@ -1143,7 +851,7 @@ static class Runtime
     static bool BenchmarkActive =>
         benchmarkRunning && !benchmarkCompleted;
 
-    static void RecordBenchmark(Type type, long elapsedTicks)
+    internal static void RecordBenchmark(Type type, long elapsedTicks)
     {
         var name = type.FullName ?? type.Name;
 
@@ -1188,7 +896,7 @@ static class Runtime
 
     }
 
-    static void FinishBenchmarkIfNeeded()
+    public static void FinishBenchmarkIfNeeded()
     {
         if (!BenchmarkActive)
         {
@@ -1228,7 +936,7 @@ static class Runtime
         if (harmonyInstance is not null)
         {
             TimberPhysicsBenchmarkPatcher.Unpatch(harmonyInstance);
-            DispatcherPatcher.Unpatch(harmonyInstance);
+            BenchmarkMethodPatcher.Unpatch(harmonyInstance);
 
             // Return to the configured interval patches after observational CSV benchmarking.
             RefreshDirectThrottlePatches();
@@ -1276,8 +984,7 @@ static class Runtime
             loaded.Normalize();
             var protectedValuesCorrected = NormalizeProtectedIntervals(loaded);
             currentSettings = loaded;
-            settingsGeneration++;
-            configWriteUtc = writeUtc;
+                configWriteUtc = writeUtc;
 
             if (protectedValuesCorrected)
             {
@@ -1335,26 +1042,6 @@ static class Runtime
         public int Remaining;
     }
 
-    sealed class OwnerDispatchPlans
-    {
-        public object Gate { get; } = new();
-        public Dictionary<string, DispatchPlan> Plans { get; } = new(StringComparer.Ordinal);
-    }
-
-    sealed record DispatchPlan(
-        int SettingsGeneration,
-        int ListCount,
-        object? FirstItem,
-        object? LastItem,
-        bool HasThrottle,
-        DispatchEntry[] Entries);
-
-    sealed record DispatchEntry(
-        object Item,
-        ItemAdapter Adapter,
-        object Actual,
-        Type ActualType);
-
     sealed class BenchStat
     {
         public string Origin = "UNKNOWN";
@@ -1364,16 +1051,7 @@ static class Runtime
         public long MaxTicks;
     }
 
-    sealed record ItemAdapter(
-        string? ActualFieldName,
-        string? EnabledMemberName,
-        Func<object, object?> ActualGetter,
-        Action<object> Invoke,
-        Func<object, bool> Enabled)
-    {
-        public object? GetActual(object item) => ActualGetter(item);
-        public bool IsEnabled(object item) => Enabled(item);
-    }
+
 }
 sealed class Settings
 {
