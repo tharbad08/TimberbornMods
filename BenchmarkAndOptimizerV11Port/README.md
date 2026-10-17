@@ -8,7 +8,7 @@ This branch is based on `chatgpt/BenchmarkAndOptimizerV11Port`. It retains only 
 - **No gameplay optimizations** (BFR, EBR, preview, fauna, soil, SuperCursor, TimberPhysics catch-up/collider, GC tweaks), no startup guard or save serialization patches.
 - **No always-on tracing:** profiler hooks are installed only during a requested benchmark. The full historical diagnostic and experiment sources remain on the original parent branch; heavy legacy profilers are not installed in the isolated branch.
 
-The benchmark's existing dispatcher instrumentation calls original tick/update methods via validated reflected dispatch. In-game verification is still required even if GitHub Actions succeeds.
+The benchmark no longer reads or replays private dispatcher lists. During a requested session, it attaches observational Harmony timings to discovered tick/update implementations and leaves Timberborn's dispatchers in control. Ordinary profiling callbacks do not use reflected invocation. Harmony method discovery and patch installation still rely on runtime metadata to support arbitrary third-party systems; the pause-menu root also currently requires access to a non-public game field. In-game verification remains required even after GitHub Actions succeeds.
 
 ## Running alongside TB Optimizer
 
@@ -25,7 +25,7 @@ The benchmark's existing dispatcher instrumentation calls original tick/update m
 
 **Existing behavior**
 - A startup scan discovers eligible tick/update systems from assemblies that are already loaded.
-- The **120-second benchmark** can discover additional systems encountered during gameplay. Currently it is the way to exercise runtime discovery as well as collect timing data; the initial startup scan alone might not provide the full list.
+- The **120-second benchmark** samples systems discovered before it starts. Mods loaded afterward require a new discovery and benchmark session. Currently it is the way to exercise runtime discovery as well as collect timing data; the initial startup scan alone might not provide the full list.
 - **Neither startup scanning nor benchmarking guarantees discovering every system:** a mod may load later, or its code may never run during the benchmark.
 - The Update Intervals panel includes a filter for system name and mod origin. Its crash fix changes visibility of existing rows instead of destroying and recreating controls during each keystroke.
 - **Refresh detected systems** refreshes the displayed in-memory list; it does not independently perform a new scan. `optimizer-v11.json` stores interval configuration, **not** a complete catalog of detected systems.
