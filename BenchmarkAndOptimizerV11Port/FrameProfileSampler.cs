@@ -43,6 +43,8 @@ static class FrameProfileSampler
     static void AfterUpdate()
     {
         if (!isPatched || !Runtime.IsBenchmarking) { return; }
+        Runtime.FinishBenchmarkIfNeeded();
+        if (!Runtime.IsBenchmarking) { return; }
         ++frames;
         if (frames - lastSampleFrame < 10) { return; }
         var now = Stopwatch.GetTimestamp();
