@@ -329,51 +329,19 @@ public sealed class OptimizerOriginRegistryService(
     {
         try
         {
-            var enabledMods = repository.GetType()
-                .GetProperty("EnabledMods", BindingFlags.Public | BindingFlags.Instance)
-                ?.GetValue(repository) as System.Collections.IEnumerable;
-
-            if (enabledMods is null)
-            {
-                Runtime.Log("warning: origin registry could not read ModRepository.EnabledMods");
-                return;
-            }
-
             var registeredMods = 0;
             var registeredAssemblies = 0;
 
-            foreach (var mod in enabledMods)
+            foreach (var mod in repository.EnabledMods)
             {
                 if (mod is null)
                 {
                     continue;
                 }
 
-                var modType = mod.GetType();
-                var manifest = modType
-                    .GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)
-                    ?.GetValue(mod);
-                var modDirectory = modType
-                    .GetProperty("ModDirectory", BindingFlags.Public | BindingFlags.Instance)
-                    ?.GetValue(mod);
-
-                if (manifest is null || modDirectory is null)
-                {
-                    continue;
-                }
-
-                var manifestType = manifest.GetType();
-                var name = manifestType
-                    .GetProperty("Name", BindingFlags.Public | BindingFlags.Instance)
-                    ?.GetValue(manifest) as string;
-                var id = manifestType
-                    .GetProperty("Id", BindingFlags.Public | BindingFlags.Instance)
-                    ?.GetValue(manifest) as string;
-
-                var directoryType = modDirectory.GetType();
-                var originPath = directoryType
-                    .GetProperty("OriginPath", BindingFlags.Public | BindingFlags.Instance)
-                    ?.GetValue(modDirectory) as string;
+                var name = mod.Manifest.Name;
+                var id = mod.Manifest.Id;
+                var originPath = mod.ModDirectory.OriginPath;
 
                 if (string.IsNullOrWhiteSpace(originPath) || !Directory.Exists(originPath))
                 {
@@ -512,45 +480,7 @@ public sealed class OptimizerMenuService(
         return null;
     }
 
-    static Mod? ResolveMod(ModRepository repository, string id)
-    {
-        try
-        {
-            var enabledMods = repository.GetType()
-                .GetProperty("EnabledMods", BindingFlags.Public | BindingFlags.Instance)
-                ?.GetValue(repository) as System.Collections.IEnumerable;
+    static Mod? ResolveMod(ModRepository repository, string id) =>
+        repository.EnabledMods.FirstOrDefault(mod => mod.Manifest.Id == id);
 
-            if (enabledMods is null)
-            {
-                return null;
-            }
-
-            foreach (var item in enabledMods)
-            {
-                if (item is not Mod mod)
-                {
-                    continue;
-                }
-
-                var manifest = item.GetType()
-                    .GetProperty("Manifest", BindingFlags.Public | BindingFlags.Instance)
-                    ?.GetValue(item);
-
-                var manifestId = manifest?.GetType()
-                    .GetProperty("Id", BindingFlags.Public | BindingFlags.Instance)
-                    ?.GetValue(manifest) as string;
-
-                if (manifestId == id)
-                {
-                    return mod;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Runtime.Log($"warning: failed to resolve optimizer mod for pause-menu button: {ex.GetType().Name}: {ex.Message}");
-        }
-
-        return null;
-    }
 }
