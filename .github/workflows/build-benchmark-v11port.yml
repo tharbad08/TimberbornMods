@@ -34,6 +34,6 @@ jobs:
           test -s "$ROOT/version-1.1/Scripts/BenchmarkAndOptimizerV11.dll"
       - uses: actions/upload-artifact@v4
         with:
-          name: BenchmarkAndOptimizerV11Port_1.1.104
+          name: BenchmarkAndOptimizerV11Port_1.1.105
           path: ${{ runner.temp }}/timberborn-artifact/
           if-no-files-found: error
