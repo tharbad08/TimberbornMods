@@ -44,7 +44,7 @@
     <Reference Include="$(RealRefsRoot)/game/UnityEngine.CoreModule.dll" Private="false" />
     <Reference Include="$(RealRefsRoot)/game/System.Collections.Immutable.dll" Private="false" />
     <Reference Include="$(RealRefsRoot)/modsettings/ModSettings.*.dll" Private="false" />
-    <Reference Include="$(RealRefsRoot)/timberui/TimberUi.dll" Private="false" />
+    <Reference Include="$(RealRefsRoot)/publicized/TimberUi.dll" Private="false" />
     <Reference Include="$(RealRefsRoot)/unity/UnityEngine.UIElementsModule.dll" Private="false" />
     <Reference Include="$(RealRefsRoot)/publicized/Timberborn.OptionsGame.dll" Private="false" />
   </ItemGroup>
