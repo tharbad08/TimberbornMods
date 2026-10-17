@@ -4,6 +4,6 @@ namespace Timberborn.OptionsGame
 {
     public class GameOptionsBox : IOptionsBox
     {
-        VisualElement _root = new VisualElement();
+        public VisualElement _root = new VisualElement();
     }
 }
