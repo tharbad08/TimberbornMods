@@ -16,7 +16,7 @@ namespace BenchmarkAndOptimizerV11;
 [Context("MainMenu")]
 public sealed class MainMenuConfig : Configurator
 {
-    public override void Configure()
+    protected override void Configure()
     {
         this.BindSingleton<OptimizerSettingsOwner>()
             .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
@@ -27,7 +27,7 @@ public sealed class MainMenuConfig : Configurator
 [Context("Game")]
 public sealed class GameConfig : Configurator
 {
-    public override void Configure()
+    protected override void Configure()
     {
         this.BindSingleton<OptimizerSettingsOwner>()
             .MultiBindSingleton<IModSettingElementFactory, OptimizerSettingElementFactory>()
@@ -43,7 +43,7 @@ public sealed class OptimizerSettingsOwner(
     ModRepository repository
 ) : ModSettingsOwner(settings, registry, repository)
 {
-    public override string ModId => "BenchmarkAndOptimizerV11Port";
+    protected override string ModId => "BenchmarkAndOptimizerV11Port";
     public override ModSettingsContext ChangeableOn => ModSettingsContext.All;
 
     public OptimizerUiSetting CsvBenchmark { get; } = new();
