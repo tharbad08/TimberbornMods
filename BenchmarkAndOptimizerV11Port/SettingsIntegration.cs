@@ -1,4 +1,3 @@
-using System.Reflection;
 using Bindito.Core;
 using ModSettings.CommonUI;
 using ModSettings.Core;
@@ -421,10 +420,10 @@ public sealed class OptimizerMenuService(
                 return;
             }
 
-            // The game stores the menu root in a non-public member. Our build
-            // stubs are not publicized game assemblies, so access it via reflection
-            // rather than emitting a direct field access that fails at runtime.
-            var root = ResolveOptionsRoot(settingsOptionsBox);
+            // Follow ModdableWeathers' publicized-game-assembly approach. The
+            // assembly-level IgnoresAccessChecksTo annotation permits access to
+            // this exact game-private field without runtime reflection.
+            var root = settingsOptionsBox._root;
             if (root is null)
             {
                 Runtime.Log("warning: pause-menu root not available; optimizer menu entry not added");
@@ -457,27 +456,6 @@ public sealed class OptimizerMenuService(
             // The shortcut must not abort scene loading if a dependency changes.
             Runtime.Log($"warning: pause-menu integration disabled after {ex.GetType().Name}: {ex.Message}");
         }
-    }
-
-    static VisualElement? ResolveOptionsRoot(GameOptionsBox optionsBox)
-    {
-        // "_root" is an existing Timberborn field name, not a new member of our
-        // mod. Keep its exact spelling, and never rely on publicized assembly
-        // access in a mod compiled against stand-in reference assemblies.
-        for (Type? type = optionsBox.GetType(); type is not null; type = type.BaseType)
-        {
-            var rootField = type.GetField(
-                "_root",
-                BindingFlags.Instance | BindingFlags.Public |
-                BindingFlags.NonPublic | BindingFlags.DeclaredOnly);
-
-            if (rootField is not null)
-            {
-                return rootField.GetValue(optionsBox) as VisualElement;
-            }
-        }
-
-        return null;
     }
 
     static Mod? ResolveMod(ModRepository repository, string id) =>
