@@ -1,6 +1,7 @@
 // Source follows GameAssemblyPublicizer/IgnoresAccessChecks.cs used by ModdableWeathers.
 // Compile against publicized game members and preserve the runtime field's original name.
 [assembly: System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute("Timberborn.OptionsGame")]
+[assembly: System.Runtime.CompilerServices.IgnoresAccessChecksToAttribute("TimberUi")]
 
 namespace System.Runtime.CompilerServices
 {
