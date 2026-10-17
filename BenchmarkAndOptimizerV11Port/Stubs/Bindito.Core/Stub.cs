@@ -8,7 +8,7 @@ namespace Bindito.Core
         T GetInstance<T>();
     }
 
-    public abstract class Configurator { public virtual void Configure() { } }
+    public abstract class Configurator { protected virtual void Configure() { } }
 }
 namespace Bindito.Core.Internal
 {
